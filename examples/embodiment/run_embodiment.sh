@@ -3,11 +3,15 @@
 export EMBODIED_PATH="$( cd "$(dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export REPO_PATH=$(dirname $(dirname "$EMBODIED_PATH"))
 export SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
+export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-${REPO_PATH}/.cache/openpi}"
+export HF_HOME="${HF_HOME:-${REPO_PATH}/.hf_home}"
 
-export MUJOCO_GL=${MUJOCO_GL:-"egl"}
+export MUJOCO_GL=${MUJOCO_GL:-"egl"} # osmesa
 export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
 export ROBOTWIN_PATH=${ROBOTWIN_PATH:-"/path/to/RoboTwin"}
-export PYTHONPATH=${REPO_PATH}:${ROBOTWIN_PATH}:$PYTHONPATH
+# Put the LIBERO package directory first so the editable install is not shadowed
+# by the namespace package at ${REPO_PATH}/libero.
+export PYTHONPATH="${REPO_PATH}/libero/libero:${REPO_PATH}:${ROBOTWIN_PATH}:$PYTHONPATH"
 
 # Base path to the BEHAVIOR dataset, which is the BEHAVIOR-1k repo's dataset folder
 # Only required when running the behavior experiment.
@@ -51,10 +55,16 @@ fi
 
 echo "Using ROBOT_PLATFORM=$ROBOT_PLATFORM"
 
-echo "Using Python at $(which python)"
+# Prefer the repository's local venv if it exists.
+if [ -x "${REPO_PATH}/.venv/bin/python" ]; then
+    PYTHON_CMD="${REPO_PATH}/.venv/bin/python"
+else
+    PYTHON_CMD="$(which python)"
+fi
+echo "Using Python at ${PYTHON_CMD}"
 LOG_DIR="${REPO_PATH}/logs/$(date +'%Y%m%d-%H:%M:%S')-${CONFIG_NAME}" #/$(date +'%Y%m%d-%H:%M:%S')"
 MEGA_LOG_FILE="${LOG_DIR}/run_embodiment.log"
 mkdir -p "${LOG_DIR}"
-CMD="python ${SRC_FILE} --config-path ${EMBODIED_PATH}/config/ --config-name ${CONFIG_NAME} runner.logger.log_path=${LOG_DIR}"
+CMD="${PYTHON_CMD} ${SRC_FILE} --config-path ${EMBODIED_PATH}/config/ --config-name ${CONFIG_NAME} runner.logger.log_path=${LOG_DIR}"
 echo ${CMD} > ${MEGA_LOG_FILE}
 ${CMD} 2>&1 | tee -a ${MEGA_LOG_FILE}

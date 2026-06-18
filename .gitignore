@@ -21,3 +21,10 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+.uv_cache
+.sapien
+.maniskill
+.hf_home
+.cache/*
+checkpoints
+libero

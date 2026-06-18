@@ -95,75 +95,97 @@ def _worker(
                 _encode_obs(obs[k], buffer[k])
         return None
 
+    import traceback
+    import sys
+    import os
+
     parent.close()
-    env = env_fn_wrapper.data()
     try:
-        while True:
+        env = env_fn_wrapper.data()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        sys.stderr.flush()
+        p.close()
+        return
+
+    while True:
+        try:
             try:
                 cmd, data = p.recv()
             except EOFError:  # the pipe has been closed
                 p.close()
                 break
-            if cmd == "step":
-                env_return = env.step(data)
-                if obs_bufs is not None:
-                    _encode_obs(env_return[0], obs_bufs)
-                    env_return = (None, *env_return[1:])
-                p.send(env_return)
-            elif cmd == "reset":
-                retval = env.reset(**data)
-                reset_returns_info = (
-                    isinstance(retval, (tuple, list))
-                    and len(retval) == 2
-                    and isinstance(retval[1], dict)
-                )
-                if reset_returns_info:
-                    obs, info = retval
-                else:
-                    obs = retval
-                if obs_bufs is not None:
-                    _encode_obs(obs, obs_bufs)
-                    obs = None
-                if reset_returns_info:
-                    p.send((obs, info))
-                else:
+            try:
+                if cmd == "step":
+                    env_return = env.step(data)
+                    if obs_bufs is not None:
+                        _encode_obs(env_return[0], obs_bufs)
+                        env_return = (None, *env_return[1:])
+                    p.send(env_return)
+                elif cmd == "reset":
+                    retval = env.reset(**data)
+                    reset_returns_info = (
+                        isinstance(retval, (tuple, list))
+                        and len(retval) == 2
+                        and isinstance(retval[1], dict)
+                    )
+                    if reset_returns_info:
+                        obs, info = retval
+                    else:
+                        obs = retval
+                    if obs_bufs is not None:
+                        _encode_obs(obs, obs_bufs)
+                        obs = None
+                    if reset_returns_info:
+                        p.send((obs, info))
+                    else:
+                        p.send(obs)
+                elif cmd == "close":
+                    p.send(env.close())
+                    p.close()
+                    break
+                elif cmd == "render":
+                    p.send(env.render(**data) if hasattr(env, "render") else None)
+                elif cmd == "seed":
+                    if hasattr(env, "seed"):
+                        p.send(env.seed(data))
+                    else:
+                        env.reset(seed=data)
+                        p.send(None)
+                elif cmd == "getattr":
+                    p.send(getattr(env, data) if hasattr(env, data) else None)
+                elif cmd == "setattr":
+                    setattr(env.unwrapped, data["key"], data["value"])
+                elif cmd == "check_success":
+                    p.send(env.check_success())
+                elif cmd == "get_segmentation_of_interest":
+                    p.send(env.get_segmentation_of_interest(data))
+                elif cmd == "get_sim_state":
+                    p.send(env.get_sim_state())
+                elif cmd == "set_init_state":
+                    obs = env.set_init_state(data)
                     p.send(obs)
-            elif cmd == "close":
-                p.send(env.close())
-                p.close()
-                break
-            elif cmd == "render":
-                p.send(env.render(**data) if hasattr(env, "render") else None)
-            elif cmd == "seed":
-                if hasattr(env, "seed"):
-                    p.send(env.seed(data))
-                else:
-                    env.reset(seed=data)
+                elif cmd == "reconfigure":
+                    env.close()
+                    seed = data.pop("seed")
+                    env = OffScreenRenderEnv(**data)
+                    env.seed(seed)
                     p.send(None)
-            elif cmd == "getattr":
-                p.send(getattr(env, data) if hasattr(env, data) else None)
-            elif cmd == "setattr":
-                setattr(env.unwrapped, data["key"], data["value"])
-            elif cmd == "check_success":
-                p.send(env.check_success())
-            elif cmd == "get_segmentation_of_interest":
-                p.send(env.get_segmentation_of_interest(data))
-            elif cmd == "get_sim_state":
-                p.send(env.get_sim_state())
-            elif cmd == "set_init_state":
-                obs = env.set_init_state(data)
-                p.send(obs)
-            elif cmd == "reconfigure":
-                env.close()
-                seed = data.pop("seed")
-                env = OffScreenRenderEnv(**data)
-                env.seed(seed)
-                p.send(None)
-            else:
+                else:
+                    p.close()
+                    raise NotImplementedError
+            except Exception:
+                print(
+                    f"[SubprocessWorker pid={os.getpid()}] FATAL running cmd={cmd!r}:",
+                    file=sys.stderr,
+                )
+                traceback.print_exc(file=sys.stderr)
+                sys.stderr.flush()
                 p.close()
-                raise NotImplementedError
-    except KeyboardInterrupt:
-        p.close()
+                return
+        except KeyboardInterrupt:
+            p.close()
+            return
 
 
 class ReconfigureSubprocEnvWorker(SubprocEnvWorker):

@@ -38,7 +38,7 @@ env:
 
   eval:
     rollout_epoch: 1
-    total_num_envs: 500
+    total_num_envs: 320
     auto_reset: True
     ignore_terminations: True
     max_episode_steps: 320
