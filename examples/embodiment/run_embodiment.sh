@@ -6,8 +6,8 @@ export SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
 export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-${REPO_PATH}/.cache/openpi}"
 export HF_HOME="${HF_HOME:-${REPO_PATH}/.hf_home}"
 
-export MUJOCO_GL=${MUJOCO_GL:-"egl"} # osmesa
-export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
+export MUJOCO_GL=${MUJOCO_GL:-"osmesa"} # osmesa cpu render
+export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"osmesa"}
 export ROBOTWIN_PATH=${ROBOTWIN_PATH:-"/path/to/RoboTwin"}
 # Put the LIBERO package directory first so the editable install is not shadowed
 # by the namespace package at ${REPO_PATH}/libero.
