@@ -59,6 +59,38 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Detect NVIDIA Blackwell (RTX 50 series / sm_120) GPUs and automatically upgrade
+# PyTorch to a compatible version. This only applies when the user has not
+# explicitly requested a torch version or CUDA backend.
+_detect_blackwell_gpu() {
+    if command -v nvidia-smi &>/dev/null; then
+        local gpu_name
+        gpu_name=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)
+        case "$gpu_name" in
+            *"RTX 50"*|*"RTX 5090"*|*"RTX 5080"*|*"RTX 5070"*|*"RTX 5060"*)
+                echo "1"
+                return
+                ;;
+        esac
+    fi
+    echo "0"
+}
+
+_TORCH_VERSION_EXPLICIT=0
+_TORCH_BACKEND_EXPLICIT=0
+for arg in "${INSTALL_ARGS[@]}"; do
+    [[ "$arg" == "--torch" ]] && _TORCH_VERSION_EXPLICIT=1
+    [[ "$arg" == "--platform" ]] && _TORCH_BACKEND_EXPLICIT=1
+done
+
+if [[ "$_TORCH_VERSION_EXPLICIT" -eq 0 && "$_TORCH_BACKEND_EXPLICIT" -eq 0 && -z "${UV_TORCH_BACKEND:-}" ]]; then
+    if [[ "$(_detect_blackwell_gpu)" == "1" ]]; then
+        echo "[install_local.sh] Detected NVIDIA Blackwell GPU (RTX 50 series). Auto-selecting torch 2.7.0 + cu128."
+        INSTALL_ARGS+=("--torch" "2.7.0")
+        export UV_TORCH_BACKEND="cu128"
+    fi
+fi
+
 # Create cache directories upfront. Do NOT create asset directories like
 # .maniskill/ here: install.sh's download_assets.sh uses the *existence* of
 # those directories as a skip signal, so an empty directory would incorrectly
