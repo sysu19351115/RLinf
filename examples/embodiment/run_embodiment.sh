@@ -6,8 +6,8 @@ export SRC_FILE="${EMBODIED_PATH}/train_embodied_agent.py"
 export OPENPI_DATA_HOME="${OPENPI_DATA_HOME:-${REPO_PATH}/.cache/openpi}"
 export HF_HOME="${HF_HOME:-${REPO_PATH}/.hf_home}"
 
-export MUJOCO_GL=${MUJOCO_GL:-"osmesa"} # osmesa cpu render
-export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"osmesa"}
+export MUJOCO_GL=${MUJOCO_GL:-"egl"} # osmesa cpu render
+export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
 export ROBOTWIN_PATH=${ROBOTWIN_PATH:-"/path/to/RoboTwin"}
 # Put the LIBERO package directory first so the editable install is not shadowed
 # by the namespace package at ${REPO_PATH}/libero.
@@ -41,17 +41,27 @@ ROBOT_PLATFORM=${2:-${ROBOT_PLATFORM:-"LIBERO"}}
 
 export ROBOT_PLATFORM
 
-# Libero variant: standard, pro, plus
-export LIBERO_TYPE=${LIBERO_TYPE:-"standard"}
-if [ "$LIBERO_TYPE" == "pro" ]; then
-    export LIBERO_PERTURBATION="all"  # all,swap,object,lan
-    echo "Evaluation Mode: LIBERO-PRO | Perturbation: $LIBERO_PERTURBATION"
-elif [ "$LIBERO_TYPE" == "plus" ]; then
-    export LIBERO_SUFFIX="all"
-    echo "Evaluation Mode: LIBERO-PLUS | Suffix: $LIBERO_SUFFIX"
-else
-    echo "Evaluation Mode: Standard LIBERO"
-fi
+case "$ROBOT_PLATFORM" in
+    LIBERO)
+        # Libero variant: standard, pro, plus
+        export LIBERO_TYPE=${LIBERO_TYPE:-"standard"}
+        if [ "$LIBERO_TYPE" == "pro" ]; then
+            export LIBERO_PERTURBATION="all"  # all,swap,object,lan
+            echo "Mode: LIBERO-PRO | Perturbation: $LIBERO_PERTURBATION"
+        elif [ "$LIBERO_TYPE" == "plus" ]; then
+            export LIBERO_SUFFIX="all"
+            echo "Mode: LIBERO-PLUS | Suffix: $LIBERO_SUFFIX"
+        else
+            echo "Mode: Standard LIBERO"
+        fi
+        ;;
+    ALOHA)
+        # gym_aloha MuJoCo simulation — same render backend as LIBERO
+        echo "Mode: ALOHA (gym_aloha simulation)"
+        ;;
+    *)
+        ;;
+esac
 
 echo "Using ROBOT_PLATFORM=$ROBOT_PLATFORM"
 

@@ -812,6 +812,7 @@ class EnvWorker(Worker):
                     self.env_list[i], RecordVideo
                 ):
                     self.env_list[i].flush_video()
+                    self.env_list[i].wait_for_video_saves()
                 self.env_list[i].update_reset_state_ids()
         elif mode == "eval":
             for i in range(self.stage_num):
@@ -819,6 +820,7 @@ class EnvWorker(Worker):
                     self.eval_env_list[i], RecordVideo
                 ):
                     self.eval_env_list[i].flush_video()
+                    self.eval_env_list[i].wait_for_video_saves()
                 if not self.cfg.env.eval.auto_reset:
                     self.eval_env_list[i].update_reset_state_ids()
 

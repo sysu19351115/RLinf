@@ -82,6 +82,40 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 # Force the virtual environment to be created in the current directory.
 INSTALL_ARGS+=("--venv" "$WORK_DIR/.venv")
 
+# Extract --env from the collected args so we know which asset checks apply.
+_ENV_NAME=""
+for ((_i=0; _i<${#INSTALL_ARGS[@]}; _i++)); do
+    if [[ "${INSTALL_ARGS[$_i]}" == "--env" ]] && (( _i+1 < ${#INSTALL_ARGS[@]} )); then
+        _ENV_NAME="${INSTALL_ARGS[$_i+1]}"
+        break
+    fi
+done
+
+# Environments that pull large asset directories.  When _ENV_NAME is empty (not
+# specified) we fall back to checking everything — the original behaviour.
+_NEED_LIBERO=("libero" "maniskill_libero" "liberopro" "liberoplus")
+_NEED_MANISKILL=("maniskill_libero")
+_NEED_SAPIEN=("maniskill_libero")
+
+_array_contains() {
+    local needle="$1"; shift
+    local item
+    for item in "$@"; do [[ "$item" == "$needle" ]] && return 0; done
+    return 1
+}
+
+# Verify that the env-specific Python package is actually importable inside the
+# venv.  Lightweight envs that don't pull large asset directories rely on this
+# check instead of the asset checks above.
+_env_package_installed() {
+    case "$_ENV_NAME" in
+        gym_aloha)
+            "$WORK_DIR/.venv/bin/python" -c "import gym_aloha" 2>/dev/null || return 1
+            ;;
+    esac
+    return 0
+}
+
 echo "[install_local.sh] ============================================================"
 echo "[install_local.sh] Running RLinf installer with local download paths:"
 echo "[install_local.sh]   DOWNLOAD_DIR      = $DOWNLOAD_DIR"
@@ -114,13 +148,21 @@ looks_complete() {
     active_mm=$("$WORK_DIR/.venv/bin/python" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null) || return 1
     [[ "$active_mm" == "3.11" ]] || return 1
     # LIBERO must actually be cloned (not just an empty directory).
-    [[ -f "$WORK_DIR/libero/setup.py" || -f "$WORK_DIR/libero/pyproject.toml" ]] || return 1
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_LIBERO[@]}"; then
+        [[ -f "$WORK_DIR/libero/setup.py" || -f "$WORK_DIR/libero/pyproject.toml" ]] || return 1
+    fi
     # ManiSkill assets must be non-empty.
-    dir_has_content "$WORK_DIR/.maniskill" || return 1
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_MANISKILL[@]}"; then
+        dir_has_content "$WORK_DIR/.maniskill" || return 1
+    fi
     # SAPIEN PhysX libraries must be non-empty.
-    dir_has_content "$WORK_DIR/.sapien/physx/105.1-physx-5.3.1.patch0" || return 1
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_SAPIEN[@]}"; then
+        dir_has_content "$WORK_DIR/.sapien/physx/105.1-physx-5.3.1.patch0" || return 1
+    fi
     # OpenPI tokenizer marker. Note: hf download puts it under big_vision/.
     [[ -f "$WORK_DIR/.cache/openpi/big_vision/paligemma_tokenizer.model" ]] || return 1
+    # Lightweight envs: verify the env-specific package is importable.
+    _env_package_installed || return 1
     return 0
 }
 
@@ -131,9 +173,15 @@ if looks_complete; then
     echo "[install_local.sh]   Virtual env:     $WORK_DIR/.venv"
     echo "[install_local.sh]   uv cache:        $WORK_DIR/.uv_cache"
     echo "[install_local.sh]   HF cache:        $WORK_DIR/.hf_home"
-    echo "[install_local.sh]   LIBERO:          $WORK_DIR/libero"
-    echo "[install_local.sh]   ManiSkill:       $WORK_DIR/.maniskill"
-    echo "[install_local.sh]   SAPIEN PhysX:    $WORK_DIR/.sapien"
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_LIBERO[@]}"; then
+        echo "[install_local.sh]   LIBERO:          $WORK_DIR/libero"
+    fi
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_MANISKILL[@]}"; then
+        echo "[install_local.sh]   ManiSkill:       $WORK_DIR/.maniskill"
+    fi
+    if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_SAPIEN[@]}"; then
+        echo "[install_local.sh]   SAPIEN PhysX:    $WORK_DIR/.sapien"
+    fi
     echo "[install_local.sh]   OpenPI tokenizer: $WORK_DIR/.cache/openpi"
     exit 0
 fi
@@ -144,7 +192,13 @@ echo "[install_local.sh] Installation finished. Local assets located at:"
 echo "[install_local.sh]   Virtual env:     $WORK_DIR/.venv"
 echo "[install_local.sh]   uv cache:        $WORK_DIR/.uv_cache"
 echo "[install_local.sh]   HF cache:        $WORK_DIR/.hf_home"
-echo "[install_local.sh]   LIBERO:          $WORK_DIR/libero"
-echo "[install_local.sh]   ManiSkill:       $WORK_DIR/.maniskill"
-echo "[install_local.sh]   SAPIEN PhysX:    $WORK_DIR/.sapien"
+if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_LIBERO[@]}"; then
+    echo "[install_local.sh]   LIBERO:          $WORK_DIR/libero"
+fi
+if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_MANISKILL[@]}"; then
+    echo "[install_local.sh]   ManiSkill:       $WORK_DIR/.maniskill"
+fi
+if [[ -z "$_ENV_NAME" ]] || _array_contains "$_ENV_NAME" "${_NEED_SAPIEN[@]}"; then
+    echo "[install_local.sh]   SAPIEN PhysX:    $WORK_DIR/.sapien"
+fi
 echo "[install_local.sh]   OpenPI tokenizer: $WORK_DIR/.cache/openpi"

@@ -35,6 +35,13 @@ setup_sim_env() {
     export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 }
 
+setup_gym_aloha_env() {
+    # gym_aloha (ALOHA simulation) uses egl rendering by default; fall back to user override if provided.
+    export MUJOCO_GL="${MUJOCO_GL:-egl}"
+    export PYOPENGL_PLATFORM="${PYOPENGL_PLATFORM:-egl}"
+    export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+}
+
 infer_benchmark() {
     local config_name="$1"
     case "${config_name}" in
@@ -47,6 +54,7 @@ infer_benchmark() {
         calvin_*|calvin-* ) echo "calvin" ;;
         roboverse_*|roboverse-* ) echo "roboverse" ;;
         polaris_*|polaris-* ) echo "polaris" ;;
+        gym_aloha_*|gym-aloha-* ) echo "gym_aloha" ;;
         * )
             echo "unknown"
             ;;
@@ -168,11 +176,13 @@ if [ ! -f "${CONFIG_PATH}/${CONFIG_NAME}.yaml" ]; then
     echo "Config not found under evaluations/${BENCHMARK}, fallback to ${CONFIG_PATH}"
 fi
 
-if [ "${BENCHMARK}" != "realworld" ]; then
+if [ "${BENCHMARK}" = "gym_aloha" ]; then
+    export ROBOT_PLATFORM="ALOHA"
+    setup_gym_aloha_env
+    echo "Evaluation Mode: ALOHA (gym_aloha simulation)"
+    echo "Using benchmark=${BENCHMARK}, config=${CONFIG_NAME}, ROBOT_PLATFORM=${ROBOT_PLATFORM}"
+elif [ "${BENCHMARK}" = "libero" ]; then
     setup_sim_env
-fi
-
-if [ "${BENCHMARK}" = "libero" ]; then
     export ROBOT_PLATFORM="${ROBOT_PLATFORM:-LIBERO}"
     export LIBERO_TYPE="${LIBERO_TYPE:-standard}"
     if [ "${LIBERO_TYPE}" = "pro" ]; then
@@ -185,6 +195,9 @@ if [ "${BENCHMARK}" = "libero" ]; then
         echo "Evaluation Mode: Standard LIBERO"
     fi
     echo "Using benchmark=${BENCHMARK}, config=${CONFIG_NAME}, ROBOT_PLATFORM=${ROBOT_PLATFORM}"
+elif [ "${BENCHMARK}" != "realworld" ]; then
+    setup_sim_env
+    echo "Using benchmark=${BENCHMARK}, config=${CONFIG_NAME}"
 else
     echo "Using benchmark=${BENCHMARK}, config=${CONFIG_NAME}"
 fi

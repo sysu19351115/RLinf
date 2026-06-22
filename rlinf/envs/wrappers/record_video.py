@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import concurrent.futures
 import numbers
 import os
 import warnings
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Optional
 
 import gymnasium as gym
@@ -476,8 +477,29 @@ class RecordVideo(gym.Wrapper):
         """Remove finished futures to avoid unbounded growth."""
         self._save_futures = [f for f in self._save_futures if not f.done()]
 
+    def wait_for_video_saves(self, timeout: Optional[float] = None) -> None:
+        """Wait for all pending async video writes to finish.
+
+        Args:
+            timeout: Maximum time to wait in seconds. ``None`` waits until all
+                futures complete.
+        """
+        if not self._save_futures:
+            return
+
+        done, not_done = wait(
+            self._save_futures, timeout=timeout, return_when=concurrent.futures.ALL_COMPLETED
+        )
+        for future in done:
+            try:
+                future.result()
+            except Exception as exc:
+                warnings.warn(f"Video save task raised an exception: {exc}")
+        self._save_futures = list(not_done)
+
     def close(self):
         """Wait for pending video writes before closing."""
+        self.wait_for_video_saves()
         self._executor.shutdown(wait=True)
         self._save_futures = []
         return super().close()

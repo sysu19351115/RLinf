@@ -34,6 +34,7 @@ class SupportedEnvType(Enum):
     ROBOVERSE = "roboverse"
     D4RL = "d4rl"
     POLARIS = "polaris"
+    GYM_ALOHA = "gym_aloha"
 
 
 def get_env_cls(env_type: str, env_cfg=None):
@@ -138,5 +139,9 @@ def get_env_cls(env_type: str, env_cfg=None):
         from rlinf.envs.polaris.polaris_env import PolarisEnv
 
         return PolarisEnv
+    elif env_type == SupportedEnvType.GYM_ALOHA:
+        from rlinf.envs.gym_aloha.gym_aloha_env import GymAlohaEnv
+
+        return GymAlohaEnv
     else:
         raise NotImplementedError(f"Environment type {env_type} not implemented")

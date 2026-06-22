@@ -68,6 +68,9 @@ from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.robotwin_aloha_dataconfig import (
     LeRobotAlohaDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.gym_aloha_dataconfig import (
+    GymAlohaDataConfig,
+)
 
 _CONFIGS = [
     TrainConfig(
@@ -312,6 +315,20 @@ _CONFIGS = [
         ),
         pytorch_weight_path="checkpoints/torch/pi05_base",
         num_train_steps=20_000,
+    ),
+    TrainConfig(
+        name="pi0_gym_aloha",
+        model=pi0_config.Pi0Config(discrete_state_input=False),
+        data=GymAlohaDataConfig(
+            repo_id="lerobot/aloha_sim_transfer_cube_human",
+            base_config=DataConfig(prompt_from_task=True),
+            assets=AssetsConfig(
+                assets_dir="checkpoints/pi0_aloha_sim_pytorch/assets"
+            ),
+            extra_delta_transform=False,
+        ),
+        num_train_steps=20_000,
+        pytorch_weight_path="checkpoints/pi0_aloha_sim_pytorch",
     ),
     TrainConfig(
         name="pi0_behavior",
