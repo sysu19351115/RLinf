@@ -155,17 +155,50 @@ gim_arm = [
     "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "imageio[ffmpeg]",
 ]
+rebot = [
+    # reBotArm_control_py SDK: included in the RLinf repo at
+    #   rlinf/envs/realworld/rebot/reBotArm_control_py/
+    # The controller auto-adds the SDK directory to sys.path at
+    # runtime; only the SDK's Python dependencies are declared here.
+    "motorbridge>=0.1.7",
+    "pin>=3.9.0",
+    "numpy>=1.23.4,<2.0",
+    "pyyaml>=6.0",
+    "meshcat>=0.3.2",
+    "matplotlib>=3.10.0",
+    "scipy",
+    "gymnasium",
+    "opencv-python",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "imageio[ffmpeg]",
+]
+realworld-env = [
+    "gymnasium>=0.29.1",
+    "gym",
+    "opencv-python-headless",
+    "scipy",
+    "imageio[ffmpeg]",
+    "Pillow",
+    "psutil",
+    "filelock",
+    "typing-extensions",
+    "packaging",
+]
 
 [tool.uv]
 prerelease = "allow"
 conflicts = [
-    [
+    [  # Compute backends (mutually exclusive)
+      { extra = "embodied" },
       { extra = "agentic-sglang" },
       { extra = "agentic-vllm" },
-      { extra = "embodied" },
+      { extra = "realworld-env" },
+    ],
+    [  # Real-world robot targets (mutually exclusive, combinable with a compute backend)
       { extra = "franka" },
       { extra = "xsquare_turtle2" },
-      { extra = "gim_arm" }
+      { extra = "gim_arm" },
+      { extra = "rebot" },
     ],
 ]
 override-dependencies = [

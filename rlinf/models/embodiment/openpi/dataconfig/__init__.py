@@ -62,6 +62,9 @@ from rlinf.models.embodiment.openpi.dataconfig.polaris_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.realworld_dataconfig import (
     LeRobotRealworldDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.rebot_dataconfig import (
+    RebotDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.robocasa_dataconfig import (
     LeRobotRobocasaDataConfig,
 )
@@ -329,6 +332,19 @@ _CONFIGS = [
         ),
         num_train_steps=20_000,
         pytorch_weight_path="checkpoints/pi0_aloha_sim_pytorch",
+    ),
+    TrainConfig(
+        name="pi05_rebot",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=15, action_dim=7),
+        data=RebotDataConfig(
+            repo_id="",
+            assets=AssetsConfig(
+                assets_dir="checkpoints/pi05_rebot_insertion_pytorch",
+                asset_id="rebot_lerobot_data",
+            ),
+        ),
+        num_train_steps=20_000,
+        pytorch_weight_path="checkpoints/pi05_rebot_insertion_pytorch",
     ),
     TrainConfig(
         name="pi0_behavior",

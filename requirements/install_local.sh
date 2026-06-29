@@ -45,11 +45,16 @@ fi
 
 # Parse our own flags first. Anything else is passed through to install.sh.
 FORCE=0
+CPU_ONLY=0
 INSTALL_ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force)
             FORCE=1
+            shift
+            ;;
+        --cpu-only)
+            CPU_ONLY=1
             shift
             ;;
         *)
@@ -62,6 +67,7 @@ done
 # Detect NVIDIA Blackwell (RTX 50 series / sm_120) GPUs and automatically upgrade
 # PyTorch to a compatible version. This only applies when the user has not
 # explicitly requested a torch version or CUDA backend.
+# Skip this logic in --cpu-only mode since we want CPU torch, not CUDA torch.
 _detect_blackwell_gpu() {
     if command -v nvidia-smi &>/dev/null; then
         local gpu_name
@@ -75,6 +81,8 @@ _detect_blackwell_gpu() {
     fi
     echo "0"
 }
+
+if [[ "$CPU_ONLY" -ne 1 ]]; then
 
 _TORCH_VERSION_EXPLICIT=0
 _TORCH_BACKEND_EXPLICIT=0
@@ -90,6 +98,8 @@ if [[ "$_TORCH_VERSION_EXPLICIT" -eq 0 && "$_TORCH_BACKEND_EXPLICIT" -eq 0 && -z
         export UV_TORCH_BACKEND="cu128"
     fi
 fi
+
+fi  # end CPU_ONLY guard
 
 # Create cache directories upfront. Do NOT create asset directories like
 # .maniskill/ here: install.sh's download_assets.sh uses the *existence* of
@@ -113,6 +123,7 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 
 # Force the virtual environment to be created in the current directory.
 INSTALL_ARGS+=("--venv" "$WORK_DIR/.venv")
+VENV_DIR="${VENV_DIR:-$WORK_DIR/.venv}"
 
 # Extract --env from the collected args so we know which asset checks apply.
 _ENV_NAME=""
@@ -197,6 +208,65 @@ looks_complete() {
     _env_package_installed || return 1
     return 0
 }
+
+# ======================= CPU-ONLY MODE =======================
+# In --cpu-only mode we perform a minimal installation suitable for a
+# real-world robot control node (env worker only).  This bypasses
+# install.sh entirely: no training deps, no model packages, no GPU
+# libraries, and torch is resolved as a CPU build.
+if [[ "$CPU_ONLY" -eq 1 ]]; then
+    echo "[install_local.sh] ============================================================"
+    echo "[install_local.sh] CPU-only mode: installing minimal env-worker dependencies."
+    echo "[install_local.sh] ============================================================"
+
+    if [[ -z "$_ENV_NAME" ]]; then
+        echo "[install_local.sh] WARNING: --env not specified. Only core + realworld-env"
+        echo "[install_local.sh]          deps will be installed. If your robot requires"
+        echo "[install_local.sh]          additional packages (e.g. --env franka), pass it."
+    fi
+
+    export UV_TORCH_BACKEND="${UV_TORCH_BACKEND:-cpu}"
+
+    if ! command -v uv &>/dev/null; then
+        if command -v pip &>/dev/null && pip install uv 2>/dev/null; then
+            :
+        else
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            export PATH="$HOME/.local/bin:$PATH"
+        fi
+    fi
+
+    uv venv "$VENV_DIR" --python "$PYTHON_VERSION"
+    # shellcheck disable=SC1090
+    source "$VENV_DIR/bin/activate"
+
+    _EXTRA_ARGS=("--extra" "realworld-env")
+    if [[ -n "$_ENV_NAME" ]]; then
+        case "$_ENV_NAME" in
+            franka)           _EXTRA_ARGS+=("--extra" "franka") ;;
+            xsquare_turtle2)  _EXTRA_ARGS+=("--extra" "xsquare_turtle2") ;;
+            gim_arm)          _EXTRA_ARGS+=("--extra" "gim_arm") ;;
+            rebot)            _EXTRA_ARGS+=("--extra" "rebot") ;;
+            frankasim)        _EXTRA_ARGS+=("--extra" "franka") ;;
+            *)
+                echo "[install_local.sh] WARNING: --env '$_ENV_NAME' has no matching"
+                echo "[install_local.sh]          pyproject.toml extra; skipping." >&2
+                ;;
+        esac
+    fi
+
+    echo "[install_local.sh] Running: uv sync ${_EXTRA_ARGS[*]} --no-install-project"
+    uv sync "${_EXTRA_ARGS[@]}" --no-install-project
+
+    echo "[install_local.sh] Installing RLinf (editable) into the venv..."
+    pip install -e .
+
+    echo "[install_local.sh] ============================================================"
+    echo "[install_local.sh] CPU-only installation complete."
+    echo "[install_local.sh]   Venv:   source $VENV_DIR/bin/activate"
+    echo "[install_local.sh] ============================================================"
+    exit 0
+fi
 
 if looks_complete; then
     echo "[install_local.sh] Existing installation looks complete. Skipping full install.sh to avoid"

@@ -7,9 +7,22 @@
 | 训练节点 | 云端 GPU 服务器（无公网 IP） |
 | 真机节点 | 本地，RTX 5090（RLinf 当前依赖不支持 Blackwell） |
 | 网络 | 飞连 VPN，本地→云端可达（单向），云端→本地不可达 |
+| 防火墙 | 云端仅对本地开放端口 **12345**（自定义） |
 | 模型 | 已有 SFT 后的 pi0.5 checkpoint |
 | 任务 | 自定义真机任务，无目标位姿，由奖励模型判断成功/失败 |
 | 真机控制 | Python 实现的自定义控制接口 |
+
+### 端口需求：1 个端口
+
+| 方向 | 端口 | 用途 |
+|------|------|------|
+| 本地 → 云端 | **12345** | Ray GCS（集群控制服务）——本地 worker 连接、任务调度、心跳、Channel 通信全部走此端口的 gRPC 长连接 |
+
+不需要开放其他端口的原因：
+- Dashboard（8265）关闭：`--include-dashboard=false`
+- RLinf Channel 通信：走已建立的 gRPC 连接，不额外占用端口
+- actor ↔ rollout 的 PyTorch 分布式 weight sync：两者都在云端同一节点，走 **localhost**，不穿越防火墙
+- 本地 env worker 只通过 Ray 内部 gRPC 与云端 channel actor 通信，不参与任何 `torch.distributed` 进程组
 
 ### Blackwell 约束说明
 
@@ -36,7 +49,7 @@ RLinf 的 Channel 通信默认使用 `distributed=False, node_rank=0`，即所�
 │       sync (本地)                  │             │
 └──────────────────────────────┬────┴─────────────┘
                                │
-                    飞连 VPN (单向: local→cloud)
+                     飞连 VPN (单向: local→cloud:12345)
                                │
 ┌──────────────────────────────┴──────────────────┐
 │  本地 (rank 1)                                    │
@@ -89,8 +102,8 @@ export RLINF_COMM_NET_DEVICES=<feilian_interface>   # feilian网卡名，如 utu
 # 可选：如果飞连分配的是IPv6地址
 # export RAY_USE_IPV6=1
 
-# 3. 启动 Ray head
-ray start --head --port=6379 --node-ip-address=<cloud_feilian_ip>
+# 3. 启动 Ray head（端口 12345，关闭 Dashboard）
+ray start --head --port=12345 --include-dashboard=false --node-ip-address=<cloud_feilian_ip>
 
 # 4. 验证
 ray status
@@ -113,14 +126,32 @@ export RLINF_COMM_NET_DEVICES=<feilian_interface>
 # 参考 ray_utils/realworld/setup_before_ray.sh 修改并 source
 source ray_utils/realworld/setup_before_ray.sh
 
-# 5. 启动 Ray worker（连接到云端）
-ray start --address='<cloud_feilian_ip>:6379'
+# 5. 启动 Ray worker（连接到云端端口 12345）
+ray start --address='<cloud_feilian_ip>:12345'
 
 # 6. 验证：应显示 2 nodes
 ray status
 ```
 
-### 2.3 代码同步
+### 2.3 本地节点安装（最小依赖）
+
+本地真机节点只需要 env worker，无需 GPU 依赖、模型包、训练库。使用 `install_local.sh --cpu-only`：
+
+```bash
+# 在仓库根目录执行
+bash requirements/install_local.sh --cpu-only --env franka
+
+# 安装完成后激活环境
+source .venv/bin/activate
+```
+
+该模式会：
+- 强制安装 CPU 版 torch（`UV_TORCH_BACKEND=cpu`），避免 CUDA wheel
+- 跳过 flash-attn、apex、openpi/vla 模型包等训练组件
+- 只安装 `dependencies` 核心 + `realworld-env` extra（gymnasium、opencv、psutil 等）
+- 通过 `--env franka` 额外安装机器人控制包（pyrealsense2、pyspacemouse 等）
+
+### 2.4 代码同步
 
 云端和本地需要相同的 RLinf 代码副本（包括自定义环境代码）：
 
@@ -743,12 +774,13 @@ reward:
 
 | 风险 | 备选方案 |
 |------|---------|
+| 飞连 VPN 不提供双向公网 IP | 无需双向。本地通过端口 12345 连接云端 Ray head，所有 Channel 通信走同一 gRPC 长连接 |
+| Ray 跨机器通信不稳定 | 让云端防火墙确认放行端口 12345（TCP），`--node-ip-address` 显式绑定飞连 IP |
 | 飞连 VPN 带宽不足，图像上传卡顿 | 降低图像分辨率；本地压缩 JPEG 后上传；减少相机数量 |
 | pi0.5 全参数 weight sync 量大 | 开启 LoRA；使用 `weight_syncer/compressed_patch_syncer` |
 | 奖励模型推理延迟高 | 将 reward model 部署到本地 CPU 上做本地推理 |
 | 真机环境与仿真差异大 | 先用离线 demo 数据 + 在线 RLPD 混合训练 |
 | SFT checkpoint 与自定义任务不匹配（分布外） | 先在真机上采集少量数据做领域微调 SFT，再启动 RL |
-| Ray 跨机器通信不稳定 | 添加 `ray start` 参数 `--node-ip-address` 显式绑定飞连 IP |
 
 ---
 

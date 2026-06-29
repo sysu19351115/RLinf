@@ -1,0 +1,11 @@
+# reBotArm 全局配置
+# 硬件配置（电机类型、通信参数、PID 等）
+
+# reBotArm global config
+# Hardware config (motor type, comm params, PID, etc.)
+#
+# 切换电机类型 / Switch motor type:
+#   rebotarm_rs.yaml  -> RobStride 电机 + CAN 总线 (can0)  [默认 / default]
+#   rebotarm_dm.yaml  -> Damiao 电机 + 串口桥 (/dev/ttyACM0)
+
+hardware_yaml: "rebotarm_rs.yaml"

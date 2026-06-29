@@ -23,6 +23,7 @@ from .hardware import (
     FrankaHWInfo,
     GimArmHWInfo,
     HardwareInfo,
+    RebotArmHWInfo,
     Turtle2HWInfo,
 )
 from .manager import WorkerInfo
@@ -43,6 +44,7 @@ __all__ = [
     "DualFrankaHWInfo",
     "FrankaHWInfo",
     "GimArmHWInfo",
+    "RebotArmHWInfo",
     "Turtle2HWInfo",
     "CollectiveGroupOptions",
     "Cluster",

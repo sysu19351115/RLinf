@@ -1,0 +1,32 @@
+env_type: realworld
+
+total_num_envs: 1
+
+auto_reset: False
+ignore_terminations: False
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 240
+max_episode_steps: 240
+main_image_key: wrist_1
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "RebotArmPickAndPlaceEnv-v1"
+  num_envs: null
+  can_interface: "can0"
+  is_dummy: false
+  enable_gripper: true
+  task_description: "pick up the object and place it at the target location"
+  target_ee_pose: [0.3, -0.2, 0.15, 3.14, 0.0, 0.0]
+  reward_threshold: [0.02, 0.02, 0.02, 0.2, 0.2, 0.2]
+  max_num_steps: 200
+  use_dense_reward: true
+  enable_gripper_penalty: false
+  reset_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  step_frequency: 10.0

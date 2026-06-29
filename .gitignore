@@ -28,4 +28,3 @@ PKG-INFO
 .cache/*
 checkpoints
 libero
-pyproject.toml*
