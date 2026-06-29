@@ -162,7 +162,7 @@ rebot = [
     # runtime; only the SDK's Python dependencies are declared here.
     "motorbridge>=0.1.7",
     "pin>=3.9.0",
-    "numpy>=1.23.4,<2.0",
+    "numpy>=1.23.4",
     "pyyaml>=6.0",
     "meshcat>=0.3.2",
     "matplotlib>=3.10.0",
@@ -199,6 +199,12 @@ conflicts = [
       { extra = "xsquare_turtle2" },
       { extra = "gim_arm" },
       { extra = "rebot" },
+    ],
+    [  # Agentic backends require numpy 2.x; legacy real-world robots pin numpy 1.x
+      { extra = "agentic-sglang" },
+      { extra = "agentic-vllm" },
+      { extra = "franka" },
+      { extra = "xsquare_turtle2" },
     ],
 ]
 override-dependencies = [

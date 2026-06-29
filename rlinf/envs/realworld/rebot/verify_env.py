@@ -96,35 +96,42 @@ def step_can_presence() -> int:
 
 
 def step_motor_scan() -> int:
-    """Scan for motors via motorbridge-cli."""
-    try:
-        out = subprocess.check_output(
-            [
-                "motorbridge-cli", "scan",
-                "--vendor", "robstride",
-                "--channel", _CAN_IFACE,
-                "--start-id", "1",
-                "--end-id", "127",
-            ],
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=30,
-        )
-    except FileNotFoundError:
-        return _FAILURE, "motorbridge-cli not found. Install: pip install motorbridge"
-    except subprocess.TimeoutExpired:
-        return _FAILURE, "Motor scan timed out (30 s). Check CAN wiring and power."
-    except subprocess.CalledProcessError as e:
-        return _FAILURE, f"Motor scan failed:\n{e.stdout}"
+    """Discover motors via the reBotArm SDK instead of motorbridge-cli.
 
-    # Expect at least 7 motors (6 joints + 1 gripper).
-    motor_count = out.count("0x")
-    if motor_count < 7:
-        return _FAILURE, (
-            f"Only {motor_count} motor(s) found (expected >= 7). "
-            "Check CAN wiring, terminal resistors, and robot power."
-        )
-    return _SUCCESS, f"{motor_count} motors found"
+    ``motorbridge-cli scan`` can hang or behave differently when invoked from a
+    non-interactive subprocess, while the SDK connect path is exactly what the
+    rest of the RLinf integration uses.
+    """
+    try:
+        from reBotArm_control_py import reBotArm
+    except ImportError as e:
+        _rebot_dir = os.path.dirname(os.path.abspath(__file__))
+        if _rebot_dir not in sys.path:
+            sys.path.insert(0, _rebot_dir)
+        try:
+            from reBotArm_control_py import reBotArm
+        except ImportError:
+            return _FAILURE, (
+                f"reBotArm_control_py not importable: {e}. "
+                "Make sure you installed the rebot extra: "
+                "bash requirements/install_local.sh --cpu-only --env rebot"
+            )
+
+    try:
+        with reBotArm() as arm:
+            arm.connect()
+            q = arm.get_joint_positions()
+            motor_count = len(q)
+            if motor_count < 6:
+                return _FAILURE, (
+                    f"Only {motor_count} joint(s) readable (expected >= 6). "
+                    "Check CAN wiring, terminal resistors, and robot power."
+                )
+            msg = f"{motor_count} joints readable (positions: {[f'{v:.3f}' for v in q]})"
+    except Exception:
+        return _FAILURE, f"reBotArm SDK motor discovery failed:\n{traceback.format_exc()}"
+
+    return _SUCCESS, msg
 
 
 def step_rebot_sdk() -> int:

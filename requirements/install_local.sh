@@ -219,6 +219,8 @@ if [[ "$CPU_ONLY" -eq 1 ]]; then
     echo "[install_local.sh] CPU-only mode: installing minimal env-worker dependencies."
     echo "[install_local.sh] ============================================================"
 
+    PYTHON_VERSION="${PYTHON_VERSION:-3.11.14}"
+
     if [[ -z "$_ENV_NAME" ]]; then
         echo "[install_local.sh] WARNING: --env not specified. Only core + realworld-env"
         echo "[install_local.sh]          deps will be installed. If your robot requires"
