@@ -161,18 +161,41 @@ checkpoints/pi05_rebot_insertion_pytorch/
 
 ### 3. 启动 Ray 集群
 
-在**云端**（head，rank 0）先启动：
+本示例为**云端 head + 本地真机 worker** 的跨网络部署。云端通常位于 NAT/容器之后，没有飞连客户端；本地通过飞连 VPN 访问云端。Ray 默认会占用多个端口，因此需要在云端**固定 Ray 端口范围**，并把对应端口映射到本地可达的地址。
+
+#### 端口规划（云端需映射到本地可达地址）
+
+| 端口 | 用途 |
+|------|------|
+| 6379 | GCS（Ray 集群控制服务） |
+| 6381 | Object Manager |
+| 6382 | Node Manager |
+| 20000-20009 | Worker 端口（10 个，按需调整） |
+
+
+#### 在云端（head，rank 0）启动
 
 ```bash
 source .venv/bin/activate
 export RLINF_NODE_RANK=0
-export RLINF_COMM_NET_DEVICES=<飞连网卡名>
+export RLINF_COMM_NET_DEVICES=<云端实际内网网卡名>   # 例如 eth0
 
-ray start --head --port=12345 --include-dashboard=false \
-  --node-ip-address=<cloud_feilian_ip>
+ray start --head \
+  --port=6379 \
+  --node-ip-address=<云端实际内网 IP> \
+  --object-manager-port=6381 \
+  --node-manager-port=6382 \
+  --min-worker-port=20000 \
+  --max-worker-port=20009 \
+  --include-dashboard=false \
+  --disable-usage-stats
 ```
 
-在**本地**（worker，rank 1）拉起 CAN 总线后启动：
+其中：
+- `<云端实际内网 IP>`：云端容器/服务器上可被飞连/端口映射访问的内网 IP，例如 `10.190.242.183`。
+- 确保上述端口已从本地可达地址映射到云端的对应端口。
+
+#### 在本地（worker，rank 1）启动
 
 ```bash
 # 拉起 CAN
@@ -180,17 +203,33 @@ sudo ip link set can0 up type can bitrate 1000000 restart-ms 100
 
 source .venv/bin/activate
 export RLINF_NODE_RANK=1
-export RLINF_COMM_NET_DEVICES=<飞连网卡名>
+export RLINF_COMM_NET_DEVICES=<本地飞连网卡名>   # 例如 utun、tun0
 
-ray start --address='<cloud_feilian_ip>:12345'
+ray start --address='<本地可达的云端映射地址>:6379' --disable-usage-stats
 ```
 
-验证：`ray status` 应显示 2 个节点。
+其中：
+- `<本地飞连网卡名>`：本地飞连 VPN 创建的虚拟网卡名，常见为 `utun`（Linux/macOS）。
+- `<本地可达的云端映射地址>`：本地通过飞连或端口映射能访问到的云端地址，例如 `172.26.0.27`。
 
-> 飞连网卡名可通过以下命令获取，常见格式为 `tun0`（Linux）或 `utun0`（macOS）：
-> ```bash
-> ip addr show | grep -B2 "<cloud_feilian_ip>"   # 找到该 IP 所在网卡名
-> ```
+飞连网卡名可通过以下命令获取：
+
+```bash
+ip addr show | grep -B2 "<本地可达的云端映射地址>"
+```
+
+#### 验证
+
+```bash
+ray status
+```
+
+应显示 2 个节点在线。如果失败，请检查：
+1. 云端的 `6379/6381/6382/20000-20009` 端口是否已映射到本地可达地址。
+2. 云端 `--node-ip-address` 是否填的是实际内网 IP，而不是 `127.0.0.1` 或飞连 IP。
+3. 本地 `RLINF_COMM_NET_DEVICES` 是否填的是飞连网卡名。
+
+> 如果训练过程中报端口不可达，可适当扩大 worker 端口范围（如 `20000-20029`）并补充端口映射。
 
 ### 4. 训练
 
