@@ -161,75 +161,27 @@ checkpoints/pi05_rebot_insertion_pytorch/
 
 ### 3. 启动 Ray 集群
 
-本示例为**云端 head + 本地真机 worker** 的跨网络部署。云端通常位于 NAT/容器之后，没有飞连客户端；本地通过飞连 VPN 访问云端。Ray 默认会占用多个端口，因此需要在云端**固定 Ray 端口范围**，并把对应端口映射到本地可达的地址。
+请参考 docs/ssh_reverse_tunnel.md，实现双向ssh隧道，并测试是否能从云端向本地发起worker。
 
-#### 端口规划（云端需映射到本地可达地址）
+bash```
+(.venv) root@develop-20260630141813-6isgk:/workspace/pjk/ELM/RLinf# python docs/diag_cloud_to_local.py 
+=== Connecting ===
+2026-06-30 13:46:22,239 INFO worker.py:1814 -- Connecting to existing Ray cluster at address: 10.190.242.162:6389...
+2026-06-30 13:46:22,276 INFO worker.py:2012 -- Connected to Ray cluster.
+/workspace/pjk/ELM/RLinf/.venv/lib/python3.11/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
+  warnings.warn(
 
-| 端口 | 用途 |
-|------|------|
-| 6379 | GCS（Ray 集群控制服务） |
-| 6381 | Object Manager |
-| 6382 | Node Manager |
-| 20000-20009 | Worker 端口（10 个，按需调整） |
+Nodes (2):
+  10.190.242.162     alive=True CPU=33.0 node_id=9087d08ca85fe6d3
+  192.168.115.216    alive=True CPU=20.0 node_id=c409891b6e16c2cd
 
-
-#### 在云端（head，rank 0）启动
-
-```bash
-source .venv/bin/activate
-export RLINF_NODE_RANK=0
-export RLINF_COMM_NET_DEVICES=<云端实际内网网卡名>   # 例如 eth0
-
-ray start --head \
-  --port=6379 \
-  --node-ip-address=<云端实际内网 IP> \
-  --object-manager-port=6381 \
-  --node-manager-port=6382 \
-  --min-worker-port=20000 \
-  --max-worker-port=20009 \
-  --include-dashboard=false \
-  --disable-usage-stats
+============================================================
+Test 1: cloud driver -> LOCAL node (c409891b6e16c2cd...)
+============================================================
+  Waiting for local worker...
+  SUCCESS after 3.4s: host=asus pid=1955825
 ```
-
-其中：
-- `<云端实际内网 IP>`：云端容器/服务器上可被飞连/端口映射访问的内网 IP，例如 `10.190.242.183`。
-- 确保上述端口已从本地可达地址映射到云端的对应端口。
-
-#### 在本地（worker，rank 1）启动
-
-```bash
-# 拉起 CAN
-sudo ip link set can0 up type can bitrate 1000000 restart-ms 100
-
-source .venv/bin/activate
-export RLINF_NODE_RANK=1
-export RLINF_COMM_NET_DEVICES=<本地飞连网卡名>   # 例如 utun、tun0
-
-ray start --address='<本地可达的云端映射地址>:6379' --disable-usage-stats
-```
-
-其中：
-- `<本地飞连网卡名>`：本地飞连 VPN 创建的虚拟网卡名，常见为 `utun`（Linux/macOS）。
-- `<本地可达的云端映射地址>`：本地通过飞连或端口映射能访问到的云端地址，例如 `172.26.0.27`。
-
-飞连网卡名可通过以下命令获取：
-
-```bash
-ip addr show | grep -B2 "<本地可达的云端映射地址>"
-```
-
-#### 验证
-
-```bash
-ray status
-```
-
-应显示 2 个节点在线。如果失败，请检查：
-1. 云端的 `6379/6381/6382/20000-20009` 端口是否已映射到本地可达地址。
-2. 云端 `--node-ip-address` 是否填的是实际内网 IP，而不是 `127.0.0.1` 或飞连 IP。
-3. 本地 `RLINF_COMM_NET_DEVICES` 是否填的是飞连网卡名。
-
-> 如果训练过程中报端口不可达，可适当扩大 worker 端口范围（如 `20000-20029`）并补充端口映射。
+测试通过的条件是两个节点alive为True，同时Test 1 通过。
 
 ### 4. 训练
 

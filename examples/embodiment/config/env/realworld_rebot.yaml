@@ -22,7 +22,7 @@ init_params:
   can_interface: "can0"
   is_dummy: false
   enable_gripper: true
-  task_description: "pick up the object and place it at the target location"
+  task_description: "pick objects and insert into the tray box"
   target_ee_pose: [0.3, -0.2, 0.15, 3.14, 0.0, 0.0]
   reward_threshold: [0.02, 0.02, 0.02, 0.2, 0.2, 0.2]
   max_num_steps: 200

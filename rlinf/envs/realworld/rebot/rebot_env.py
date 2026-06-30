@@ -61,6 +61,9 @@ class RebotArmRobotConfig:
     is_dummy: bool = False
     """When ``True``, skip all hardware calls (useful for offline training)."""
 
+    task_description: str = ""
+    """Language prompt describing the task (e.g. 'pick objects and insert into the tray box')."""
+
     use_dense_reward: bool = False
     """Use distance-based dense reward instead of binary 0/1."""
 
@@ -478,6 +481,11 @@ class RebotArmEnv(gym.Env):
         return False
 
     # ── Utilities ────────────────────────────────────────────────────────────
+
+    @property
+    def task_description(self) -> str:
+        """Language instruction for this task."""
+        return self.config.task_description
 
     @property
     def target_ee_pose(self) -> np.ndarray:

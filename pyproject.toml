@@ -183,6 +183,7 @@ realworld-env = [
     "filelock",
     "typing-extensions",
     "packaging",
+    "regex",
 ]
 
 [tool.uv]
