@@ -260,6 +260,15 @@ if [[ "$CPU_ONLY" -eq 1 ]]; then
     echo "[install_local.sh] Running: uv sync ${_EXTRA_ARGS[*]} --no-install-project"
     uv sync "${_EXTRA_ARGS[@]}" --no-install-project
 
+    # Replace CUDA torch with CPU torch 2.6.0 to match cloud version
+    # and avoid Blackwell (sm_120) incompatibility on RTX 5090.
+    # `uv sync` ignores UV_TORCH_BACKEND and resolves CUDA torch from
+    # override-dependencies; force-reinstall the matching CPU build.
+    echo "[install_local.sh] Replacing CUDA torch with CPU torch 2.6.0..."
+    uv pip install --force-reinstall \
+      torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+      --index-url https://download.pytorch.org/whl/cpu
+
     echo "[install_local.sh] Installing RLinf (editable) into the venv..."
     pip install -e .
 
