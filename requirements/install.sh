@@ -379,6 +379,14 @@ configure_nvidia() {
     if [ -z "${UV_TORCH_BACKEND:-}" ]; then
         export UV_TORCH_BACKEND="$DEFAULT_BACKEND_NVIDIA"
     fi
+    # Blackwell (RTX 50xx / sm_120) requires CUDA 12.8+.  Route torch
+    # through the cu128 wheel index so `uv sync` resolves the
+    # sm_120-compatible build instead of the default PyPI cu126 wheel.
+    if [ "${UV_TORCH_BACKEND:-}" = "cu128" ]; then
+        PLATFORM_TORCH_STR="+cu128"
+        PLATFORM_TORCH_INDEX="https://download.pytorch.org/whl/cu128"
+        PLATFORM_TORCH_PACKAGES=("torch" "torchvision" "torchaudio")
+    fi
 }
 
 configure_amd() {
