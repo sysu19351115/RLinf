@@ -91,28 +91,42 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
 ## 示例3: ReBot+PI0.5+PPO
 
 多机真机训练：云端 GPU 服务器（actor 训练 + rollout 推理）+ 本地 ReBot Arm 真机（env worker）。
+两端通过 WireGuard 组成 Layer 3 网络（云端 `10.200.200.2`，本地 `10.200.200.3`），Ray 集群直接互通。
+
+> 如果网络环境不支持 WireGuard 直连（如单向 NAT），可以使用 SSH 双向隧道方案替代：
+> 详见 `docs/ssh_reverse_tunnel.md`。WireGuard 方案更简单，推荐优先采用。
 
 ### 1. 环境准备
 
-分别在云端和本地两套环境中执行。
+分别在云端和本地两套环境中执行。两端 PyTorch 版本必须一致（`pyproject.toml` 已锁定 `torch==2.7.0`），确保 Gloo 跨节点通信兼容。
 
-#### 1.1 云端服务器（GPU 训练 + 推理）
+#### 1.1 云端服务器（GPU 训练 + 推理，H100）
 
 ```bash
-bash requirements/install_local.sh embodied --model openpi
+bash requirements/install_local.sh --force embodied --model openpi
 ```
 
-云端只需要 RLinf 核心 + openpi 模型 + 训练依赖，不需要真机控制 SDK。
+`--force` 跳过缓存检查，确保拿到最新的 `torch 2.7.0+cu128`。
 
-#### 1.2 本地真机节点（CPU-only，env worker）
+#### 1.2 本地真机节点（两种选择）
+
+**选择 A：使用本地 GPU（RTX 5090）**
+
+```bash
+bash requirements/install_local.sh embodied --model openpi --env rebot
+```
+
+脚本自动检测 RTX 5090（Blackwell），安装 `torch 2.7.0+cu128`，与云端完全一致。
+
+**选择 B：纯 CPU（不依赖 GPU，仅 env worker）**
 
 ```bash
 bash requirements/install_local.sh --cpu-only --env rebot
 ```
 
-CPU-only 模式只安装 env worker 所需的最小依赖（gymnasium、opencv、pyrealsense2 等），加上 rebot 机械臂 SDK 的 Python 依赖（motorbridge、pinocchio 等），**不安装 CUDA/torch GPU 版本**。
+CPU-only 模式只安装 env worker 所需的最小依赖（gymnasium、opencv 等），加上 rebot 机械臂 SDK 的 Python 依赖。
 
-reBotArm 控制 SDK 已内置在仓库中（`rlinf/envs/realworld/rebot/reBotArm_control_py/`），控制器启动时会自动添加到 `sys.path`。
+reBotArm 控制 SDK 已内置在仓库中（`rlinf/envs/realworld/rebot/reBotArm_control_py/`）。
 
 #### 1.3 拉起 CAN 总线（一次性，本地节点）
 
@@ -161,27 +175,30 @@ checkpoints/pi05_rebot_insertion_pytorch/
 
 ### 3. 启动 Ray 集群
 
-请参考 docs/ssh_reverse_tunnel.md，实现双向ssh隧道，并测试是否能从云端向本地发起worker。
+**WireGuard 方案（推荐）**：
 
-bash```
-(.venv) root@develop-20260630141813-6isgk:/workspace/pjk/ELM/RLinf# python docs/diag_cloud_to_local.py 
-=== Connecting ===
-2026-06-30 13:46:22,239 INFO worker.py:1814 -- Connecting to existing Ray cluster at address: 10.190.242.162:6389...
-2026-06-30 13:46:22,276 INFO worker.py:2012 -- Connected to Ray cluster.
-/workspace/pjk/ELM/RLinf/.venv/lib/python3.11/site-packages/ray/_private/worker.py:2051: FutureWarning: Tip: In future versions of Ray, Ray will no longer override accelerator visible devices env var if num_gpus=0 or num_gpus=None (default). To enable this behavior and turn off this error message, set RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
-  warnings.warn(
+```bash
+# 云端（head）
+source .venv/bin/activate
+export RLINF_NODE_RANK=0
+ray start --head --port=6389 --node-ip-address=10.200.200.2 \
+  --include-dashboard=false --disable-usage-stats
 
-Nodes (2):
-  10.190.242.162     alive=True CPU=33.0 node_id=9087d08ca85fe6d3
-  192.168.115.216    alive=True CPU=20.0 node_id=c409891b6e16c2cd
-
-============================================================
-Test 1: cloud driver -> LOCAL node (c409891b6e16c2cd...)
-============================================================
-  Waiting for local worker...
-  SUCCESS after 3.4s: host=asus pid=1955825
+# 本地（worker）
+source .venv/bin/activate
+export RLINF_NODE_RANK=1
+ray start --address='10.200.200.2:6389' --node-ip-address=10.200.200.3 \
+  --disable-usage-stats
 ```
-测试通过的条件是两个节点alive为True，同时Test 1 通过。
+
+验证集群和跨节点通信：
+
+```bash
+# 在云端执行
+python tests/unit_tests/diag_cloud_to_local.py
+```
+
+测试通过的条件是输出 `Test 1: cloud driver -> LOCAL node ... SUCCESS`。
 
 ### 4. 训练
 
