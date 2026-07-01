@@ -1488,14 +1488,18 @@ class EnvWorker(Worker):
                         for batch in batches
                     )
                     env_ranks = self.pipeline_actor_env_ranks[actor_rank]
-                    global_adv_stats = sum(
-                        self.broadcast(
-                            local_adv_stats if self._rank == src_rank else None,
-                            groups=[(self._group_name, env_ranks)],
-                            src=(self._group_name, src_rank),
+                    if len(env_ranks) > 1:
+                        global_adv_stats = sum(
+                            self.broadcast(
+                                local_adv_stats if self._rank == src_rank else None,
+                                groups=[(self._group_name, env_ranks)],
+                                src=(self._group_name, src_rank),
+                            )
+                            for src_rank in env_ranks
                         )
-                        for src_rank in env_ranks
-                    )
+                    else:
+                        # Single env worker: broadcast is a no-op, skip Gloo creation
+                        global_adv_stats = local_adv_stats
                     for batch in batches:
                         batch["advantages"] = normalize_from_stats(
                             batch["advantages"], global_adv_stats
