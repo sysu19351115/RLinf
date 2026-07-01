@@ -30,11 +30,25 @@ Ray 节点存活检测涉及两个方向的通信：
 
 ### IP 地址说明
 
-| 地址 | 含义 | 谁可以访问 |
-|------|------|-----------|
-| `192.168.115.216` | 本地真机节点 Feilian VPN IP | 云端**不能**直连 |
-| `10.190.242.162` | 云端主机内网 IP（Ray 绑定在此） | 本地**不能**直连 |
-| `172.26.0.82` | 云端机器学习平台分配的可访问 IP | 本地可通过 SSH / 端口映射访问 |
+| 地址（示例） | 变量 | 含义 | 谁可以访问 |
+|-------------|------|------|-----------|
+| `192.168.115.216` | `$LOCAL_VPN_IP` | 本地真机节点 Feilian VPN IP | 云端**不能**直连 |
+| `10.190.242.162` | `$CLOUD_INTERNAL_IP` | 云端主机内网 IP（Ray 绑定在此） | 本地**不能**直连 |
+| `172.26.0.82` | `$CLOUD_ACCESSIBLE_IP` | 云端机器学习平台分配的可访问 IP | 本地可通过 SSH / 端口映射访问 |
+
+### 配置环境变量
+
+**所有后续命令均依赖以下环境变量**，执行前先设置：
+
+```bash
+export LOCAL_VPN_IP="192.168.113.167"       # 本地节点 Feilian VPN IP
+export CLOUD_INTERNAL_IP="10.190.242.162"   # 云端内网 IP（Ray 绑定地址）
+export CLOUD_ACCESSIBLE_IP="172.26.0.82"    # 云端可访问 IP（SSH 目标地址）
+```
+
+修改 IP 时只需改动这三行，然后重新 `source` 或重新 `export`。
+
+---
 
 ### 原理
 
@@ -83,7 +97,7 @@ Ray 节点存活检测涉及两个方向的通信：
 
 ## 执行步骤
 
-**注意**：后续命令中的 `<feilian_iface>` 需替换为飞连 VPN 网卡名（通过 `ip addr | grep 192.168.115.216` 查看，通常为 `tun0` 或 `utun0`）。
+**注意**：后续命令中的 `<feilian_iface>` 需替换为飞连 VPN 网卡名（通过 `ip addr | grep "$LOCAL_VPN_IP"` 查看，通常为 `tun0` 或 `utun0`）。
 
 ---
 
@@ -137,7 +151,7 @@ export RLINF_NODE_RANK=0
 
 ray start --head \
   --port=6389 \
-  --node-ip-address=10.190.242.162 \
+  --node-ip-address=$CLOUD_INTERNAL_IP \
   --object-manager-port=6391 \
   --node-manager-port=6392 \
   --min-worker-port=20000 \
@@ -170,11 +184,11 @@ ray.shutdown()
 ```bash
 # === 在本地执行 ===
 
-# 3.1 杀掉可能残留的旧隧道
-pkill -f "ssh.*163[89]" 2>/dev/null || true
-
-# 3.2 安装 iptables（如未安装）
+# 3.1 安装 iptables（如未安装）
 sudo apt-get install -y iptables
+
+# 3.2 杀掉可能残留的旧隧道
+pkill -f "ssh.*163[89]" 2>/dev/null || true
 
 # 3.3 清理本地旧的 DNAT 规则
 sudo iptables -t nat -F OUTPUT 2>/dev/null || true
@@ -191,14 +205,14 @@ ssh -N -T \
   -o ServerAliveInterval=60 \
   -o ServerAliveCountMax=3 \
   -o ExitOnForwardFailure=yes \
-  -L '*:16389:10.190.242.162:6389' \
-  -L '*:16393:10.190.242.162:6392' \
-  -L '*:16394:10.190.242.162:6391' \
-  $(for p in $(seq 20000 20099); do echo "-L *:$p:10.190.242.162:$p"; done) \
+  -L "*:16389:$CLOUD_INTERNAL_IP:6389" \
+  -L "*:16393:$CLOUD_INTERNAL_IP:6392" \
+  -L "*:16394:$CLOUD_INTERNAL_IP:6391" \
+  $(for p in $(seq 20000 20099); do echo "-L *:$p:$CLOUD_INTERNAL_IP:$p"; done) \
   -R 16392:localhost:6392 \
   -R 16391:localhost:6391 \
   $(for p in $(seq 20100 20136); do echo "-R $p:localhost:$p"; done) \
-  172.26.0.82 &
+  $CLOUD_ACCESSIBLE_IP &
 
 # 3.6 确认隧道进程存活
 ps aux | grep "ssh.*163[89]" | grep -v grep
@@ -210,25 +224,25 @@ timeout 5 nc -zv 127.0.0.1 16394   # head object manager
 # 预期: 三条 Connection ... succeeded!
 
 # 3.8 在云端验证反向隧道端口已监听
-ssh 172.26.0.82 "ss -tlnp | grep -E '16391|16392|20100' | head -10"
+ssh $CLOUD_ACCESSIBLE_IP "ss -tlnp | grep -E '16391|16392|20100' | head -10"
 # 预期: 应包含 127.0.0.1:16391, 127.0.0.1:16392, 127.0.0.1:20100
 
 # 3.9 本地 iptables DNAT：劫持发往云端内网 IP 的流量到 SSH 正向隧道
 sudo iptables -t nat -A OUTPUT \
-  -d 10.190.242.162 -p tcp --dport 6392 \
+  -d $CLOUD_INTERNAL_IP -p tcp --dport 6392 \
   -j DNAT --to-destination 127.0.0.1:16393
 
 sudo iptables -t nat -A OUTPUT \
-  -d 10.190.242.162 -p tcp --dport 6391 \
+  -d $CLOUD_INTERNAL_IP -p tcp --dport 6391 \
   -j DNAT --to-destination 127.0.0.1:16394
 
 # 云端 worker 端口范围（本地 raylet 需调用云端 NodeManager/actor）
 sudo iptables -t nat -A OUTPUT \
-  -d 10.190.242.162 -p tcp --dport 20000:20099 \
+  -d $CLOUD_INTERNAL_IP -p tcp --dport 20000:20099 \
   -j DNAT --to-destination 127.0.0.1
 
 # 3.10 确认本地 DNAT 规则已生效
-sudo iptables -t nat -L OUTPUT -n -v | grep "10.190.242.162"
+sudo iptables -t nat -L OUTPUT -n -v | grep "$CLOUD_INTERNAL_IP"
 # 预期输出: 三行 DNAT 规则
 ```
 
@@ -236,7 +250,7 @@ sudo iptables -t nat -L OUTPUT -n -v | grep "10.190.242.162"
 
 ### 步骤 4：云端配置 socat 中继
 
-SSH 反向隧道端口监听在 `127.0.0.1`，而 iptables DNAT 出站后无法路由到 `127.0.0.1`（需要 `route_localnet=1`，但容器文件系统只读不可设置）。用 socat 把隧道端口对外暴露到云端的 `10.190.242.162` 上。
+SSH 反向隧道端口监听在 `127.0.0.1`，而 iptables DNAT 出站后无法路由到 `127.0.0.1`（需要 `route_localnet=1`，但容器文件系统只读不可设置）。用 socat 把隧道端口对外暴露到云端的 `$CLOUD_INTERNAL_IP` 上。
 
 ```bash
 # === 在云端执行 ===
@@ -246,20 +260,20 @@ apt-get install -y socat
 
 # 4.2 启动 socat 中继（后台运行）
 #     管理员端口（2 个） + 本地 worker 端口范围（37 个，20100-20136）
-socat TCP-LISTEN:16392,reuseaddr,fork,bind=10.190.242.162 TCP:127.0.0.1:16392 &
-socat TCP-LISTEN:16391,reuseaddr,fork,bind=10.190.242.162 TCP:127.0.0.1:16391 &
+socat TCP-LISTEN:16392,reuseaddr,fork,bind=$CLOUD_INTERNAL_IP TCP:127.0.0.1:16392 &
+socat TCP-LISTEN:16391,reuseaddr,fork,bind=$CLOUD_INTERNAL_IP TCP:127.0.0.1:16391 &
 
 # 本地 Worker 端口范围（20100-20136）
 for port in $(seq 20100 20136); do
-  socat TCP-LISTEN:$port,reuseaddr,fork,bind=10.190.242.162 TCP:127.0.0.1:$port &
+  socat TCP-LISTEN:$port,reuseaddr,fork,bind=$CLOUD_INTERNAL_IP TCP:127.0.0.1:$port &
 done
 
 # 4.3 确认 socat 已监听（管理员端口）
-ss -tlnp | grep -E "16391|16392" | grep "10.190.242.162"
+ss -tlnp | grep -E "16391|16392" | grep "$CLOUD_INTERNAL_IP"
 
 # 4.4 确认 socat 已监听（worker 端口，抽查前 3 个）
-ss -tlnp | grep -E "20100|20101|20102" | grep "10.190.242.162"
-# 预期: 3 行 LISTEN，源地址为 10.190.242.162
+ss -tlnp | grep -E "20100|20101|20102" | grep "$CLOUD_INTERNAL_IP"
+# 预期: 3 行 LISTEN，源地址为 $CLOUD_INTERNAL_IP
 ```
 
 ---
@@ -276,20 +290,20 @@ apt-get install -y iptables
 
 # 5.2 管理员端口
 iptables -t nat -A OUTPUT \
-  -d 192.168.115.216 -p tcp --dport 6392 \
-  -j DNAT --to-destination 10.190.242.162:16392
+  -d $LOCAL_VPN_IP -p tcp --dport 6392 \
+  -j DNAT --to-destination $CLOUD_INTERNAL_IP:16392
 
 iptables -t nat -A OUTPUT \
-  -d 192.168.115.216 -p tcp --dport 6391 \
-  -j DNAT --to-destination 10.190.242.162:16391
+  -d $LOCAL_VPN_IP -p tcp --dport 6391 \
+  -j DNAT --to-destination $CLOUD_INTERNAL_IP:16391
 
 # 5.3 Worker 端口范围（本地 worker 用 20100-20136，不与云端 20000-20036 冲突）
 iptables -t nat -A OUTPUT \
-  -d 192.168.115.216 -p tcp --dport 20100:20136 \
-  -j DNAT --to-destination 10.190.242.162
+  -d $LOCAL_VPN_IP -p tcp --dport 20100:20136 \
+  -j DNAT --to-destination $CLOUD_INTERNAL_IP
 
 # 5.4 确认规则已生效
-iptables -t nat -L OUTPUT -n -v | grep -E "192.168.115.216"
+iptables -t nat -L OUTPUT -n -v | grep -E "$LOCAL_VPN_IP"
 # 预期: 三行 DNAT 规则
 ```
 
@@ -317,7 +331,7 @@ ray start \
   --object-manager-port=6391 \
   --min-worker-port=20100 \
   --max-worker-port=20136 \
-  --node-ip-address=192.168.115.216 \
+  --node-ip-address=$LOCAL_VPN_IP \
   --disable-usage-stats
 
 # 验证：应显示 2 node Active
@@ -366,14 +380,14 @@ pkill -f "ssh.*163[89]" 2>/dev/null || true
 autossh -M 0 -N -T \
   -o ServerAliveInterval=60 \
   -o ExitOnForwardFailure=yes \
-  -L '*:16389:10.190.242.162:6389' \
-  -L '*:16393:10.190.242.162:6392' \
-  -L '*:16394:10.190.242.162:6391' \
-  $(for p in $(seq 20000 20099); do echo "-L *:$p:10.190.242.162:$p"; done) \
+  -L "*:16389:$CLOUD_INTERNAL_IP:6389" \
+  -L "*:16393:$CLOUD_INTERNAL_IP:6392" \
+  -L "*:16394:$CLOUD_INTERNAL_IP:6391" \
+  $(for p in $(seq 20000 20099); do echo "-L *:$p:$CLOUD_INTERNAL_IP:$p"; done) \
   -R 16392:localhost:6392 \
   -R 16391:localhost:6391 \
   $(for p in $(seq 20100 20136); do echo "-R $p:localhost:$p"; done) \
-  172.26.0.82 &
+  $CLOUD_ACCESSIBLE_IP &
 ```
 
 ### Q2: 云端报 "Address already in use"
@@ -402,7 +416,7 @@ nc -zv 127.0.0.1 16394   # head objstr
 nc -zv 127.0.0.1 20050   # 云端 worker（抽查）
 
 # 3. 本地 iptables 规则是否存在
-sudo iptables -t nat -L OUTPUT -n -v | grep "10.190.242.162"
+sudo iptables -t nat -L OUTPUT -n -v | grep "$CLOUD_INTERNAL_IP"
 
 # 4. route_localnet 是否已启用
 sysctl net.ipv4.conf.all.route_localnet
@@ -421,9 +435,9 @@ nc -zv 127.0.0.1 16389 && nc -zv 127.0.0.1 16393 && nc -zv 127.0.0.1 16394
 tail -20 /tmp/ray/session_latest/logs/raylet.err
 
 # === 在云端执行 ===
-iptables -t nat -L OUTPUT -n -v | grep "192.168.115.216"
-ss -tlnp | grep -E "16391|16392" | grep "10.190.242.162"
-nc -zv 10.190.242.162 16392
+iptables -t nat -L OUTPUT -n -v | grep "$LOCAL_VPN_IP"
+ss -tlnp | grep -E "16391|16392" | grep "$CLOUD_INTERNAL_IP"
+nc -zv $CLOUD_INTERNAL_IP 16392
 ```
 
 ### Q5: Worker 报 "FD Shutdown" / 跨节点任务超时
@@ -433,9 +447,9 @@ nc -zv 10.190.242.162 16392
 ```bash
 # === 在云端执行 ===
 # 抽查几个本地 worker 端口
-nc -zv 10.190.242.162 20100
-nc -zv 10.190.242.162 20110
-nc -zv 10.190.242.162 20136
+nc -zv $CLOUD_INTERNAL_IP 20100
+nc -zv $CLOUD_INTERNAL_IP 20110
+nc -zv $CLOUD_INTERNAL_IP 20136
 
 # 确认所有 socat 实例都在运行
 ps aux | grep socat | grep -v grep | wc -l
@@ -445,19 +459,22 @@ ps aux | grep socat | grep -v grep | wc -l
 ### Q6: 本地 IP 变了怎么办？
 
 ```bash
+# === 重新设置本地 IP ===
+export LOCAL_VPN_IP="<新IP>"
+
 # === 在本地执行，获取新 IP ===
 NEW_LOCAL_IP=$(ip addr show <feilian_iface> | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
 echo "新本地 IP: $NEW_LOCAL_IP"
 
 # === 在云端执行，更新 iptables ===
 # 删旧
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 6392 -j DNAT --to-destination 10.190.242.162:16392
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 6391 -j DNAT --to-destination 10.190.242.162:16391
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 20100:20136 -j DNAT --to-destination 10.190.242.162
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 6392 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16392
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 6391 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16391
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 20100:20136 -j DNAT --to-destination $CLOUD_INTERNAL_IP
 # 加新
-iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 6392 -j DNAT --to-destination 10.190.242.162:16392
-iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 6391 -j DNAT --to-destination 10.190.242.162:16391
-iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 20100:20136 -j DNAT --to-destination 10.190.242.162
+iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 6392 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16392
+iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 6391 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16391
+iptables -t nat -A OUTPUT -d $NEW_LOCAL_IP -p tcp --dport 20100:20136 -j DNAT --to-destination $CLOUD_INTERNAL_IP
 ```
 
 ### Q7: 步骤 8 卡在 `Waiting for 2 nodes` 后无输出
@@ -486,16 +503,16 @@ ps aux | grep ray:: | grep -v grep | wc -l
 
 ```bash
 # === 云端 ===
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 6392 -j DNAT --to-destination 10.190.242.162:16392
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 6391 -j DNAT --to-destination 10.190.242.162:16391
-iptables -t nat -D OUTPUT -d 192.168.115.216 -p tcp --dport 20100:20136 -j DNAT --to-destination 10.190.242.162
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 6392 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16392
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 6391 -j DNAT --to-destination $CLOUD_INTERNAL_IP:16391
+iptables -t nat -D OUTPUT -d $LOCAL_VPN_IP -p tcp --dport 20100:20136 -j DNAT --to-destination $CLOUD_INTERNAL_IP
 pkill socat || true
 ray stop
 
 # === 本地 ===
-sudo iptables -t nat -D OUTPUT -d 10.190.242.162 -p tcp --dport 6392 -j DNAT --to-destination 127.0.0.1:16393
-sudo iptables -t nat -D OUTPUT -d 10.190.242.162 -p tcp --dport 6391 -j DNAT --to-destination 127.0.0.1:16394
-sudo iptables -t nat -D OUTPUT -d 10.190.242.162 -p tcp --dport 20000:20099 -j DNAT --to-destination 127.0.0.1
+sudo iptables -t nat -D OUTPUT -d $CLOUD_INTERNAL_IP -p tcp --dport 6392 -j DNAT --to-destination 127.0.0.1:16393
+sudo iptables -t nat -D OUTPUT -d $CLOUD_INTERNAL_IP -p tcp --dport 6391 -j DNAT --to-destination 127.0.0.1:16394
+sudo iptables -t nat -D OUTPUT -d $CLOUD_INTERNAL_IP -p tcp --dport 20000:20099 -j DNAT --to-destination 127.0.0.1
 kill %1 2>/dev/null || pkill -f "ssh.*163[89]"
 ray stop
 ```
