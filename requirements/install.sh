@@ -1183,6 +1183,12 @@ install_openpi_model() {
             install_flash_attn
             install_gym_aloha_env
             ;;
+        rebot)
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_flash_attn
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
             exit 1

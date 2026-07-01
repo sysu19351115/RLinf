@@ -103,7 +103,7 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
 #### 1.1 云端服务器（GPU 训练 + 推理，H100）
 
 ```bash
-bash requirements/install_local.sh --force embodied --model openpi
+bash requirements/install_local.sh --force embodied --model openpi --env rebot
 ```
 
 `--force` 跳过缓存检查，确保拿到最新的 `torch 2.7.0+cu128`。
