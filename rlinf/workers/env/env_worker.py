@@ -165,10 +165,14 @@ class EnvWorker(Worker):
 
         # This is a barrier to ensure all envs' initial setup upon import is done
         # Essential for RealWorld env to ensure initial ROS node setup is done
-        self.broadcast(
-            True,
-            groups=[(self._group_name, list(range(self._world_size)))],
-        )
+        # Skip when there is only a single env worker — a single-rank barrier
+        # still creates a Gloo distributed process group, whose server socket
+        # can be discovered by cross-node weight-sync groups, causing c10d timeouts.
+        if self._world_size > 1:
+            self.broadcast(
+                True,
+                groups=[(self._group_name, list(range(self._world_size)))],
+            )
 
         self.update_env_cfg()
 
