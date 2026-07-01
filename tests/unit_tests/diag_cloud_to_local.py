@@ -2,7 +2,7 @@
 #
 # 在云端执行：
 #   source .venv/bin/activate
-#   python docs/diag_cloud_to_local.py
+#   python tests/unit_tests/diag_cloud_to_local.py
 
 import ray, socket, time
 
@@ -17,17 +17,21 @@ for n in ray.nodes():
           f"CPU={n['Resources'].get('CPU','?')} "
           f"node_id={n['NodeID'][:16]}")
 
-# Find local node ID
+# Find local node ID (matches any WireGuard 10.200.x.x address)
 local_id = None
+local_ip = None
 for n in ray.nodes():
-    if "192.168.115.216" in n["NodeManagerAddress"]:
+    if "10.200" in n["NodeManagerAddress"]:
         local_id = n["NodeID"]
+        local_ip = n["NodeManagerAddress"]
         break
 
 if not local_id:
-    print("\nERROR: local node not found")
+    print("\nERROR: local node not found (no WireGuard 10.200.x.x address)")
     ray.shutdown()
     exit(1)
+
+print(f"  Local node: {local_ip}")
 
 @ray.remote
 def where():
