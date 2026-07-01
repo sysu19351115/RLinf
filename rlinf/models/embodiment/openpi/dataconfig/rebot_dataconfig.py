@@ -85,7 +85,6 @@ class RebotDataConfig(DataConfigFactory):
         data_transforms = data_transforms.push(
             inputs=[
                 _transforms.DeltaActions(delta_action_mask),
-                _transforms.DeltaActions_Prev(delta_action_mask),
             ],
             outputs=[_transforms.AbsoluteActions(delta_action_mask)],
         )
