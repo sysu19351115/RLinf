@@ -94,7 +94,7 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
 两端通过 WireGuard 组成 Layer 3 网络（云端 `10.200.200.2`，本地 `10.200.200.3`），Ray 集群直接互通。
 
 > 如果网络环境不支持 WireGuard 直连（如单向 NAT），可以使用 SSH 双向隧道方案替代：
-> 详见 `docs/ssh_reverse_tunnel.md`。WireGuard 方案更简单，推荐优先采用。
+> 详见 `docs/ssh_reverse_tunnel.md`与`docs/wireguard_build.md`。WireGuard 方案更简单，推荐优先采用。
 
 ### 1. 环境准备
 
@@ -114,7 +114,7 @@ bash requirements/install_local.sh --force embodied --model openpi --env rebot
 
 ```bash
 bash requirements/install_local.sh embodied --model openpi --env rebot
-uv pip install -e .
+uv pip install -e . #装RLinf
 ```
 
 脚本自动检测 RTX 5090（Blackwell），安装 `torch 2.7.0+cu128`，与云端完全一致。
@@ -123,6 +123,7 @@ uv pip install -e .
 
 ```bash
 bash requirements/install_local.sh --cpu-only --env rebot
+uv pip install -e . #装RLinf
 ```
 
 CPU-only 模式只安装 env worker 所需的最小依赖（gymnasium、opencv 等），加上 rebot 机械臂 SDK 的 Python 依赖。
