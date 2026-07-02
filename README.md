@@ -181,14 +181,13 @@ checkpoints/pi05_rebot_insertion_pytorch/
 # 云端（head）
 source .venv/bin/activate
 export RLINF_NODE_RANK=0
-ray start --head --port=6389 --node-ip-address=10.200.200.2 \
-  --include-dashboard=false --disable-usage-stats
+ray start --head   --port=6389   --node-ip-address=10.200.200.2   --object-manager-port=6391   --node-manager-port=6392   --include-dashboard=false   --disable-usage-stats
+
 
 # 本地（worker）
 source .venv/bin/activate
 export RLINF_NODE_RANK=1
-ray start --address='10.200.200.2:6389' --node-ip-address=10.200.200.3 \
-  --disable-usage-stats
+ray start   --address='10.200.200.2:6389'   --node-manager-port=6392   --object-manager-port=6391   --node-ip-address=10.200.200.3   --disable-usage-stats
 ```
 
 验证集群和跨节点通信：
