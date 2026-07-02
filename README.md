@@ -114,6 +114,7 @@ bash requirements/install_local.sh --force embodied --model openpi --env rebot
 
 ```bash
 bash requirements/install_local.sh embodied --model openpi --env rebot
+uv pip install -e .
 ```
 
 脚本自动检测 RTX 5090（Blackwell），安装 `torch 2.7.0+cu128`，与云端完全一致。

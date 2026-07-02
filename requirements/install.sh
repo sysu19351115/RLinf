@@ -1196,6 +1196,7 @@ install_openpi_model() {
             install_common_embodied_deps
             uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
             install_flash_attn
+            install_rebot_env
             ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
@@ -1515,7 +1516,7 @@ install_env_only() {
             uv sync --extra gim_arm --active $NO_INSTALL_RLINF_CMD
             ;;
         rebot)
-            uv sync --extra rebot --active $NO_INSTALL_RLINF_CMD
+            install_rebot_env
             ;;
         dosw1)
             install_dosw1_env
@@ -1534,6 +1535,10 @@ install_env_only() {
 
 install_dummy_env() {
     uv sync --extra embodied --active $NO_INSTALL_RLINF_CMD
+}
+
+install_rebot_env() {
+    uv sync --extra rebot --inexact --active $NO_INSTALL_RLINF_CMD
 }
 
 install_gym_aloha_env() {
