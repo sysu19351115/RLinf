@@ -15,7 +15,7 @@ cluster:
       node_group: cloud
       placement: 0
     rollout:
-      node_group: cloud
+      node_group: robot_gpu
       placement: 0
     env:
       node_group: robot
@@ -31,6 +31,8 @@ cluster:
           - can_interface: can0
             camera_serials: []          # Replace with D435 serial, e.g. ["12345678"]
             node_rank: 1
+    - label: robot_gpu
+      node_ranks: 1
 
 runner:
   task_type: embodied

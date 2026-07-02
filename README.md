@@ -88,7 +88,7 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
   runner.ckpt_path=logs/.../checkpoints/global_step_240/actor/model_state_dict/full_weights.pt
 ```
 
-## 示例3: ReBot+PI0.5+PPO
+## 示例3: ReBot+PI0.5+PPO分布式训练
 
 多机真机训练：云端 GPU 服务器（actor 训练 + rollout 推理）+ 本地 ReBot Arm 真机（env worker）。
 两端通过 WireGuard 组成 Layer 3 网络（云端 `10.200.200.2`，本地 `10.200.200.3`），Ray 集群直接互通。
@@ -181,13 +181,25 @@ checkpoints/pi05_rebot_insertion_pytorch/
 # 云端（head）
 source .venv/bin/activate
 export RLINF_NODE_RANK=0
-ray start --head   --port=6389   --node-ip-address=10.200.200.2   --object-manager-port=6391   --node-manager-port=6392   --include-dashboard=false   --disable-usage-stats
+export RLINF_COMM_NET_DEVICES=wg0
+ray start --head --port=6389 --node-ip-address=10.200.200.2 \
+  --object-manager-port=6391 \
+  --node-manager-port=6392 \
+  --include-dashboard=false \
+  --disable-usage-stats
 
-
-# 本地（worker）
+# 本地（worker）— 放宽心跳容忍，防止 WireGuard 延迟触发 GCS 误判节点 dead
 source .venv/bin/activate
 export RLINF_NODE_RANK=1
-ray start   --address='10.200.200.2:6389'   --node-manager-port=6392   --object-manager-port=6391   --node-ip-address=10.200.200.3   --disable-usage-stats
+export RLINF_COMM_NET_DEVICES=wg0
+export RAY_health_check_initial_delay_ms=30000
+export RAY_health_check_period_ms=10000
+export RAY_num_heartbeats_timeout=300
+ray start --address='10.200.200.2:6389' \
+  --node-manager-port=6392 \
+  --object-manager-port=6391 \
+  --node-ip-address=10.200.200.3 \
+  --disable-usage-stats
 ```
 
 验证集群和跨节点通信：
