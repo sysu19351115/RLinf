@@ -263,8 +263,8 @@ class RebotArmEnv(gym.Env):
             {
                 "state": gym.spaces.Dict(
                     {
-                        "tcp_pose": gym.spaces.Box(-np.inf, np.inf, shape=(7,)),
-                        "tcp_vel": gym.spaces.Box(-np.inf, np.inf, shape=(6,)),
+                        # Pi0.5 rebot policy expects 7-dim state:
+                        # 6 joint angles + 1 gripper position.
                         "arm_joint_position": gym.spaces.Box(
                             -np.inf, np.inf, shape=(6,)
                         ),
@@ -389,9 +389,8 @@ class RebotArmEnv(gym.Env):
                 frames = {
                     "wrist_1": np.zeros((128, 128, 3), dtype=np.uint8)
                 }
+            # Pi0.5 rebot policy expects 7-dim state: 6 joints + gripper.
             state = {
-                "tcp_pose": self._state.tcp_pose,
-                "tcp_vel": self._state.tcp_vel,
                 "arm_joint_position": self._state.arm_joint_position,
                 "gripper_position": np.array(
                     [float(self._state.gripper_position)]

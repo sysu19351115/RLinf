@@ -335,7 +335,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_rebot",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=15, action_dim=7),
+        model=pi0_config.Pi0Config(pi05=True),
         data=RebotDataConfig(
             repo_id="",
             assets=AssetsConfig(

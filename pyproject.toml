@@ -55,7 +55,7 @@ dependencies = [
     "liger_kernel; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "uv",
     "pip",
-    "huggingface_hub",
+    "huggingface_hub>=0.30.0,<1.0",
     "icmplib",
 
     # Logging

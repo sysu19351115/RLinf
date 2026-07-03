@@ -247,3 +247,115 @@ bash evaluations/run_eval.sh realworld realworld_rebot_eval \
   runner.ckpt_path=<path/to/full_weights.pt>
 ```
 
+## 示例4: ReBot+PI0.5+PPO单节点真机训练
+
+本示例适用于**训练机器与真机在同一台电脑上**的场景（例如本地 RTX 5090 + ReBot Arm B601），无需搭建 WireGuard/SSH 隧道，直接在本机启动 Ray 并完成训练。
+
+核心思路：为同一个 `node_rank: 0` 注册两个 node group：
+- `local_gpu`：自动检测 GPU，运行 actor/rollout
+- `rebot`：声明 `RebotArm` 硬件，运行 env
+
+对应配置：`examples/embodiment/config/rebot_single_node_ppo_pi05.yaml`
+
+### 1. 环境安装
+
+在本地单机上安装完整环境（包含 openpi 与 rebot）：
+
+```bash
+sudo bash requirements/install_local.sh embodied --model openpi --env rebot --force
+uv pip install -e .   # 安装 RLinf 本体
+```
+
+脚本会自动检测 RTX 5090（Blackwell）并安装 `torch 2.7.0+cu128`。
+
+### 2. 拉起 CAN 总线
+
+```bash
+sudo modprobe peak_usb                    # PCAN-USB 适配器
+sudo ip link set can0 down 2>/dev/null
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+sudo ip link set can0 up
+ip -details link show can0                # 验证: state UP, bitrate 1000000
+```
+
+### 3. 真机环境验证
+
+```bash
+source .venv/bin/activate
+python rlinf/envs/realworld/rebot/verify_env.py
+```
+
+如未连接相机：
+
+```bash
+python rlinf/envs/realworld/rebot/verify_env.py --skip-camera
+```
+
+全部 5 步通过后再进入训练阶段。
+
+### 4. 模型准备
+
+将 pi0.5 SFT checkpoint 放到 `checkpoints/pi05_rebot_insertion_pytorch` 目录下：
+
+```
+checkpoints/pi05_rebot_insertion_pytorch/
+├── model.safetensors          # 模型权重
+├── config.json                # 模型配置
+└── rebot_lerobot_data/
+    └── norm_stats.json        # 归一化统计量
+```
+
+### 5. 修改配置
+
+编辑 `examples/embodiment/config/rebot_single_node_ppo_pi05.yaml`，填写：
+
+| 配置项 | 说明 |
+|---|---|
+| `env.train.override_cfg.target_ee_pose` | 目标末端位姿 `[x, y, z, rx, ry, rz]`（米/弧度） |
+| `env.eval.override_cfg.target_ee_pose` | 同上 |
+| `cluster.node_groups[1].hardware.configs[0].camera_serials` | Realsense D435 序列号，如 `["12345678"]`；无相机填 `[]` |
+
+> 若本地只有 1 张 GPU，当前默认的 actor/rollout placement（`local_gpu` 的 GPU 0）可直接使用；若有多张 GPU，可在 placement 中把 actor 与 rollout 分到不同卡。
+
+### 6. Dummy 验证
+
+先在无硬件模式下跑通 Ray + pi0.5 链路：
+
+```bash
+source .venv/bin/activate
+python examples/embodiment/train_async.py --config-name rebot_single_node_ppo_pi05 \
+  env.train.override_cfg.is_dummy=True
+```
+
+通过标准：三个 worker group（actor/rollout/env）都能启动，并完成至少 1 个训练 step。
+
+### 7. 真机训练
+
+Dummy 验证通过后，关闭 dummy 并启动真机训练：
+
+```bash
+python examples/embodiment/train_async.py --config-name rebot_single_node_ppo_pi05 \
+  env.train.override_cfg.target_ee_pose=[x,y,z,rx,ry,rz] \
+  env.eval.override_cfg.target_ee_pose=[x,y,z,rx,ry,rz]
+```
+
+> 首次上真机前请确认急停按钮可达；建议初期降低 `max_num_steps` 并在旁监护。
+
+### 8. 监控
+
+```bash
+tensorboard --logdir results/rebot-pi05-single-node-ppo
+```
+
+关注指标：`env/success_once`、`train/loss`、`rollout/...`。
+
+### 9. 评估
+
+评估 RL 训练后的 checkpoint：
+
+```bash
+bash evaluations/run_eval.sh realworld realworld_rebot_eval \
+  rollout.model.model_path=<path/to/checkpoint> \
+  runner.ckpt_path=<path/to/full_weights.pt>
+```
+
