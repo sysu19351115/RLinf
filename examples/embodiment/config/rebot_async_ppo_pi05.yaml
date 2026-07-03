@@ -15,24 +15,22 @@ cluster:
       node_group: cloud
       placement: 0
     rollout:
-      node_group: robot_gpu
+      node_group: cloud             # actor + rollout both run on the training node
       placement: 0
     env:
       node_group: robot
       placement: 0
   node_groups:
     - label: cloud
-      node_ranks: 0
+      node_ranks: 0                 # 192.168.3.223: actor + rollout
     - label: robot
-      node_ranks: 1
+      node_ranks: 1                 # 192.168.3.66: real-world env
       hardware:
         type: RebotArm
         configs:
           - can_interface: can0
-            camera_serials: []          # Replace with D435 serial, e.g. ["12345678"]
+            camera_serials: []      # Replace with D435 serial, e.g. ["12345678"]
             node_rank: 1
-    - label: robot_gpu
-      node_ranks: 1
 
 runner:
   task_type: embodied
