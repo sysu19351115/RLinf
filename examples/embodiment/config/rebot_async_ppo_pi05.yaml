@@ -7,6 +7,7 @@ defaults:
   - override hydra/job_logging: stdout
 
 # ReBot Arm B601 + pi0.5 + Async PPO — cloud GPU + local robot
+# Cloud training footprint is intentionally kept smaller than the single-node config.
 
 cluster:
   num_nodes: 2
@@ -85,11 +86,11 @@ env:
   group_name: "EnvGroup"
 
   train:
-    rollout_epoch: 20
+    rollout_epoch: 2        # Reduced to shorten single rollout time
     ignore_terminations: False
     total_num_envs: 1
     max_episode_steps: 240
-    max_steps_per_rollout_epoch: 240          # 240 % 8 == 0 ✓
+    max_steps_per_rollout_epoch: 240          # 240 % 4 == 0 ✓; 10*240/4=600 % 120 == 0 ✓
     override_cfg:
       is_dummy: False
       use_dense_reward: True
@@ -101,7 +102,7 @@ env:
     rollout_epoch: 1
     total_num_envs: 1
     max_episode_steps: 240
-    max_steps_per_rollout_epoch: 240          # 240 % 8 == 0 ✓
+    max_steps_per_rollout_epoch: 240          # 240 % 4 == 0 ✓
     override_cfg:
       is_dummy: False
       max_num_steps: 240
@@ -121,8 +122,8 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 80
-  global_batch_size: 400
+  micro_batch_size: 10      # Reduced to keep cloud actor memory/compute below single-node
+  global_batch_size: 120     # 120 % 10 == 0; rollout_per_rank=1200 % 120 == 0 ✓
   seed: 0
   enable_offload: False
 
@@ -130,7 +131,7 @@ actor:
     model_path: "checkpoints/pi05_rebot_insertion_pytorch"
     model_type: "openpi"
     add_value_head: True
-    num_action_chunks: 8
+    num_action_chunks: 4     # Reduced vs single-node (5) to lower sequence/output cost
     action_dim: 7
     num_steps: 4
     openpi:
@@ -138,7 +139,7 @@ actor:
       value_after_vlm: True
       num_images_in_input: 1
       noise_method: "flow_noise"
-      action_horizon: 15
+      action_horizon: 6        # Reduced vs single-node (8) to lower rollout/actor cost
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True
       action_chunk: ${actor.model.num_action_chunks}

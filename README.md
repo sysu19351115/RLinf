@@ -194,7 +194,6 @@ source .venv/bin/activate
 export RLINF_NODE_RANK=0
 export RLINF_COMM_NET_DEVICES=wlp131s0 # 通过ip addr 查看该机器绑定ip所在的网口
 ray start --head --port=6389 --node-ip-address=192.168.3.223 \
-  --include-dashboard=false \
   --disable-usage-stats
 
 # 本地（worker）— 放宽心跳容忍，防止 WireGuard 延迟触发 GCS 误判节点 dead
