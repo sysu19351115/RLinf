@@ -128,16 +128,16 @@ actor:
   enable_offload: False
 
   model:
-    model_path: "/home/ztlab/project/ELM/RLinf/checkpoints/pi05_rebot_insertion_pytorch"
+    model_path: "/workspace/pjk/ELM/RLinf/checkpoints/pi05_rebot_insertion_pytorch"
     model_type: "openpi"
     add_value_head: True
-    is_lora: True
-    lora_rank: 32
+    is_lora: False
     num_action_chunks: 5
     action_dim: 7
     num_steps: 4
     openpi:
       config_name: "pi05_rebot"
+      train_expert_only: True
       value_after_vlm: True
       num_images_in_input: 1
       noise_method: "flow_noise"
