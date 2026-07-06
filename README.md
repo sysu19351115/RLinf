@@ -88,7 +88,7 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
   runner.ckpt_path=logs/.../checkpoints/global_step_240/actor/model_state_dict/full_weights.pt
 ```
 
-## 示例3: ReBot+PI0.5+PPO分布式训练
+## 示例3: ReBot+PI0.5+PPO异步训练
 
 多机真机训练：云端 GPU 服务器（actor 训练 + rollout 推理）+ 本地 ReBot Arm 真机（env worker）。
 两端通过 WireGuard 组成 Layer 3 网络（云端 `10.200.200.2`，本地 `10.200.200.3`），Ray 集群直接互通。
@@ -104,25 +104,32 @@ bash evaluations/run_eval.sh gym_aloha gym_aloha_grpo_openpi_pi0_eval \
 
 ```bash
 bash requirements/install_local.sh --force embodied --model openpi --env rebot
+uv pip install -e . #装RLinf
 ```
 
 `--force` 跳过缓存检查，确保拿到最新的 `torch 2.7.0+cu128`。
 
 #### 1.2 本地真机节点（两种选择）
 
-**选择 A：使用本地 GPU（RTX 5090）**
+**选择 A：使用本地 GPU（RTX 5090/5070ti）**
 
 ```bash
-bash requirements/install_local.sh embodied --model openpi --env rebot
+sudo bash requirements/embodied/sys_deps.sh nvidia # 先用sudo权限安装系统依赖
+bash requirements/install_local.sh embodied --model openpi --env rebot --force --no-root # 再安装环境
 uv pip install -e . #装RLinf
 ```
 
-脚本自动检测 RTX 5090（Blackwell），安装 `torch 2.7.0+cu128`，与云端完全一致。
+脚本自动检测 RTX 5090（Blackwell），安装 `torch 2.7.0+cu128`，与云端完全一致。验证torch可正常使用gpu：
+
+```bash
+# 在云端执行
+python tests/unit_tests/pytorch_test.py
+```
 
 **选择 B：纯 CPU（不依赖 GPU，仅 env worker）**
 
 ```bash
-bash requirements/install_local.sh --cpu-only --env rebot
+bash requirements/install_local.sh --cpu-only --env rebot --force --no-root 
 uv pip install -e . #装RLinf
 ```
 
@@ -155,13 +162,13 @@ python rlinf/envs/realworld/rebot/verify_env.py --skip-camera
 
 #### 1.5 代码同步
 
-云端和本地需要相同的 RLinf 代码版本。在云端启动训练前执行：
+云端和本地需要相同的 RLinf 代码版本。可在云端启动训练前执行：
 
 ```bash
 export RLINF_CODE_WORKING_DIR=auto
 ```
 
-或手动 `git pull` 保持两端代码一致。
+或手动 `git pull` 保持两端代码一致。优先手动同步，因为自动同步依赖于网络，将主节点的代码强制传输到本地节点。
 
 ### 2. 模型准备
 
@@ -177,30 +184,28 @@ checkpoints/pi05_rebot_insertion_pytorch/
 
 ### 3. 启动 Ray 集群
 
-**WireGuard 方案（推荐）**：
+如果没有可相互访问随意端口的双向通信ip地址，请先参考 ‘docs/wireguard_build.md‘ 搭建虚拟网卡，但虚拟网卡用UDP协议，极度依赖良好的网络条件。
+
+若有本地局域网ip，可查看节点的ip与网卡后运行下述命令。
 
 ```bash
 # 云端（head）
 source .venv/bin/activate
 export RLINF_NODE_RANK=0
-export RLINF_COMM_NET_DEVICES=wg0
-ray start --head --port=6389 --node-ip-address=10.200.200.2 \
-  --object-manager-port=6391 \
-  --node-manager-port=6392 \
+export RLINF_COMM_NET_DEVICES=wlp131s0 # 通过ip addr 查看该机器绑定ip所在的网口
+ray start --head --port=6389 --node-ip-address=192.168.3.223 \
   --include-dashboard=false \
   --disable-usage-stats
 
 # 本地（worker）— 放宽心跳容忍，防止 WireGuard 延迟触发 GCS 误判节点 dead
 source .venv/bin/activate
 export RLINF_NODE_RANK=1
-export RLINF_COMM_NET_DEVICES=wg0
-export RAY_health_check_initial_delay_ms=30000
-export RAY_health_check_period_ms=10000
-export RAY_num_heartbeats_timeout=300
-ray start --address='10.200.200.2:6389' \
-  --node-manager-port=6392 \
-  --object-manager-port=6391 \
-  --node-ip-address=10.200.200.3 \
+export RLINF_COMM_NET_DEVICES=wlp129s0 # 通过ip addr 查看该机器绑定ip所在的网口
+# export RAY_health_check_initial_delay_ms=30000 #（optional）
+# export RAY_health_check_period_ms=10000 #（optional）
+# export RAY_num_heartbeats_timeout=300 #（optional）
+ray start --address='192.168.3.223:6389' \
+  --node-ip-address=192.168.3.224 \
   --disable-usage-stats
 ```
 
@@ -211,7 +216,7 @@ ray start --address='10.200.200.2:6389' \
 python tests/unit_tests/diag_cloud_to_local.py
 ```
 
-测试通过的条件是输出 `Test 1: cloud driver -> LOCAL node ... SUCCESS`。
+测试通过的条件是输出 `Test 1: cloud driver -> LOCAL node ... SUCCESS`，且两个节点alive=True
 
 ### 4. 训练
 

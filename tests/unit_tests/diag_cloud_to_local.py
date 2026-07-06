@@ -17,20 +17,31 @@ for n in ray.nodes():
           f"CPU={n['Resources'].get('CPU','?')} "
           f"node_id={n['NodeID'][:16]}")
 
-# Find local node ID (matches any WireGuard 10.200.x.x address)
+# Find cloud / local node IDs by fixed IPs
+#   cloud = 192.168.3.223, local = 192.168.3.224
+cloud_id = None
+cloud_ip = None
 local_id = None
 local_ip = None
 for n in ray.nodes():
-    if "10.200" in n["NodeManagerAddress"]:
+    addr = n["NodeManagerAddress"]
+    if "192.168.3.223" in addr:
+        cloud_id = n["NodeID"]
+        cloud_ip = addr
+    elif "192.168.3.224" in addr:
         local_id = n["NodeID"]
-        local_ip = n["NodeManagerAddress"]
-        break
+        local_ip = addr
 
+if not cloud_id:
+    print("\nERROR: cloud node not found (no 192.168.3.223 address)")
+    ray.shutdown()
+    exit(1)
 if not local_id:
-    print("\nERROR: local node not found (no WireGuard 10.200.x.x address)")
+    print("\nERROR: local node not found (no 192.168.3.224 address)")
     ray.shutdown()
     exit(1)
 
+print(f"  Cloud node: {cloud_ip}")
 print(f"  Local node: {local_ip}")
 
 @ray.remote
@@ -68,13 +79,17 @@ else:
 
 # ---- Test 2: cloud baseline ----
 print(f"\n{'='*60}")
-print("Test 2: cloud driver -> CLOUD node (baseline)")
+print(f"Test 2: cloud driver -> CLOUD node ({cloud_id[:16]}...)")
 print(f"{'='*60}")
+
+cloud_sched = ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+    node_id=cloud_id, soft=False)
 
 t0 = time.time()
 for i in range(3):
     try:
-        print(f"  {ray.get(where.remote(), timeout=5)}")
+        ref = where.options(scheduling_strategy=cloud_sched).remote()
+        print(f"  {ray.get(ref, timeout=5)}")
     except Exception as e:
         print(f"  ERROR: {e}")
 print(f"  Done in {time.time()-t0:.1f}s")
