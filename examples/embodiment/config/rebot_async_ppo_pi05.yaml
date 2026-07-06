@@ -15,7 +15,7 @@ cluster:
       node_group: cloud
       placement: 0
     rollout:
-      node_group: cloud             # actor + rollout both run on the training node
+      node_group: robot             # actor + rollout both run on the training node
       placement: 0
     env:
       node_group: robot
@@ -45,7 +45,7 @@ runner:
 
   only_eval: False
   val_check_interval: -1
-  save_interval: 50
+  save_interval: 5
 
   resume_dir: null
   ckpt_path: null
