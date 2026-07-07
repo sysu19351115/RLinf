@@ -30,7 +30,9 @@ cluster:
         type: RebotArm
         configs:
           - can_interface: can0
-            camera_serials: []          # Replace with D435 serial, e.g. ["12345678"]
+            camera_serials:
+              - "148522073709"
+            camera_type: "realsense"
             node_rank: 0
 
 runner:

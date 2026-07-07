@@ -16,7 +16,7 @@ import copy
 import queue
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import gymnasium as gym
@@ -66,6 +66,25 @@ class RebotArmRobotConfig:
 
     use_dense_reward: bool = False
     """Use distance-based dense reward instead of binary 0/1."""
+
+    use_reward_model: bool = False
+    """Use a learned vision-based reward model instead of geometry."""
+
+    reward_worker_cfg: Optional[dict] = None
+    """Configuration dict passed to the embodied reward worker."""
+
+    reward_worker_node_rank: Optional[int] = None
+    """Node rank on which to place the reward worker."""
+
+    reward_worker_node_group: Optional[str] = None
+    """Optional node group label for reward worker placement."""
+
+    reward_worker_hardware_rank: int = 0
+    """GPU/hardware rank for the reward worker."""
+
+    reward_image_key: Optional[str] = None
+    """Key in ``observation['frames']`` to use for reward model inference.
+    If ``None``, the first available frame key is used."""
 
     step_frequency: float = 10.0
     """Maximum environment steps per second."""
@@ -173,9 +192,12 @@ class RebotArmEnv(gym.Env):
         self._num_steps = 0
         self._success_hold_counter = 0
         self._gripper_is_open = True
+        self._reward_worker = None
 
         if not self.config.is_dummy:
             self._setup_hardware()
+        if self.config.use_reward_model:
+            self._setup_reward_worker()
 
         if self.config.camera_serials is None:
             self.config.camera_serials = []
@@ -234,6 +256,35 @@ class RebotArmEnv(gym.Env):
             env_idx=self.env_idx,
             node_rank=controller_node_rank,
             worker_rank=self.env_worker_rank,
+        )
+
+    def _setup_reward_worker(self):
+        """Launch the embodied reward worker if reward model is enabled."""
+        if not self.config.use_reward_model:
+            return
+        if self.config.reward_worker_cfg is None:
+            raise ValueError(
+                "use_reward_model=True but reward_worker_cfg is not provided."
+            )
+
+        from rlinf.workers.reward.reward_worker import EmbodiedRewardWorker
+
+        reward_node_rank = self.config.reward_worker_node_rank
+        if reward_node_rank is None:
+            reward_node_rank = self.node_rank
+
+        self._reward_worker = EmbodiedRewardWorker.launch_for_realworld(
+            reward_cfg=self.config.reward_worker_cfg,
+            node_rank=reward_node_rank,
+            node_group_label=self.config.reward_worker_node_group,
+            hardware_rank=self.config.reward_worker_hardware_rank,
+            env_idx=self.env_idx,
+            worker_rank=self.env_worker_rank,
+        )
+        self._reward_worker.init_worker().wait()
+        self._logger.info(
+            f"Reward worker initialized for env {self.env_idx} "
+            f"on node {reward_node_rank}"
         )
 
     def _init_action_obs_spaces(self):
@@ -346,29 +397,18 @@ class RebotArmEnv(gym.Env):
         observation: dict,
         is_gripper_action_effective: bool = False,
     ) -> float:
-        """Compute reward from FK-based TCP pose vs target pose."""
-        if not self.config.is_dummy:
-            euler_angles = np.abs(
-                R.from_quat(self._state.tcp_pose[3:].copy()).as_euler("xyz")
-            )
-            position = np.hstack([self._state.tcp_pose[:3], euler_angles])
-            target_delta = np.abs(position - self.config.target_ee_pose)
+        """Compute reward from FK-based TCP pose or a learned reward model."""
+        # In dummy mode we still want to exercise the reward model path so that
+        # offline verification scripts can check the model without real hardware.
+        if self.config.is_dummy and not self.config.use_reward_model:
+            return 0.0
 
-            is_in_target_zone = np.all(
-                target_delta[:3] <= self.config.reward_threshold[:3]
-            )
-
-            if is_in_target_zone:
+        if self.config.use_reward_model:
+            reward = self._compute_reward_model(observation)
+            if reward >= 1.0:
                 self._success_hold_counter += 1
-                reward = 1.0
             else:
                 self._success_hold_counter = 0
-                if self.config.use_dense_reward:
-                    reward = float(
-                        np.exp(-500.0 * np.sum(np.square(target_delta[:3])))
-                    )
-                else:
-                    reward = 0.0
 
             if (
                 self.config.enable_gripper_penalty
@@ -376,9 +416,77 @@ class RebotArmEnv(gym.Env):
             ):
                 reward -= self.config.gripper_penalty
 
-            reward = max(0.0, min(1.0, reward))
-            return reward
-        return 0.0
+            return max(0.0, min(1.0, float(reward)))
+
+        # Legacy geometry-based reward.
+        euler_angles = np.abs(
+            R.from_quat(self._state.tcp_pose[3:].copy()).as_euler("xyz")
+        )
+        position = np.hstack([self._state.tcp_pose[:3], euler_angles])
+        target_delta = np.abs(position - self.config.target_ee_pose)
+
+        is_in_target_zone = np.all(
+            target_delta[:3] <= self.config.reward_threshold[:3]
+        )
+
+        if is_in_target_zone:
+            self._success_hold_counter += 1
+            reward = 1.0
+        else:
+            self._success_hold_counter = 0
+            if self.config.use_dense_reward:
+                reward = float(
+                    np.exp(-500.0 * np.sum(np.square(target_delta[:3])))
+                )
+            else:
+                reward = 0.0
+
+        if (
+            self.config.enable_gripper_penalty
+            and is_gripper_action_effective
+        ):
+            reward -= self.config.gripper_penalty
+
+        reward = max(0.0, min(1.0, reward))
+        return reward
+
+    def _compute_reward_model(
+        self, observation: dict[str, Any]
+    ) -> float:
+        """Run reward model inference on the current camera frame.
+
+        Args:
+            observation: Environment observation containing ``frames``.
+
+        Returns:
+            Scalar reward in ``[0, 1]``.
+        """
+        if self._reward_worker is None:
+            raise RuntimeError(
+                "Reward worker is not initialized but use_reward_model=True."
+            )
+
+        frames = observation.get("frames", {})
+        if not frames:
+            raise ValueError("No frames available for reward model inference.")
+
+        image_key = self.config.reward_image_key
+        if image_key is None:
+            image_key = sorted(frames.keys())[0]
+        if image_key not in frames:
+            raise KeyError(
+                f"reward_image_key '{image_key}' not found in frames. "
+                f"Available keys: {list(frames.keys())}"
+            )
+
+        image_batch = np.expand_dims(frames[image_key], axis=0)
+        reward_output = self._reward_worker.compute_image_rewards(
+            image_batch
+        ).wait()[0]
+        if hasattr(reward_output, "detach"):
+            reward_output = reward_output.detach().cpu().numpy()
+        reward_array = np.asarray(reward_output).reshape(-1)
+        return float(reward_array[0])
 
     # ── Observation ──────────────────────────────────────────────────────────
 
@@ -478,6 +586,16 @@ class RebotArmEnv(gym.Env):
             return True
 
         return False
+
+    def close(self):
+        """Release cameras and video player resources."""
+        if hasattr(self, "camera_player"):
+            self.camera_player.stop()
+        if not self.config.is_dummy and hasattr(self, "_cameras"):
+            self._close_cameras()
+        # The reward worker Ray actor is left for Ray to clean up, matching
+        # the behavior of FrankaEnv.
+        super().close()
 
     # ── Utilities ────────────────────────────────────────────────────────────
 

@@ -20,13 +20,19 @@ init_params:
   id: "RebotArmPickAndPlaceEnv-v1"
   num_envs: null
   can_interface: "can0"
+  camera_serials:
+    - "148522073709"
+  camera_type: "realsense"
   is_dummy: false
   enable_gripper: true
   task_description: "pick objects and insert into the tray box"
-  target_ee_pose: [0.3, -0.2, 0.15, 3.14, 0.0, 0.0]
-  reward_threshold: [0.02, 0.02, 0.02, 0.2, 0.2, 0.2]
+  # Note: target_ee_pose and reward_threshold are not used when
+  # use_reward_model=True. They are kept only for backward compatibility
+  # with the legacy geometric reward path.
+  # target_ee_pose: [0.3, -0.2, 0.15, 3.14, 0.0, 0.0]
+  # reward_threshold: [0.02, 0.02, 0.02, 0.2, 0.2, 0.2]
   max_num_steps: 200
-  use_dense_reward: true
+  use_dense_reward: false
   enable_gripper_penalty: false
   reset_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   step_frequency: 10.0

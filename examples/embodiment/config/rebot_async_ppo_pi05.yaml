@@ -30,7 +30,9 @@ cluster:
         type: RebotArm
         configs:
           - can_interface: can0
-            camera_serials: []      # Replace with D435 serial, e.g. ["12345678"]
+            camera_serials:
+              - "148522073709"
+            camera_type: "realsense"
             node_rank: 1
 
 runner:
@@ -93,10 +95,21 @@ env:
     max_steps_per_rollout_epoch: 240          # 240 % 4 == 0 ✓; 10*240/4=600 % 120 == 0 ✓
     override_cfg:
       is_dummy: False
-      use_dense_reward: True
+      use_dense_reward: False
+      use_reward_model: True
+      reward_image_key: "wrist_1"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "resnet"
+          model_path: "/home/tyz/project/RLinf/logs/rebot_reward_model/rebot_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          arch: "resnet18"
+          hidden_dim: 256
+          dropout: 0.1
+          image_size: [3, 224, 224]
+          normalize: true
+          precision: "fp32"
       max_num_steps: 240
-      target_ee_pose: TARGET_EE_POSE       # Replace: [x, y, z, rx, ry, rz]
-      reward_threshold: [0.02, 0.02, 0.02, 0.2, 0.2, 0.2]
 
   eval:
     rollout_epoch: 1
@@ -105,8 +118,20 @@ env:
     max_steps_per_rollout_epoch: 240          # 240 % 4 == 0 ✓
     override_cfg:
       is_dummy: False
+      use_reward_model: True
+      reward_image_key: "wrist_1"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "resnet"
+          model_path: "/home/tyz/project/RLinf/logs/rebot_reward_model/rebot_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          arch: "resnet18"
+          hidden_dim: 256
+          dropout: 0.1
+          image_size: [3, 224, 224]
+          normalize: true
+          precision: "fp32"
       max_num_steps: 240
-      target_ee_pose: TARGET_EE_POSE
 
 rollout:
   group_name: "RolloutGroup"
