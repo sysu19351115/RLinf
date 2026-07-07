@@ -83,9 +83,7 @@ class RebotArmController(Worker):
         self._logger = get_logger()
 
         # Ensure the rebot SDK is importable (it lives alongside this module).
-        _rebot_dir = os.path.dirname(os.path.abspath(os.path.join(
-            os.path.dirname(__file__), "..",
-        )))
+        _rebot_dir = os.path.dirname(os.path.abspath(__file__))
         if _rebot_dir not in sys.path:
             sys.path.insert(0, _rebot_dir)
 
