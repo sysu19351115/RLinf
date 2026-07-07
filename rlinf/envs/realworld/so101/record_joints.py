@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Record current SO101 joint positions as initial/end pose files."""
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
+from lerobot.robots.so_follower import SOFollowerConfig
+
+_MOTOR_NAMES = (
+    "left_shoulder_pan",
+    "left_shoulder_lift",
+    "left_elbow_flex",
+    "left_wrist_flex",
+    "left_wrist_roll",
+    "left_gripper",
+    "right_shoulder_pan",
+    "right_shoulder_lift",
+    "right_elbow_flex",
+    "right_wrist_flex",
+    "right_wrist_roll",
+    "right_gripper",
+)
+
+
+def _make_robot(
+    left_follower_port: str, right_follower_port: str, max_relative_target: float
+):
+    config = BiSOFollowerConfig(
+        id="bi",
+        left_arm_config=SOFollowerConfig(
+            port=left_follower_port, max_relative_target=max_relative_target
+        ),
+        right_arm_config=SOFollowerConfig(
+            port=right_follower_port, max_relative_target=max_relative_target
+        ),
+    )
+    return BiSOFollower(config)
+
+
+def _state_from_robot_obs(robot_obs: dict) -> np.ndarray:
+    return np.asarray(
+        [float(robot_obs[f"{name}.pos"]) for name in _MOTOR_NAMES], dtype=np.float32
+    )
+
+
+def _save(path: str, values: np.ndarray) -> None:
+    path = Path(path)
+    payload = {
+        "motor_names": list(_MOTOR_NAMES),
+        "positions": [float(v) for v in values],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Record SO101 current joint positions."
+    )
+    parser.add_argument("--left-follower-port", default="/dev/ttyACM2")
+    parser.add_argument("--right-follower-port", default="/dev/ttyACM3")
+    parser.add_argument("--max-relative-target", type=float, default=5.0)
+    parser.add_argument("--pose-kind", choices=("initial", "end"), default="initial")
+    parser.add_argument("--output", default=None)
+    args = parser.parse_args()
+
+    output = args.output or f"rlinf/envs/realworld/so101/{args.pose_kind}_joints.json"
+    robot = _make_robot(
+        args.left_follower_port, args.right_follower_port, args.max_relative_target
+    )
+    try:
+        robot.connect()
+        obs = robot.get_observation()
+        values = _state_from_robot_obs(obs)
+        _save(output, values)
+        print(f"Saved {args.pose_kind} joints to {output}")
+        for name, value in zip(_MOTOR_NAMES, values):
+            print(f"{name}: {float(value):.6f}")
+    finally:
+        if getattr(robot, "is_connected", False):
+            robot.disconnect()
+
+
+if __name__ == "__main__":
+    main()

@@ -130,6 +130,17 @@ These examples assume you have access to the corresponding hardware. They walk t
        </p>
      </div>
 
+     <div style="flex: 1 1 30%; max-width: 300px; text-align: center;">
+       <img src="https://github.com/RLinf/misc/raw/main/pic/so101_arm.jpg"
+            style="width: 100%; height: 200px; object-fit: cover; border-radius: 8px; box-shadow: 0 2px 6px rgba(0,0,0,0.15);" />
+       <p style="margin-top: 8px; font-size: 14px; line-height: 1.4;">
+         <a href="embodied/so101.html" style="text-decoration: underline; color: blue;">
+           <b>Real-World RL with SO101 Bimanual Arms</b>
+         </a><br>
+           pi0.5 + PPO on the SO101 bimanual follower-arm platform
+       </p>
+     </div>
+
    </div>
 
 .. toctree::
@@ -147,3 +158,4 @@ These examples assume you have access to the corresponding hardware. They walk t
    embodied/gim_arm
    embodied/xsquare_turtle2
    embodied/dosw1
+   embodied/so101

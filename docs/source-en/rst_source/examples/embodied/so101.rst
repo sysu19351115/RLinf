@@ -1,0 +1,310 @@
+Real-World RL with SO101 Bimanual Arms
+======================================
+
+This document describes how to run real-world reinforcement learning on the
+**SO101** bimanual robot platform with RLinf. The example uses **pi0.5** as
+the vision-language-action model and **PPO** (async or single-node) as the
+RL algorithm.
+
+The SO101 integration is based on LeRobot's ``BiSOFollower`` robot class and
+the OpenPI SO101 data transforms. It follows the same real-world RL recipe as
+:doc:`rebot` and :doc:`franka`.
+
+Environment
+-----------
+
+**SO101 Pick-and-Place**
+
+- **Robot**: SO101 dual follower arms, each with 5 joints + 1 gripper.
+- **Task**: Bimanual pick-and-place (or any task defined by a language prompt
+  and a learned reward model).
+- **Observation**:
+
+  - Three RGB images (128 × 128): ``cam_high`` (left global),
+    ``cam_left_wrist``, ``cam_right_wrist``.
+  - Proprioceptive state: 12 motor positions.
+
+- **Action Space**: 12-dimensional continuous action — absolute motor position
+  targets in the order
+  ``[left_joint(5), left_gripper(1), right_joint(5), right_gripper(1)]``.
+
+**Data Structure**
+
+- **Images**: ``frames/{cam_high, cam_left_wrist, cam_right_wrist}`` — uint8
+  ``[H, W, 3] = [128, 128, 3]``.
+- **State**: ``state/arm_joint_position`` — 12-D float.
+- **Actions**: 12-D float.
+- **Rewards**: By default a learned vision-based reward model is recommended;
+  a dummy dense/sparse reward placeholder is also supported for dry-runs.
+
+Algorithm
+---------
+
+**Core Algorithm Components**
+
+1. **PPO** with GAE advantages and decoupled actor-critic loss
+   (``adv_type: gae``, ``loss_type: decoupled_actor_critic``).
+2. **pi0.5** vision-language-action model. The OpenPI data transform converts
+   absolute joint targets to deltas for training and back to absolute positions
+   for inference.
+3. **Value head** on top of the pi0.5 suffix output for critic estimation.
+
+Hardware Setup
+--------------
+
+- **Robot**: 2× SO101 follower arms connected via USB serial.
+- **Cameras**: 3× USB cameras (left global, left wrist, right wrist). Use
+  stable ``/dev/v4l/by-path/...`` symlinks in the config.
+- **Training / Rollout Node**: A machine with at least one CUDA GPU
+  (RTX 4090 or better recommended).
+- **Robot Node**: The PC directly connected to the SO101 arms and cameras.
+
+.. warning::
+
+   The training node and the robot node must be reachable over the **same local
+   network** (or via VPN/SSH tunnel for remote setups). See
+   :doc:`../tutorials/configuration/hetero` for multi-node Ray setup.
+
+Dependency Installation
+-----------------------
+
+Both nodes use the same install command. The robot node additionally needs
+physical access to the serial ports and cameras.
+
+a. Clone RLinf Repository
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: bash
+
+   git clone https://github.com/RLinf/RLinf.git
+   cd RLinf
+
+b. Install Dependencies
+~~~~~~~~~~~~~~~~~~~~~~~
+
+.. code:: bash
+
+   bash requirements/install.sh embodied --model openpi --env so101
+   source .venv/bin/activate
+
+   # Install RLinf itself
+   uv pip install -e .
+
+If the robot node has no GPU, you can install the CPU-only env worker:
+
+.. code:: bash
+
+   bash requirements/install.sh --cpu-only --env so101
+   source .venv/bin/activate
+   uv pip install -e .
+
+Model Checkpoint
+----------------
+
+Place the pi0.5 SO101 checkpoint under ``checkpoints/pi05_so101_cache_torch/``::
+
+   checkpoints/pi05_so101_cache_torch/
+   ├── model.safetensors
+   ├── config.json
+   └── ...
+
+The OpenPI dataconfig ``pi05_so101`` is already registered in RLinf and expects
+this path for norm stats.
+
+Record Initial / End Poses
+----------------------------
+
+Move both follower arms by hand to the desired start pose, then run:
+
+.. code:: bash
+
+   python rlinf/envs/realworld/so101/record_joints.py \
+       --pose-kind=initial \
+       --left-follower-port=/dev/ttyACM2 \
+       --right-follower-port=/dev/ttyACM3
+
+Repeat for the safe end pose with ``--pose-kind=end``. Copy the resulting JSON
+paths into the YAML ``initial_joints`` / ``end_joints`` fields, or convert them
+to a 12-element list and paste directly into the config.
+
+Verification
+------------
+
+Before training, verify the environment:
+
+.. code:: bash
+
+   # Dummy mode only (no hardware)
+   python rlinf/envs/realworld/so101/verify_env.py --skip-hardware --skip-camera
+
+   # Full hardware verification
+   python rlinf/envs/realworld/so101/verify_env.py
+
+Cluster Setup
+-------------
+
+Real-world training uses a two-node Ray cluster: one GPU node
+(``actor``/``rollout``) and one robot node (``env``).
+
+1. Source the venv on **every** node and export ``RLINF_NODE_RANK`` before
+   starting Ray. Ray captures environment variables at ``ray start`` time.
+
+2. Start Ray:
+
+.. code-block:: bash
+
+   # GPU node (node rank 0, Ray head)
+   export RLINF_NODE_RANK=0
+   export RLINF_COMM_NET_DEVICES=enp130s0
+   ray start --head --port=6379 --node-ip-address=<GPU_SERVER_IP> --disable-usage-stats
+
+   # Robot node (node rank 1, Ray worker)
+   export RLINF_NODE_RANK=1
+   export RLINF_COMM_NET_DEVICES=enp130s0
+   ray start --address=<GPU_SERVER_IP>:6379 --node-ip-address=<ROBOT_IP> --disable-usage-stats
+
+3. Verify with ``ray status`` that both nodes are connected.
+
+Configuration File
+------------------
+
+Use ``examples/embodiment/config/so101_async_ppo_pi05.yaml`` for multi-node
+async training, or ``so101_single_node_ppo_pi05.yaml`` for a single machine.
+
+Fields that you should update for your setup:
+
+.. code-block:: yaml
+
+   cluster:
+     num_nodes: 2
+     component_placement:
+       actor:   { node_group: cloud, placement: 0 }
+       rollout: { node_group: robot, placement: 0 }
+       env:     { node_group: robot, placement: 0 }
+     node_groups:
+       - label: cloud
+         node_ranks: 0
+       - label: robot
+         node_ranks: 1
+         hardware:
+           type: SO101Arm
+           configs:
+             - left_follower_port: "/dev/ttyACM2"
+               right_follower_port: "/dev/ttyACM3"
+               left_wrist_camera:
+                 index_or_path: "/dev/v4l/by-path/..."
+               right_wrist_camera:
+                 index_or_path: "/dev/v4l/by-path/..."
+               left_global_camera:
+                 index_or_path: "/dev/v4l/by-path/..."
+               node_rank: 1
+
+   env:
+     train:
+       override_cfg:
+         is_dummy: False
+         tele_mode: true          # set false only after safety checks
+         initial_joints: [...]    # 12 values from record_joints.py
+         end_joints: [...]        # optional
+         task_description: "Pick up the black tape and place it into the white box."
+
+   actor:
+     model:
+       model_path: "checkpoints/pi05_so101_cache_torch"
+       openpi:
+         config_name: "pi05_so101"
+         num_images_in_input: 3
+
+.. warning::
+
+   Keep ``tele_mode: true`` for the first real-robot rollouts. The env will
+   query the policy and read observations but will **not** send actions to the
+   motors. Switch to ``false`` only after confirming images, action shape, and
+   workspace safety.
+
+Dummy Training (No Hardware)
+----------------------------
+
+Run a dry-run with ``is_dummy: true`` to validate the config tree and OpenPI
+rollout pipeline:
+
+.. code-block:: bash
+
+   python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05 \
+       env.train.override_cfg.is_dummy=True
+
+Training
+--------
+
+After verification, launch real-world training from the GPU node:
+
+.. code-block:: bash
+
+   # Multi-node async PPO
+   python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05
+
+   # Single-node PPO
+   python examples/embodiment/train_async.py --config-name so101_single_node_ppo_pi05
+
+Reward Model (Recommended)
+--------------------------
+
+For most SO101 tasks a geometric reward is not available. Train a vision-based
+reward model from human demonstrations:
+
+1. Collect LeRobot-format demos under ``datasets/so101_lerobot_data/``.
+2. Preprocess:
+
+   .. code:: bash
+
+      python examples/reward/preprocess_rebot_lerobot.py \
+          --dataset-path datasets/so101_lerobot_data \
+          --output-dir logs/so101_reward_data/processed \
+          --image-key observation.images.cam_left_wrist
+
+3. Train:
+
+   .. code:: bash
+
+      python examples/reward/train_reward_model.py --config-name so101_reward_training
+
+4. Enable in the YAML:
+
+   .. code-block:: yaml
+
+      env:
+        train:
+          override_cfg:
+            use_reward_model: True
+            reward_image_key: "cam_left_wrist"
+            reward_worker_cfg:
+              use_reward_model: True
+              model:
+                model_type: "resnet"
+                model_path: "/absolute/path/to/so101_reward_model/.../full_weights.pt"
+                arch: "resnet18"
+                hidden_dim: 256
+                image_size: [3, 224, 224]
+
+Troubleshooting
+---------------
+
+**``LeRobot not importable``**
+  Run the installer with ``--env so101``. The ``so101`` extra pins ``numpy<2``
+  and installs LeRobot from the pinned git commit.
+
+**``Serial ports not found``**
+  Check ``ls /dev/ttyACM*`` and update ``left_follower_port`` /
+  ``right_follower_port`` in the YAML/hardware config.
+
+**``Camera ... not producing frames``**
+  Verify symlinks with ``ls -l /dev/v4l/by-path/``. Use ``v4l2-ctl`` to test
+  each camera independently.
+
+**``actions shape mismatch``**
+  The env expects 12-D actions. Make sure ``actor.model.action_dim: 12`` and
+  ``actor.model.openpi.config_name: "pi05_so101"``.
+
+**Policy does not move the arms**
+  Check that ``tele_mode`` is ``false`` and that the model outputs absolute
+  positions (the ``SO101PolicyOutputs`` transform slices the first 12 dims).

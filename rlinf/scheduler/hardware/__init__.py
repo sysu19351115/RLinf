@@ -32,6 +32,8 @@ from .robots import (
     RebotArmConfig,
     RebotArmHWInfo,
     RobotAutoConfig,
+    SO101ArmConfig,
+    SO101ArmHWInfo,
     Turtle2Config,
     Turtle2HWInfo,
 )
@@ -57,6 +59,8 @@ __all__ = [
     "RebotArmConfig",
     "RebotArmHWInfo",
     "RobotAutoConfig",
+    "SO101ArmConfig",
+    "SO101ArmHWInfo",
     "Turtle2Config",
     "Turtle2HWInfo",
 ]

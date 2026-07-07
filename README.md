@@ -10,6 +10,8 @@
 | 示例2 | Gym Aloha + PI0 + PPO（仿真） | [docs/examples/gym_aloha_pi0_ppo.md](docs/examples/gym_aloha_pi0_ppo.md) |
 | 示例3 | ReBot + PI0.5 + PPO 异步真机训练 | [docs/examples/rebot_pi05_ppo_async.md](docs/examples/rebot_pi05_ppo_async.md) |
 | 示例4 | ReBot + PI0.5 + PPO 单节点真机训练 | [docs/examples/rebot_pi05_ppo_single_node.md](docs/examples/rebot_pi05_ppo_single_node.md) |
+| 示例5 | SO101 + PI0.5 + PPO 异步真机训练 | [docs/source-zh/rst_source/examples/embodied/so101.rst](docs/source-zh/rst_source/examples/embodied/so101.rst) |
+| 示例6 | SO101 + PI0.5 + PPO 单节点真机训练 | [examples/embodiment/config/so101_single_node_ppo_pi05.yaml](examples/embodiment/config/so101_single_node_ppo_pi05.yaml) |
 
 ## 通用资源
 

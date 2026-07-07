@@ -75,7 +75,7 @@ NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "rebot" "dummy" "polaris" "gym_aloha")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "rebot" "so101" "dummy" "polaris" "gym_aloha")
 
 #=======================Utility Functions=======================
 
@@ -1198,6 +1198,13 @@ install_openpi_model() {
             install_flash_attn
             install_rebot_env
             ;;
+        so101)
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_flash_attn
+            install_so101_env
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
             exit 1
@@ -1518,6 +1525,9 @@ install_env_only() {
         rebot)
             install_rebot_env
             ;;
+        so101)
+            install_so101_env
+            ;;
         dosw1)
             install_dosw1_env
             ;;
@@ -1539,6 +1549,10 @@ install_dummy_env() {
 
 install_rebot_env() {
     uv sync --extra rebot --inexact --active $NO_INSTALL_RLINF_CMD
+}
+
+install_so101_env() {
+    uv sync --extra so101 --inexact --active $NO_INSTALL_RLINF_CMD
 }
 
 install_gym_aloha_env() {

@@ -1,0 +1,51 @@
+env_type: realworld
+
+total_num_envs: 1
+
+auto_reset: False
+ignore_terminations: False
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 240
+max_episode_steps: 240
+main_image_key: cam_left_wrist
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "SO101PickAndPlaceEnv-v1"
+  num_envs: null
+  left_follower_port: "/dev/ttyACM2"
+  right_follower_port: "/dev/ttyACM3"
+  left_wrist_camera:
+    index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:8.3:1.0-video-index0"
+    width: 1920
+    height: 1080
+    fps: 30
+    fourcc: "MJPG"
+  right_wrist_camera:
+    index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:8.4:1.0-video-index0"
+    width: 1920
+    height: 1080
+    fps: 30
+    fourcc: "MJPG"
+  left_global_camera:
+    index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:7:1.0-video-index0"
+    width: 1920
+    height: 1080
+    fps: 30
+    fourcc: "MJPG"
+  robot_id: "bi"
+  max_relative_target: 5.0
+  is_dummy: false
+  tele_mode: true
+  task_description: "Pick up the black tape and place it into the white box."
+  max_num_steps: 200
+  use_dense_reward: false
+  step_frequency: 10.0
+  init_steps: 60
+  init_fps: 30.0

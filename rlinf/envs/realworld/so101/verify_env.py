@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+# Copyright 2026 The RLinf Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Verify that the SO101 + RLinf environment is ready for RL training.
+
+Usage::
+
+    python rlinf/envs/realworld/so101/verify_env.py
+    python rlinf/envs/realworld/so101/verify_env.py --skip-camera
+    python rlinf/envs/realworld/so101/verify_env.py --skip-hardware
+
+Steps:
+    1. LeRobot import check
+    2. Serial port presence
+    3. BiSOFollower connectivity (joint read)
+    4. Camera image read [skippable]
+    5. RLinf SO101PickAndPlaceEnv (dummy mode)
+"""
+
+import argparse
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+_SUCCESS = 0
+_FAILURE = 1
+_SKIP = 2
+
+_LEFT_PORT = "/dev/ttyACM2"
+_RIGHT_PORT = "/dev/ttyACM3"
+
+
+def _green(msg: str) -> str:
+    return f"\033[92m{msg}\033[0m"
+
+
+def _red(msg: str) -> str:
+    return f"\033[91m{msg}\033[0m"
+
+
+def _yellow(msg: str) -> str:
+    return f"\033[93m{msg}\033[0m"
+
+
+def _status(label: str, result: int, detail: str = "") -> None:
+    if result == _SUCCESS:
+        print(f"  {_green('[ OK ]')} {label}")
+    elif result == _SKIP:
+        print(f"  {_yellow('[SKIP]')} {label}")
+        if detail:
+            print(f"         {detail}")
+    else:
+        print(f"  {_red('[FAIL]')} {label}")
+        if detail:
+            print(f"         {detail}")
+
+
+# ──────────────────────────────────────────────────────────────────
+
+
+def step_lerobot_import() -> tuple[int, str]:
+    """Check that LeRobot is importable."""
+    try:
+        import lerobot.robots.bi_so_follower  # noqa: F401
+        import lerobot.robots.so_follower  # noqa: F401
+
+        return _SUCCESS, "LeRobot BiSOFollower import OK"
+    except ImportError as e:
+        return _FAILURE, (
+            f"LeRobot not importable: {e}. "
+            "Make sure you installed the so101 extra: "
+            "bash requirements/install.sh embodied --model openpi --env so101"
+        )
+
+
+def step_serial_ports() -> tuple[int, str]:
+    """Check that the follower serial ports exist."""
+    missing = [p for p in (_LEFT_PORT, _RIGHT_PORT) if not os.path.exists(p)]
+    if missing:
+        return _FAILURE, (
+            f"Serial ports not found: {missing}. "
+            "Connect the SO101 arms and check /dev/ttyACM* assignments."
+        )
+    return _SUCCESS, f"Serial ports found: {_LEFT_PORT}, {_RIGHT_PORT}"
+
+
+def step_robot_connect(skip_hardware: bool) -> tuple[int, str]:
+    """Connect to the robot and read joint positions."""
+    if skip_hardware:
+        return _SKIP, "Skipped by --skip-hardware"
+
+    try:
+        from lerobot.cameras.opencv import OpenCVCameraConfig
+        from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
+        from lerobot.robots.so_follower import SOFollowerConfig
+
+        def _camera_config(index_or_path: str) -> OpenCVCameraConfig:
+            try:
+                index_or_path = int(index_or_path)
+            except ValueError:
+                index_or_path = Path(index_or_path)
+            return OpenCVCameraConfig(
+                index_or_path=index_or_path,
+                width=640,
+                height=480,
+                fps=30,
+                fourcc="MJPG",
+            )
+
+        config = BiSOFollowerConfig(
+            id="bi",
+            left_arm_config=SOFollowerConfig(
+                port=_LEFT_PORT,
+                max_relative_target=5.0,
+                cameras={
+                    "wrist": _camera_config("/dev/video0"),
+                    "global": _camera_config("/dev/video2"),
+                },
+            ),
+            right_arm_config=SOFollowerConfig(
+                port=_RIGHT_PORT,
+                max_relative_target=5.0,
+                cameras={"wrist": _camera_config("/dev/video1")},
+            ),
+        )
+        robot = BiSOFollower(config)
+        robot.connect()
+        obs = robot.get_observation()
+        q = [float(obs.get(f"{name}.pos", 0.0)) for name in _motor_names()]
+        robot.disconnect()
+        return _SUCCESS, f"12 joints readable (positions: {[f'{v:.3f}' for v in q]})"
+    except Exception:
+        return _FAILURE, f"BiSOFollower connection failed:\n{traceback.format_exc()}"
+
+
+def step_camera(skip_camera: bool, skip_hardware: bool) -> tuple[int, str]:
+    """Read a single frame from each camera."""
+    if skip_camera or skip_hardware:
+        return _SKIP, "Skipped by --skip-camera or --skip-hardware"
+
+    try:
+        import cv2
+    except ImportError:
+        return _FAILURE, "opencv-python not installed"
+
+    camera_paths = [
+        ("left_global", "/dev/video2"),
+        ("left_wrist", "/dev/video0"),
+        ("right_wrist", "/dev/video1"),
+    ]
+    lines = []
+    for name, path in camera_paths:
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            return _FAILURE, f"Cannot open camera {name} at {path}"
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return _FAILURE, f"Cannot read frame from camera {name} at {path}"
+        lines.append(f"{name}: {frame.shape}")
+    return _SUCCESS, "\n".join(lines)
+
+
+def step_rlinf_env() -> tuple[int, str]:
+    """Create a dummy SO101PickAndPlaceEnv and test reset + step."""
+    try:
+        import gymnasium as gym
+    except ImportError as e:
+        return _FAILURE, f"gymnasium not installed: {e}"
+
+    try:
+        import rlinf.envs.realworld  # noqa: F401
+    except Exception as e:
+        return _FAILURE, f"Failed to import rlinf.envs.realworld: {e}"
+
+    try:
+        env = gym.make(
+            "SO101PickAndPlaceEnv-v1",
+            override_cfg={
+                "is_dummy": True,
+                "task_description": "verification task",
+            },
+        )
+        obs, info = env.reset()
+        action = env.action_space.sample()
+        obs, reward, terminated, truncated, info = env.step(action)
+        env.close()
+        return _SUCCESS, (
+            f"dummy reset + step OK; state shape={obs['state']['arm_joint_position'].shape}, "
+            f"reward={reward:.3f}"
+        )
+    except Exception:
+        return _FAILURE, f"RLinf SO101Env dummy test failed:\n{traceback.format_exc()}"
+
+
+# ──────────────────────────────────────────────────────────────────
+
+
+def _motor_names() -> tuple[str, ...]:
+    return (
+        "left_shoulder_pan",
+        "left_shoulder_lift",
+        "left_elbow_flex",
+        "left_wrist_flex",
+        "left_wrist_roll",
+        "left_gripper",
+        "right_shoulder_pan",
+        "right_shoulder_lift",
+        "right_elbow_flex",
+        "right_wrist_flex",
+        "right_wrist_roll",
+        "right_gripper",
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Verify SO101 + RLinf environment.")
+    parser.add_argument(
+        "--skip-camera", action="store_true", help="Skip camera checks."
+    )
+    parser.add_argument(
+        "--skip-hardware", action="store_true", help="Skip real robot connection."
+    )
+    args = parser.parse_args()
+
+    print("SO101 + RLinf environment verification")
+    print("=" * 40)
+
+    steps = [
+        ("LeRobot import", step_lerobot_import()),
+        ("Serial ports", step_serial_ports()),
+        ("BiSOFollower connectivity", step_robot_connect(args.skip_hardware)),
+        ("Camera read", step_camera(args.skip_camera, args.skip_hardware)),
+        ("RLinf SO101Env dummy", step_rlinf_env()),
+    ]
+
+    for label, (result, detail) in steps:
+        _status(label, result, detail)
+        time.sleep(0.1)
+
+    if any(result == _FAILURE for _, (result, _) in steps):
+        print("\nVerification FAILED.")
+        return 1
+    print("\nVerification PASSED.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

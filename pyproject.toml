@@ -172,6 +172,14 @@ rebot = [
     "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
     "imageio[ffmpeg]",
 ]
+so101 = [
+    # SO101 uses the LeRobot BiSOFollower robot class and OpenCV cameras.
+    "numpy<2",
+    "gymnasium==0.29.1",
+    "opencv-python",
+    "imageio[ffmpeg]",
+    "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
+]
 realworld-env = [
     "gymnasium>=0.29.1",
     "gym",
@@ -200,12 +208,14 @@ conflicts = [
       { extra = "xsquare_turtle2" },
       { extra = "gim_arm" },
       { extra = "rebot" },
+      { extra = "so101" },
     ],
     [  # Agentic backends require numpy 2.x; legacy real-world robots pin numpy 1.x
       { extra = "agentic-sglang" },
       { extra = "agentic-vllm" },
       { extra = "franka" },
       { extra = "xsquare_turtle2" },
+      { extra = "so101" },
     ],
 ]
 override-dependencies = [
