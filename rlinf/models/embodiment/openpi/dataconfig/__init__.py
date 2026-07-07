@@ -354,7 +354,7 @@ _CONFIGS = [
             repo_id="",
             assets=AssetsConfig(
                 assets_dir="checkpoints/pi05_so101_cache_torch",
-                asset_id="so101_lerobot_data",
+                asset_id="so101_xlerobot_openpi_224_lerobot_data",
             ),
         ),
         num_train_steps=20_000,
