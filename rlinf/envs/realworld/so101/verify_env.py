@@ -83,8 +83,12 @@ def _status(label: str, result: int, detail: str = "") -> None:
 def step_lerobot_import() -> tuple[int, str]:
     """Check that LeRobot is importable."""
     try:
-        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot  # noqa: F401
-        from lerobot.common.robot_devices.robots.configs import So101RobotConfig  # noqa: F401
+        from lerobot.common.robot_devices.robots.configs import (
+            So101RobotConfig,  # noqa: F401
+        )
+        from lerobot.common.robot_devices.robots.manipulator import (
+            ManipulatorRobot,  # noqa: F401
+        )
 
         return _SUCCESS, "LeRobot ManipulatorRobot import OK"
     except ImportError as e:

@@ -38,9 +38,7 @@ Usage::
 
 import argparse
 import json
-import os
 from pathlib import Path
-
 
 # Order expected by the SO101 policy / RLinf env.
 _MOTOR_ORDER = (

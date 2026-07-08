@@ -19,7 +19,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-
 from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
 from lerobot.common.robot_devices.robots.configs import So101RobotConfig
 from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
