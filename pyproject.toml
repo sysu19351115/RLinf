@@ -173,12 +173,13 @@ rebot = [
     "imageio[ffmpeg]",
 ]
 so101 = [
-    # SO101 uses the LeRobot BiSOFollower robot class and OpenCV cameras.
+    # SO101 uses the LeRobot ManipulatorRobot with Feetech motors and OpenCV cameras.
     "numpy<2",
     "gymnasium==0.29.1",
     "opencv-python",
     "imageio[ffmpeg]",
     "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
+    "feetech-servo-sdk>=1.0.0,<2.0.0",
 ]
 realworld-env = [
     "gymnasium>=0.29.1",

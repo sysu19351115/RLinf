@@ -1,0 +1,50 @@
+{
+    "homing_offset": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+    ],
+    "drive_mode": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+    ],
+    "start_pos": [
+        2123.0,
+        2054.5,
+        1977.0,
+        2045.0,
+        2047.5,
+        1566.0
+    ],
+    "end_pos": [
+        3469.0,
+        3287.0,
+        3085.0,
+        3208.0,
+        4095.0,
+        2219.0
+    ],
+    "calib_mode": [
+        "LINEAR",
+        "LINEAR",
+        "LINEAR",
+        "LINEAR",
+        "LINEAR",
+        "LINEAR"
+    ],
+    "motor_names": [
+        "shoulder_pan",
+        "shoulder_lift",
+        "elbow_flex",
+        "wrist_flex",
+        "wrist_roll",
+        "gripper"
+    ]
+}

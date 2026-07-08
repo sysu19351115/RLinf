@@ -19,8 +19,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
-from lerobot.robots.so_follower import SOFollowerConfig
+
+from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
+from lerobot.common.robot_devices.robots.configs import So101RobotConfig
+from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 
 _MOTOR_NAMES = (
     "left_shoulder_pan",
@@ -37,26 +39,43 @@ _MOTOR_NAMES = (
     "right_gripper",
 )
 
+_ARM_MOTOR_NAMES = (
+    "shoulder_pan",
+    "shoulder_lift",
+    "elbow_flex",
+    "wrist_flex",
+    "wrist_roll",
+    "gripper",
+)
+
 
 def _make_robot(
     left_follower_port: str, right_follower_port: str, max_relative_target: float
 ):
-    config = BiSOFollowerConfig(
-        id="bi",
-        left_arm_config=SOFollowerConfig(
-            port=left_follower_port, max_relative_target=max_relative_target
-        ),
-        right_arm_config=SOFollowerConfig(
-            port=right_follower_port, max_relative_target=max_relative_target
-        ),
+    package_dir = Path(__file__).resolve().parent
+
+    def _arm_config(port: str) -> FeetechMotorsBusConfig:
+        return FeetechMotorsBusConfig(
+            port=port,
+            motors={
+                name: (idx, "sts3215")
+                for idx, name in enumerate(_ARM_MOTOR_NAMES, start=1)
+            },
+        )
+
+    config = So101RobotConfig(
+        calibration_dir=str(package_dir / "calibration"),
+        follower_arms={
+            "left": _arm_config(left_follower_port),
+            "right": _arm_config(right_follower_port),
+        },
+        max_relative_target=max_relative_target,
     )
-    return BiSOFollower(config)
+    return ManipulatorRobot(config)
 
 
-def _state_from_robot_obs(robot_obs: dict) -> np.ndarray:
-    return np.asarray(
-        [float(robot_obs[f"{name}.pos"]) for name in _MOTOR_NAMES], dtype=np.float32
-    )
+def _state_from_robot_obs(arm_joint_position: np.ndarray) -> np.ndarray:
+    return np.asarray(arm_joint_position, dtype=np.float32)
 
 
 def _save(path: str, values: np.ndarray) -> None:
@@ -86,8 +105,8 @@ def main() -> None:
     )
     try:
         robot.connect()
-        obs = robot.get_observation()
-        values = _state_from_robot_obs(obs)
+        obs = robot.capture_observation()
+        values = _state_from_robot_obs(obs["observation.state"].numpy())
         _save(output, values)
         print(f"Saved {args.pose_kind} joints to {output}")
         for name, value in zip(_MOTOR_NAMES, values):

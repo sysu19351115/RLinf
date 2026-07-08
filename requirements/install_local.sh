@@ -249,6 +249,7 @@ if [[ "$CPU_ONLY" -eq 1 ]]; then
             xsquare_turtle2)  _EXTRA_ARGS+=("--extra" "xsquare_turtle2") ;;
             gim_arm)          _EXTRA_ARGS+=("--extra" "gim_arm") ;;
             rebot)            _EXTRA_ARGS+=("--extra" "rebot") ;;
+            so101)            _EXTRA_ARGS+=("--extra" "so101") ;;
             frankasim)        _EXTRA_ARGS+=("--extra" "franka") ;;
             *)
                 echo "[install_local.sh] WARNING: --env '$_ENV_NAME' has no matching"

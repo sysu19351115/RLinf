@@ -29,7 +29,7 @@ Usage::
 Steps:
     1. LeRobot import check
     2. Serial port presence
-    3. BiSOFollower connectivity (joint read)
+    3. ManipulatorRobot connectivity (joint read)
     4. Camera image read [skippable]
     5. RLinf SO101PickAndPlaceEnv (dummy mode)
 """
@@ -83,10 +83,10 @@ def _status(label: str, result: int, detail: str = "") -> None:
 def step_lerobot_import() -> tuple[int, str]:
     """Check that LeRobot is importable."""
     try:
-        import lerobot.robots.bi_so_follower  # noqa: F401
-        import lerobot.robots.so_follower  # noqa: F401
+        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot  # noqa: F401
+        from lerobot.common.robot_devices.robots.configs import So101RobotConfig  # noqa: F401
 
-        return _SUCCESS, "LeRobot BiSOFollower import OK"
+        return _SUCCESS, "LeRobot ManipulatorRobot import OK"
     except ImportError as e:
         return _FAILURE, (
             f"LeRobot not importable: {e}. "
@@ -119,47 +119,63 @@ def step_robot_connect(
         return _SKIP, "Skipped by --skip-hardware"
 
     try:
-        from lerobot.cameras.opencv import OpenCVCameraConfig
-        from lerobot.robots.bi_so_follower import BiSOFollower, BiSOFollowerConfig
-        from lerobot.robots.so_follower import SOFollowerConfig
+        from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
+        from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
+        from lerobot.common.robot_devices.robots.configs import So101RobotConfig
+        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
+
+        arm_motor_names = (
+            "shoulder_pan",
+            "shoulder_lift",
+            "elbow_flex",
+            "wrist_flex",
+            "wrist_roll",
+            "gripper",
+        )
+        package_dir = Path(__file__).resolve().parent
 
         def _camera_config(index_or_path: str) -> OpenCVCameraConfig:
             try:
-                index_or_path = int(index_or_path)
+                camera_index = int(index_or_path)
             except ValueError:
-                index_or_path = Path(index_or_path)
+                camera_index = str(index_or_path)
             return OpenCVCameraConfig(
-                index_or_path=index_or_path,
+                camera_index=camera_index,
                 width=640,
                 height=480,
                 fps=30,
-                fourcc="MJPG",
             )
 
-        config = BiSOFollowerConfig(
-            id="bi",
-            left_arm_config=SOFollowerConfig(
-                port=left_port,
-                max_relative_target=5.0,
-                cameras={
-                    "wrist": _camera_config(left_wrist_camera),
-                    "global": _camera_config(left_global_camera),
+        def _arm_config(port: str) -> FeetechMotorsBusConfig:
+            return FeetechMotorsBusConfig(
+                port=port,
+                motors={
+                    name: (idx, "sts3215")
+                    for idx, name in enumerate(arm_motor_names, start=1)
                 },
-            ),
-            right_arm_config=SOFollowerConfig(
-                port=right_port,
-                max_relative_target=5.0,
-                cameras={"wrist": _camera_config(right_wrist_camera)},
-            ),
+            )
+
+        config = So101RobotConfig(
+            calibration_dir=str(package_dir / "calibration"),
+            follower_arms={
+                "left": _arm_config(left_port),
+                "right": _arm_config(right_port),
+            },
+            cameras={
+                "left_global": _camera_config(left_global_camera),
+                "left_wrist": _camera_config(left_wrist_camera),
+                "right_wrist": _camera_config(right_wrist_camera),
+            },
+            max_relative_target=5.0,
         )
-        robot = BiSOFollower(config)
+        robot = ManipulatorRobot(config)
         robot.connect()
-        obs = robot.get_observation()
-        q = [float(obs.get(f"{name}.pos", 0.0)) for name in _motor_names()]
+        obs = robot.capture_observation()
+        q = obs["observation.state"].numpy()
         robot.disconnect()
         return _SUCCESS, f"12 joints readable (positions: {[f'{v:.3f}' for v in q]})"
     except Exception:
-        return _FAILURE, f"BiSOFollower connection failed:\n{traceback.format_exc()}"
+        return _FAILURE, f"ManipulatorRobot connection failed:\n{traceback.format_exc()}"
 
 
 def step_camera(
@@ -293,7 +309,7 @@ def main() -> int:
             step_serial_ports(args.left_follower_port, args.right_follower_port),
         ),
         (
-            "BiSOFollower connectivity",
+            "ManipulatorRobot connectivity",
             step_robot_connect(
                 args.skip_hardware,
                 args.left_follower_port,

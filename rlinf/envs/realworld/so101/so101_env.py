@@ -27,8 +27,14 @@ from rlinf.utils.logging import get_logger
 
 # Default joint limits are intentionally wide; the hardware-level
 # max_relative_target provides the primary safety bound.
-_DEFAULT_JOINT_LIMIT_LOW = np.full(12, -np.pi, dtype=np.float64)
-_DEFAULT_JOINT_LIMIT_HIGH = np.full(12, np.pi, dtype=np.float64)
+# Arm joints are calibrated to [-100, 100] (LeRobot linear calibration).
+# Grippers are calibrated to [0, 100].
+_DEFAULT_JOINT_LIMIT_LOW = np.array(
+    [-100.0, -100.0, -100.0, -100.0, -100.0, 0.0] * 2, dtype=np.float64
+)
+_DEFAULT_JOINT_LIMIT_HIGH = np.array(
+    [100.0, 100.0, 100.0, 100.0, 100.0, 100.0] * 2, dtype=np.float64
+)
 
 # Camera ordering used in the observation space and RealWorldEnv main_image_key.
 _CAMERA_ORDER = ("cam_high", "cam_left_wrist", "cam_right_wrist")
