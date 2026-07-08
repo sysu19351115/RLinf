@@ -139,7 +139,7 @@ def step_robot_connect(
                 fps=30,
             )
 
-        from .so101_motor_init import build_so101_manipulator
+        from rlinf.envs.realworld.so101.so101_motor_init import build_so101_manipulator
 
         robot = build_so101_manipulator(
             left_follower_port=left_port,

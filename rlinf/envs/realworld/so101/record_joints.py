@@ -40,7 +40,7 @@ def _make_robot(
 ):
     package_dir = Path(__file__).resolve().parent
 
-    from .so101_motor_init import build_so101_manipulator
+    from rlinf.envs.realworld.so101.so101_motor_init import build_so101_manipulator
 
     return build_so101_manipulator(
         left_follower_port=left_follower_port,
