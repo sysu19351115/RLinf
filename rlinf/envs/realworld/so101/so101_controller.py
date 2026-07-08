@@ -170,9 +170,6 @@ class SO101Controller(Worker):
         self._logger = get_logger()
 
         from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
-        from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
-        from lerobot.common.robot_devices.robots.configs import So101RobotConfig
-        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 
         def _camera_config(spec: dict[str, Any]) -> OpenCVCameraConfig:
             index_or_path = spec["index_or_path"]
@@ -187,23 +184,12 @@ class SO101Controller(Worker):
                 fps=int(spec.get("fps", 30)),
             )
 
-        def _arm_config(port: str) -> FeetechMotorsBusConfig:
-            return FeetechMotorsBusConfig(
-                port=port,
-                motors={
-                    name: (idx, "sts3215")
-                    for idx, name in enumerate(_ARM_MOTOR_NAMES, start=1)
-                },
-            )
+        from .so101_motor_init import build_so101_manipulator
 
-        calibration_dir = _package_dir() / "calibration"
-        config = So101RobotConfig(
-            calibration_dir=str(calibration_dir),
-            leader_arms={},
-            follower_arms={
-                "left": _arm_config(left_follower_port),
-                "right": _arm_config(right_follower_port),
-            },
+        self._robot = build_so101_manipulator(
+            left_follower_port=left_follower_port,
+            right_follower_port=right_follower_port,
+            calibration_dir=_package_dir() / "calibration",
             cameras={
                 "left_global": _camera_config(left_global_camera),
                 "left_wrist": _camera_config(left_wrist_camera),
@@ -211,8 +197,6 @@ class SO101Controller(Worker):
             },
             max_relative_target=max_relative_target,
         )
-
-        self._robot = ManipulatorRobot(config)
         self._robot.connect()
         self._logger.info(
             f"SO101Controller connected: left={left_follower_port}, right={right_follower_port}"

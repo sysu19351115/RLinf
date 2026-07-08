@@ -19,9 +19,6 @@ import json
 from pathlib import Path
 
 import numpy as np
-from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
-from lerobot.common.robot_devices.robots.configs import So101RobotConfig
-from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 
 _MOTOR_NAMES = (
     "left_shoulder_pan",
@@ -38,40 +35,19 @@ _MOTOR_NAMES = (
     "right_gripper",
 )
 
-_ARM_MOTOR_NAMES = (
-    "shoulder_pan",
-    "shoulder_lift",
-    "elbow_flex",
-    "wrist_flex",
-    "wrist_roll",
-    "gripper",
-)
-
-
 def _make_robot(
     left_follower_port: str, right_follower_port: str, max_relative_target: float
 ):
     package_dir = Path(__file__).resolve().parent
 
-    def _arm_config(port: str) -> FeetechMotorsBusConfig:
-        return FeetechMotorsBusConfig(
-            port=port,
-            motors={
-                name: (idx, "sts3215")
-                for idx, name in enumerate(_ARM_MOTOR_NAMES, start=1)
-            },
-        )
+    from .so101_motor_init import build_so101_manipulator
 
-    config = So101RobotConfig(
-        calibration_dir=str(package_dir / "calibration"),
-        leader_arms={},
-        follower_arms={
-            "left": _arm_config(left_follower_port),
-            "right": _arm_config(right_follower_port),
-        },
+    return build_so101_manipulator(
+        left_follower_port=left_follower_port,
+        right_follower_port=right_follower_port,
+        calibration_dir=package_dir / "calibration",
         max_relative_target=max_relative_target,
     )
-    return ManipulatorRobot(config)
 
 
 def _state_from_robot_obs(arm_joint_position: np.ndarray) -> np.ndarray:

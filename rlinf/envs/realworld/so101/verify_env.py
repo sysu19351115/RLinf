@@ -124,18 +124,7 @@ def step_robot_connect(
 
     try:
         from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
-        from lerobot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
-        from lerobot.common.robot_devices.robots.configs import So101RobotConfig
-        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
 
-        arm_motor_names = (
-            "shoulder_pan",
-            "shoulder_lift",
-            "elbow_flex",
-            "wrist_flex",
-            "wrist_roll",
-            "gripper",
-        )
         package_dir = Path(__file__).resolve().parent
 
         def _camera_config(index_or_path: str) -> OpenCVCameraConfig:
@@ -150,22 +139,12 @@ def step_robot_connect(
                 fps=30,
             )
 
-        def _arm_config(port: str) -> FeetechMotorsBusConfig:
-            return FeetechMotorsBusConfig(
-                port=port,
-                motors={
-                    name: (idx, "sts3215")
-                    for idx, name in enumerate(arm_motor_names, start=1)
-                },
-            )
+        from .so101_motor_init import build_so101_manipulator
 
-        config = So101RobotConfig(
-            calibration_dir=str(package_dir / "calibration"),
-            leader_arms={},
-            follower_arms={
-                "left": _arm_config(left_port),
-                "right": _arm_config(right_port),
-            },
+        robot = build_so101_manipulator(
+            left_follower_port=left_port,
+            right_follower_port=right_port,
+            calibration_dir=package_dir / "calibration",
             cameras={
                 "left_global": _camera_config(left_global_camera),
                 "left_wrist": _camera_config(left_wrist_camera),
@@ -173,7 +152,6 @@ def step_robot_connect(
             },
             max_relative_target=5.0,
         )
-        robot = ManipulatorRobot(config)
         robot.connect()
         obs = robot.capture_observation()
         q = obs["observation.state"].numpy()
