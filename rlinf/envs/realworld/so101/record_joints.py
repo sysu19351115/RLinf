@@ -35,6 +35,7 @@ _MOTOR_NAMES = (
     "right_gripper",
 )
 
+
 def _make_robot(
     left_follower_port: str, right_follower_port: str, max_relative_target: float
 ):
@@ -50,8 +51,22 @@ def _make_robot(
     )
 
 
+# Joint indices that need unit conversion. LeRobot's LINEAR calibration maps all
+# joints to [0, 100], but policies trained on lerobot_zhiyu data expect arm
+# joints in [-100, 100] (0 = mid-range) and the gripper in [0, 100].
+_ARM_JOINT_INDICES = np.array([0, 1, 2, 3, 4, 6, 7, 8, 9, 10], dtype=np.int64)
+
+
+def _lerobot_arm_to_rlinf(value: np.ndarray) -> np.ndarray:
+    """LeRobot LINEAR [0, 100] -> RLinf [-100, 100] for arm joints."""
+    return (np.asarray(value, dtype=np.float64) - 50.0) * 2.0
+
+
 def _state_from_robot_obs(arm_joint_position: np.ndarray) -> np.ndarray:
-    return np.asarray(arm_joint_position, dtype=np.float32)
+    """Convert calibrated LeRobot state to RLinf state."""
+    q = np.asarray(arm_joint_position, dtype=np.float64)
+    q[_ARM_JOINT_INDICES] = _lerobot_arm_to_rlinf(q[_ARM_JOINT_INDICES])
+    return q.astype(np.float32)
 
 
 def _save(path: str, values: np.ndarray) -> None:

@@ -40,7 +40,7 @@ ls /dev/ttyACM*       # 应能看到左右臂串口
 ls -l /dev/v4l/by-path/  # 记录三相机稳定路径
 ```
 
-如果无法直接判断哪个路径对应哪个设备，可逐个插拔 USB 并观察 `/dev/ttyACM*` 和 `/dev/v4l/by-path/` 的变化，从而确定左右臂串口与三个相机（全局、左腕、右腕）的稳定路径。当前yaml中设备的插入顺序：左机械臂、右机械臂、全局相机、左腕相机、右腕相机
+如果无法直接判断哪个路径对应哪个设备，可逐个插拔 USB 并观察 `/dev/ttyACM*` 和 `/dev/v4l/by-path/` 的变化，从而确定左右臂串口与三个相机（全局、左腕、右腕）的稳定路径。YAML 默认使用 `/dev/videoN` 设备号，只要保持固定的 USB 插入顺序即可复用。当前建议插入顺序：**全局相机 → 左腕相机 → 右腕相机**（左/右臂串口独立识别，不受此顺序影响）。
 
 ### 1.4 真机环境验证
 
@@ -58,9 +58,9 @@ source .venv/bin/activate
 python rlinf/envs/realworld/so101/verify_env.py \
   --left-follower-port /dev/ttyACM0 \
   --right-follower-port /dev/ttyACM1 \
-  --left-wrist-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.2:1.0-video-index0 \
-  --right-wrist-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1:1.0-video-index0 \
-  --left-global-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:2:1.0-video-index0
+  --left-wrist-camera /dev/video2 \
+  --right-wrist-camera /dev/video4 \
+  --left-global-camera /dev/video0
 ```
 
 如果只想验证串口和机械臂连接、跳过相机，可加 `--skip-camera`。

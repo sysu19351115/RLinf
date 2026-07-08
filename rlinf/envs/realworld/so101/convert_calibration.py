@@ -15,19 +15,30 @@
 """Convert SO101 calibration files from lerobot_zhiyu format to LeRobot format.
 
 The lerobot_zhiyu fork stores calibration as a per-motor dict with
-``range_min``/``range_max`` and uses ``MotorNormMode.RANGE_M100_100`` for arm
-joints and ``RANGE_0_100`` for the gripper.
+``range_min``/``range_max``/``homing_offset``/``drive_mode`` and maps arm
+joints to ``[-100, 100]`` and the gripper to ``[0, 100]``.
 
 The LeRobot version pinned in RLinf expects calibration files in the format
 used by ``lerobot.common.robot_devices.motors.feetech``, i.e. lists of
 ``homing_offset``, ``drive_mode``, ``start_pos``, ``end_pos``, ``calib_mode``,
-and ``motor_names``.
+and ``motor_names``. In that format ``LINEAR`` mode always maps
+``[start_pos, end_pos]`` to ``[0, 100]``.
 
-This script maps the lerobot_zhiyu ranges to LeRobot LINEAR calibration so that
-after calibration:
+To stay compatible with policies trained on lerobot_zhiyu data (arm joints in
+``[-100, 100]``, gripper in ``[0, 100]``), we keep the LeRobot calibration in
+its native ``[0, 100]`` mapping and add a thin wrapper in
+``SO101Controller`` that converts arm joints to/from ``[-100, 100]``:
 
-- arm joints are in ``[-100, 100]``
-- gripper is in ``[0, 100]``
+* read:  LeRobot arm ``[0, 100]`` -> RLinf arm ``[-100, 100]``
+* write: RLinf arm ``[-100, 100]`` -> LeRobot arm ``[0, 100]``
+* gripper stays ``[0, 100]`` on both sides.
+
+Therefore the conversion is a direct field copy:
+
+* ``start_pos = range_min``
+* ``end_pos   = range_max``
+* ``homing_offset = homing_offset``
+* ``drive_mode = drive_mode``
 
 Usage::
 
@@ -51,17 +62,6 @@ _MOTOR_ORDER = (
 )
 
 
-def convert_arm_motor(range_min: int, range_max: int) -> tuple[float, float]:
-    """Return (start_pos, end_pos) for LeRobot LINEAR mode mapping to [-100, 100]."""
-    mid = (range_min + range_max) / 2.0
-    return mid, float(range_max)
-
-
-def convert_gripper(range_min: int, range_max: int) -> tuple[float, float]:
-    """Return (start_pos, end_pos) for LeRobot LINEAR mode mapping to [0, 100]."""
-    return float(range_min), float(range_max)
-
-
 def convert_file(src_path: Path) -> dict:
     with open(src_path) as f:
         src = json.load(f)
@@ -78,18 +78,11 @@ def convert_file(src_path: Path) -> dict:
             raise KeyError(f"Motor '{name}' not found in {src_path}")
         entry = src[name]
         motor_names.append(name)
-        homing_offset.append(0)
-        drive_mode.append(entry.get("drive_mode", 0))
+        homing_offset.append(int(entry.get("homing_offset", 0)))
+        drive_mode.append(int(entry.get("drive_mode", 0)))
         calib_mode.append("LINEAR")
-
-        range_min = int(entry["range_min"])
-        range_max = int(entry["range_max"])
-        if name == "gripper":
-            s, e = convert_gripper(range_min, range_max)
-        else:
-            s, e = convert_arm_motor(range_min, range_max)
-        start_pos.append(s)
-        end_pos.append(e)
+        start_pos.append(float(entry["range_min"]))
+        end_pos.append(float(entry["range_max"]))
 
     return {
         "homing_offset": homing_offset,
@@ -103,8 +96,12 @@ def convert_file(src_path: Path) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Convert SO101 calibration files.")
-    parser.add_argument("src_dir", help="Directory containing lerobot_zhiyu calibration JSONs.")
-    parser.add_argument("dst_dir", help="Directory to write LeRobot-format calibration JSONs.")
+    parser.add_argument(
+        "src_dir", help="Directory containing lerobot_zhiyu calibration JSONs."
+    )
+    parser.add_argument(
+        "dst_dir", help="Directory to write LeRobot-format calibration JSONs."
+    )
     args = parser.parse_args()
 
     src_dir = Path(args.src_dir)

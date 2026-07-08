@@ -27,8 +27,9 @@ from rlinf.utils.logging import get_logger
 
 # Default joint limits are intentionally wide; the hardware-level
 # max_relative_target provides the primary safety bound.
-# Arm joints are calibrated to [-100, 100] (LeRobot linear calibration).
-# Grippers are calibrated to [0, 100].
+# Arm joints are exposed to the policy in [-100, 100] (0 = mid-range), while
+# LeRobot's LINEAR calibration internally maps them to [0, 100]. The conversion
+# is handled in SO101Controller. Grippers are [0, 100] on both sides.
 _DEFAULT_JOINT_LIMIT_LOW = np.array(
     [-100.0, -100.0, -100.0, -100.0, -100.0, 0.0] * 2, dtype=np.float64
 )

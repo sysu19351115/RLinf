@@ -32,22 +32,22 @@ cluster:
           - left_follower_port: "/dev/ttyACM0"
             right_follower_port: "/dev/ttyACM1"
             left_wrist_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.2:1.0-video-index0"
-              width: 1920
-              height: 1080
+              index_or_path: "/dev/video2"
+              width: 640
+              height: 480
               fps: 30
               fourcc: "MJPG"
             right_wrist_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1:1.0-video-index0"
-              width: 1920
-              height: 1080
+              index_or_path: "/dev/video4"
+              width: 640
+              height: 480
               fps: 30
               fourcc: "MJPG"
             left_global_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:2:1.0-video-index0"
-              width: 1920
-              height: 1080
-              fps: 30
+              index_or_path: "/dev/video0"
+              width: 640
+              height: 480
+              fps: 25
               fourcc: "MJPG"
             robot_id: "bi"
             max_relative_target: 5.0
@@ -117,6 +117,8 @@ env:
       use_dense_reward: False
       use_reward_model: False
       max_num_steps: 240
+      # Physical rest/reset pose recorded from the actual robot (RLinf units).
+      initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 
   eval:
     rollout_epoch: 1
@@ -128,6 +130,7 @@ env:
       tele_mode: true
       use_reward_model: False
       max_num_steps: 240
+      initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 
 rollout:
   group_name: "RolloutGroup"

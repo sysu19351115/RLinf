@@ -58,6 +58,13 @@ _ARM_MOTOR_NAMES = (
     "gripper",
 )
 
+# Joint index groups for the 12-dim bimanual vector.
+# LeRobot's LINEAR calibration maps every joint to [0, 100], but policies trained
+# on lerobot_zhiyu data expect arm joints in [-100, 100] (0 = mid-range) and the
+# gripper in [0, 100].
+_ARM_JOINT_INDICES = np.array([0, 1, 2, 3, 4, 6, 7, 8, 9, 10], dtype=np.int64)
+_GRIPPER_INDICES = np.array([5, 11], dtype=np.int64)
+
 # Camera name mapping from OpenPI convention to LeRobot camera keys.
 _CAMERA_NAME_MAP = {
     "cam_high": "left_global",
@@ -71,15 +78,34 @@ def _package_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def _lerobot_arm_to_rlinf(value: np.ndarray) -> np.ndarray:
+    """Convert an arm joint value from LeRobot LINEAR [0, 100] to RLinf [-100, 100].
+
+    50% (mid-range) maps to 0; 0% maps to -100; 100% maps to +100.
+    """
+    return (np.asarray(value, dtype=np.float64) - 50.0) * 2.0
+
+
+def _rlinf_arm_to_lerobot(value: np.ndarray) -> np.ndarray:
+    """Convert an arm joint value from RLinf [-100, 100] to LeRobot LINEAR [0, 100].
+
+    0 maps to 50% (mid-range); -100 maps to 0%; +100 maps to 100%.
+    """
+    return np.asarray(value, dtype=np.float64) / 2.0 + 50.0
+
+
 def _state_from_robot_obs(arm_joint_position: np.ndarray) -> np.ndarray:
-    """Validate and return the 12-dim motor position vector from a LeRobot obs.
+    """Validate and convert a 12-dim LeRobot obs to RLinf state.
 
     ``arm_joint_position`` is expected to concatenate left-arm then right-arm
-    positions in the order defined by ``_ARM_MOTOR_NAMES``.
+    positions in the order defined by ``_ARM_MOTOR_NAMES``. Arm joints are
+    converted from LeRobot's [0, 100] LINEAR range to RLinf's [-100, 100];
+    grippers are left in [0, 100].
     """
     q = np.asarray(arm_joint_position, dtype=np.float64)
     if q.shape != (len(_LEFT_MOTOR_NAMES) + len(_RIGHT_MOTOR_NAMES),):
         raise ValueError(f"Expected 12-dim joint position, got shape {q.shape}")
+    q[_ARM_JOINT_INDICES] = _lerobot_arm_to_rlinf(q[_ARM_JOINT_INDICES])
     return q
 
 
@@ -101,10 +127,11 @@ def _images_from_robot_obs(images: dict[str, np.ndarray]) -> dict[str, np.ndarra
 
 
 def _action_vector_to_robot_action(action: np.ndarray) -> torch.Tensor:
-    """Convert a 12-dim action vector into a tensor for ``ManipulatorRobot``.
+    """Convert a 12-dim RLinf action vector into a tensor for ``ManipulatorRobot``.
 
-    The action is expected in the same calibrated units produced by LeRobot:
-    arm joints in ``[-100, 100]`` and gripper in ``[0, 100]``.
+    The action is expected in RLinf units: arm joints in ``[-100, 100]`` and
+    gripper in ``[0, 100]``. Arm joints are converted to LeRobot's LINEAR
+    ``[0, 100]`` before being sent to the motors.
     """
     action = np.asarray(action, dtype=np.float32)
     if action.ndim == 2:
@@ -114,6 +141,7 @@ def _action_vector_to_robot_action(action: np.ndarray) -> torch.Tensor:
     expected = len(_LEFT_MOTOR_NAMES) + len(_RIGHT_MOTOR_NAMES)
     if action.shape != (expected,):
         raise ValueError(f"Expected {expected}-dim action, got shape {action.shape}")
+    action[_ARM_JOINT_INDICES] = _rlinf_arm_to_lerobot(action[_ARM_JOINT_INDICES])
     return torch.from_numpy(action)
 
 
@@ -216,7 +244,9 @@ class SO101Controller(Worker):
 
     def get_state(self) -> SO101RobotState:
         """Return the current robot state (joint positions + gripper heuristics)."""
-        q = _state_from_robot_obs(self._robot.capture_observation()["observation.state"].numpy())
+        q = _state_from_robot_obs(
+            self._robot.capture_observation()["observation.state"].numpy()
+        )
 
         left_gripper_pos = float(q[5])
         right_gripper_pos = float(q[11])
@@ -239,7 +269,11 @@ class SO101Controller(Worker):
         return {
             "state": _state_from_robot_obs(obs["observation.state"].numpy()),
             "images": _images_from_robot_obs(
-                {key.removeprefix("observation.images."): value.numpy() for key, value in obs.items() if key.startswith("observation.images.")}
+                {
+                    key.removeprefix("observation.images."): value.numpy()
+                    for key, value in obs.items()
+                    if key.startswith("observation.images.")
+                }
             ),
         }
 
@@ -269,11 +303,19 @@ class SO101Controller(Worker):
                 f"Expected target_joints shape {(expected,)}, got {target_joints.shape}"
             )
 
+        # Current state comes from LeRobot in [0, 100] for arms; target is in RLinf
+        # [-100, 100] for arms. Convert target to LeRobot space so interpolation and
+        # the final motor commands are in the same units.
+        target_lerobot = target_joints.copy()
+        target_lerobot[_ARM_JOINT_INDICES] = _rlinf_arm_to_lerobot(
+            target_lerobot[_ARM_JOINT_INDICES]
+        )
+
         current = self._robot.capture_observation()["observation.state"].numpy()
         sleep_s = 1.0 / init_fps if init_fps > 0 else 0.0
         for step in range(1, init_steps + 1):
             alpha = step / init_steps
-            command = current + (target_joints - current) * alpha
+            command = current + (target_lerobot - current) * alpha
             self._robot.send_action(torch.from_numpy(command.astype(np.float32)))
             if sleep_s > 0:
                 time.sleep(sleep_s)

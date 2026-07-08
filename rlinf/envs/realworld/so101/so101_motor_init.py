@@ -118,13 +118,33 @@ def configure_feetech_port(port: str, motor_ids: tuple[int, ...] = (1, 2, 3, 4, 
     port_handler, packet_handler = _open_raw_port(port)
     try:
         # 1. Disable status replies from write commands.  This is the main cause of
-        # "Incorrect status packet" during the first GroupSyncRead.  Use TxRx here
-        # because the motor still replies; the write result is checked.
+        # "Incorrect status packet" during the first GroupSyncRead.
+        #
+        # Important: if this function has already run once, the motor already has
+        # Response_Status_Level=0 and will NOT reply to write commands.  In that
+        # case write1ByteTxRx times out with "There is no status packet!".  We
+        # therefore read the register first; when it is already 0 we skip the write.
         for mid in motor_ids:
+            current_rsl, comm_read, _ = packet_handler.read1ByteTxRx(
+                port_handler, mid, _RESPONSE_STATUS_LEVEL_ADDR
+            )
+            if comm_read == scs.COMM_SUCCESS and current_rsl == 0:
+                continue
+
             comm, _ = packet_handler.write1ByteTxRx(
                 port_handler, mid, _RESPONSE_STATUS_LEVEL_ADDR, 0
             )
-            if comm != scs.COMM_SUCCESS:
+            if comm == scs.COMM_SUCCESS:
+                continue
+
+            # The write may have succeeded but the motor gave no status packet
+            # because it was already (or just became) RSL=0.  Re-send with TxOnly
+            # and rely on the final verification read below to confirm.
+            if comm == scs.COMM_RX_TIMEOUT:
+                packet_handler.write1ByteTxOnly(
+                    port_handler, mid, _RESPONSE_STATUS_LEVEL_ADDR, 0
+                )
+            else:
                 raise ConnectionError(
                     f"Failed to set Response_Status_Level on {port} ID {mid}: "
                     f"{packet_handler.getTxRxResult(comm)}"
@@ -213,9 +233,113 @@ def _safe_so100_robot_preset(self) -> None:
     # correct 1-byte register width.
 
 
+def _sequential_arm_read(self, data_name, motor_names=None):
+    """Replacement for ``FeetechMotorsBus.read`` that reads motors one-by-one.
+
+    SO101 arms sometimes ship with a mix of motor models (e.g. model 2307 and
+    2563). Their ``GroupSyncRead`` replies can collide on the bus, producing
+    ``Incorrect status packet`` or ``There is no status packet`` errors.
+    Reading each motor sequentially avoids the clash while still going through
+    the original read path (calibration, logging, unit conversion).
+    """
+    import numpy as np
+
+    if motor_names is None:
+        motor_names = self.motor_names
+    if isinstance(motor_names, str):
+        return self._rlinf_original_read(data_name, motor_names)
+
+    values = []
+    for name in motor_names:
+        v = self._rlinf_original_read(data_name, name)
+        # Keep the original dtype (usually float32 after calibration) instead of
+        # falling back to Python float / float64, so downstream code that compares
+        # tensors does not fail on dtype mismatch.
+        values.append(v if isinstance(v, np.ndarray) else np.asarray(v))
+    return np.concatenate([np.atleast_1d(v) for v in values])
+
+
+def _patch_feetech_autocorrect() -> None:
+    """Patch FeetechMotorsBus.autocorrect_calibration to define `resolution`.
+
+    LeRobot's LINEAR calibration branch uses `resolution` without defining it,
+    causing an UnboundLocalError whenever a joint is outside the calibrated
+    range. We replace the method with a copy that computes resolution from the
+    motor model.
+    """
+    import math
+
+    import numpy as np
+    from lerobot.common.robot_devices.motors.feetech import (
+        CalibrationMode,
+        FeetechMotorsBus,
+        HALF_TURN_DEGREE,
+        LOWER_BOUND_DEGREE,
+        LOWER_BOUND_LINEAR,
+        UPPER_BOUND_DEGREE,
+        UPPER_BOUND_LINEAR,
+    )
+
+    if getattr(FeetechMotorsBus.autocorrect_calibration, "_rlinf_patched", False):
+        return
+
+    def autocorrect_calibration(self, values, motor_names):
+        values = np.array(values)
+        for i, name in enumerate(motor_names):
+            calib_idx = self.calibration["motor_names"].index(name)
+            calib_mode = self.calibration["calib_mode"][calib_idx]
+            _, model = self.motors[name]
+            resolution = self.model_resolution[model]
+
+            if CalibrationMode[calib_mode] == CalibrationMode.DEGREE:
+                drive_mode = self.calibration["drive_mode"][calib_idx]
+                homing_offset = self.calibration["homing_offset"][calib_idx]
+
+                if drive_mode:
+                    values[i] *= -1
+
+                calib_val = (values[i] + homing_offset) / (resolution // 2) * HALF_TURN_DEGREE
+                in_range = (calib_val > LOWER_BOUND_DEGREE) and (calib_val < UPPER_BOUND_DEGREE)
+                low_factor = (
+                    -HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                ) / resolution
+                upp_factor = (
+                    HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                ) / resolution
+
+            elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
+                start_pos = self.calibration["start_pos"][calib_idx]
+                end_pos = self.calibration["end_pos"][calib_idx]
+
+                calib_val = (values[i] - start_pos) / (end_pos - start_pos) * 100
+                in_range = (calib_val > LOWER_BOUND_LINEAR) and (calib_val < UPPER_BOUND_LINEAR)
+                low_factor = (start_pos - values[i]) / resolution
+                upp_factor = (end_pos - values[i]) / resolution
+
+            if not in_range:
+                if low_factor < upp_factor:
+                    factor = math.ceil(low_factor)
+                    if factor > upp_factor:
+                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
+                else:
+                    factor = math.ceil(upp_factor)
+                    if factor > low_factor:
+                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
+
+                self.calibration["homing_offset"][calib_idx] += resolution * factor
+
+    autocorrect_calibration._rlinf_patched = True  # type: ignore[attr-defined]
+    FeetechMotorsBus.autocorrect_calibration = autocorrect_calibration
+
+
 def patch_robot_preset(robot: Any) -> None:
-    """Patch a ManipulatorRobot instance to use the safe SO101 preset."""
+    """Patch a ManipulatorRobot instance to use the safe SO101 preset and
+    sequential motor reads."""
     robot.set_so100_robot_preset = types.MethodType(_safe_so100_robot_preset, robot)
+    _patch_feetech_autocorrect()
+    for arm in robot.follower_arms.values():
+        arm._rlinf_original_read = arm.read
+        arm.read = types.MethodType(_sequential_arm_read, arm)
 
 
 def build_so101_manipulator(
