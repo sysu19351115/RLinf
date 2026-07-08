@@ -199,6 +199,7 @@ class SO101Controller(Worker):
         calibration_dir = _package_dir() / "calibration"
         config = So101RobotConfig(
             calibration_dir=str(calibration_dir),
+            leader_arms={},
             follower_arms={
                 "left": _arm_config(left_follower_port),
                 "right": _arm_config(right_follower_port),

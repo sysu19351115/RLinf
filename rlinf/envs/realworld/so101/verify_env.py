@@ -161,6 +161,7 @@ def step_robot_connect(
 
         config = So101RobotConfig(
             calibration_dir=str(package_dir / "calibration"),
+            leader_arms={},
             follower_arms={
                 "left": _arm_config(left_port),
                 "right": _arm_config(right_port),

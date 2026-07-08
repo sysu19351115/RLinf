@@ -64,6 +64,7 @@ def _make_robot(
 
     config = So101RobotConfig(
         calibration_dir=str(package_dir / "calibration"),
+        leader_arms={},
         follower_arms={
             "left": _arm_config(left_follower_port),
             "right": _arm_config(right_follower_port),
