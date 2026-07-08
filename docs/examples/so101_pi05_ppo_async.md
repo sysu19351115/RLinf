@@ -40,12 +40,30 @@ ls /dev/ttyACM*       # 应能看到左右臂串口
 ls -l /dev/v4l/by-path/  # 记录三相机稳定路径
 ```
 
+如果无法直接判断哪个路径对应哪个设备，可逐个插拔 USB 并观察 `/dev/ttyACM*` 和 `/dev/v4l/by-path/` 的变化，从而确定左右臂串口与三个相机（全局、左腕、右腕）的稳定路径。当前yaml中设备的插入顺序：左机械臂、右机械臂、全局相机、左腕相机、右腕相机
+
 ### 1.4 真机环境验证
+
+**快速检查（不连接相机/机械臂）：**
 
 ```bash
 source .venv/bin/activate
-python rlinf/envs/realworld/so101/verify_env.py --skip-camera
+python rlinf/envs/realworld/so101/verify_env.py --skip-hardware
 ```
+
+**完整真机验证（使用你实际的串口和相机路径）：**
+
+```bash
+source .venv/bin/activate
+python rlinf/envs/realworld/so101/verify_env.py \
+  --left-follower-port /dev/ttyACM0 \
+  --right-follower-port /dev/ttyACM1 \
+  --left-wrist-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.2:1.0-video-index0 \
+  --right-wrist-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1:1.0-video-index0 \
+  --left-global-camera /dev/v4l/by-path/pci-0000:80:14.0-usb-0:2:1.0-video-index0
+```
+
+如果只想验证串口和机械臂连接、跳过相机，可加 `--skip-camera`。
 
 全部通过后，将串口/相机路径填入 `examples/embodiment/config/so101_async_ppo_pi05.yaml` 的 `cluster.node_groups[1].hardware.configs`。
 
@@ -55,6 +73,7 @@ python rlinf/envs/realworld/so101/verify_env.py --skip-camera
 
 ```
 checkpoints/pi05_so101_cache_torch/
+├── so101_xlerobot_openpi_224_lerobot_data
 ├── model.safetensors
 ├── config.json
 └── ...
@@ -67,8 +86,8 @@ checkpoints/pi05_so101_cache_torch/
 ```bash
 python rlinf/envs/realworld/so101/record_joints.py \
     --pose-kind=initial \
-    --left-follower-port=/dev/ttyACM2 \
-    --right-follower-port=/dev/ttyACM3
+    --left-follower-port=/dev/ttyACM0 \
+    --right-follower-port=/dev/ttyACM1
 ```
 
 将生成的 `initial_joints.json` 内容填入 YAML 的 `env.train.override_cfg.initial_joints`。

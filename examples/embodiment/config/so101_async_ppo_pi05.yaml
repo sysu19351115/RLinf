@@ -29,22 +29,22 @@ cluster:
       hardware:
         type: SO101Arm
         configs:
-          - left_follower_port: "/dev/ttyACM2"
-            right_follower_port: "/dev/ttyACM3"
+          - left_follower_port: "/dev/ttyACM0"
+            right_follower_port: "/dev/ttyACM1"
             left_wrist_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:8.3:1.0-video-index0"
+              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.2:1.0-video-index0"
               width: 1920
               height: 1080
               fps: 30
               fourcc: "MJPG"
             right_wrist_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:8.4:1.0-video-index0"
+              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:1.1:1.0-video-index0"
               width: 1920
               height: 1080
               fps: 30
               fourcc: "MJPG"
             left_global_camera:
-              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:7:1.0-video-index0"
+              index_or_path: "/dev/v4l/by-path/pci-0000:80:14.0-usb-0:2:1.0-video-index0"
               width: 1920
               height: 1080
               fps: 30

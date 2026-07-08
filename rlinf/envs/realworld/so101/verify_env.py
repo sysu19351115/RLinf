@@ -19,6 +19,12 @@ Usage::
     python rlinf/envs/realworld/so101/verify_env.py
     python rlinf/envs/realworld/so101/verify_env.py --skip-camera
     python rlinf/envs/realworld/so101/verify_env.py --skip-hardware
+    python rlinf/envs/realworld/so101/verify_env.py \
+        --left-follower-port /dev/ttyACM0 \
+        --right-follower-port /dev/ttyACM1 \
+        --left-wrist-camera /dev/v4l/by-path/...-video-index0 \
+        --right-wrist-camera /dev/v4l/by-path/...-video-index0 \
+        --left-global-camera /dev/v4l/by-path/...-video-index0
 
 Steps:
     1. LeRobot import check
@@ -39,8 +45,11 @@ _SUCCESS = 0
 _FAILURE = 1
 _SKIP = 2
 
-_LEFT_PORT = "/dev/ttyACM2"
-_RIGHT_PORT = "/dev/ttyACM3"
+_DEFAULT_LEFT_PORT = "/dev/ttyACM2"
+_DEFAULT_RIGHT_PORT = "/dev/ttyACM3"
+_DEFAULT_LEFT_WRIST_CAMERA = "/dev/video0"
+_DEFAULT_RIGHT_WRIST_CAMERA = "/dev/video1"
+_DEFAULT_LEFT_GLOBAL_CAMERA = "/dev/video2"
 
 
 def _green(msg: str) -> str:
@@ -86,18 +95,25 @@ def step_lerobot_import() -> tuple[int, str]:
         )
 
 
-def step_serial_ports() -> tuple[int, str]:
+def step_serial_ports(left_port: str, right_port: str) -> tuple[int, str]:
     """Check that the follower serial ports exist."""
-    missing = [p for p in (_LEFT_PORT, _RIGHT_PORT) if not os.path.exists(p)]
+    missing = [p for p in (left_port, right_port) if not os.path.exists(p)]
     if missing:
         return _FAILURE, (
             f"Serial ports not found: {missing}. "
             "Connect the SO101 arms and check /dev/ttyACM* assignments."
         )
-    return _SUCCESS, f"Serial ports found: {_LEFT_PORT}, {_RIGHT_PORT}"
+    return _SUCCESS, f"Serial ports found: {left_port}, {right_port}"
 
 
-def step_robot_connect(skip_hardware: bool) -> tuple[int, str]:
+def step_robot_connect(
+    skip_hardware: bool,
+    left_port: str,
+    right_port: str,
+    left_wrist_camera: str,
+    right_wrist_camera: str,
+    left_global_camera: str,
+) -> tuple[int, str]:
     """Connect to the robot and read joint positions."""
     if skip_hardware:
         return _SKIP, "Skipped by --skip-hardware"
@@ -123,17 +139,17 @@ def step_robot_connect(skip_hardware: bool) -> tuple[int, str]:
         config = BiSOFollowerConfig(
             id="bi",
             left_arm_config=SOFollowerConfig(
-                port=_LEFT_PORT,
+                port=left_port,
                 max_relative_target=5.0,
                 cameras={
-                    "wrist": _camera_config("/dev/video0"),
-                    "global": _camera_config("/dev/video2"),
+                    "wrist": _camera_config(left_wrist_camera),
+                    "global": _camera_config(left_global_camera),
                 },
             ),
             right_arm_config=SOFollowerConfig(
-                port=_RIGHT_PORT,
+                port=right_port,
                 max_relative_target=5.0,
-                cameras={"wrist": _camera_config("/dev/video1")},
+                cameras={"wrist": _camera_config(right_wrist_camera)},
             ),
         )
         robot = BiSOFollower(config)
@@ -146,7 +162,13 @@ def step_robot_connect(skip_hardware: bool) -> tuple[int, str]:
         return _FAILURE, f"BiSOFollower connection failed:\n{traceback.format_exc()}"
 
 
-def step_camera(skip_camera: bool, skip_hardware: bool) -> tuple[int, str]:
+def step_camera(
+    skip_camera: bool,
+    skip_hardware: bool,
+    left_wrist_camera: str,
+    right_wrist_camera: str,
+    left_global_camera: str,
+) -> tuple[int, str]:
     """Read a single frame from each camera."""
     if skip_camera or skip_hardware:
         return _SKIP, "Skipped by --skip-camera or --skip-hardware"
@@ -157,9 +179,9 @@ def step_camera(skip_camera: bool, skip_hardware: bool) -> tuple[int, str]:
         return _FAILURE, "opencv-python not installed"
 
     camera_paths = [
-        ("left_global", "/dev/video2"),
-        ("left_wrist", "/dev/video0"),
-        ("right_wrist", "/dev/video1"),
+        ("left_global", left_global_camera),
+        ("left_wrist", left_wrist_camera),
+        ("right_wrist", right_wrist_camera),
     ]
     lines = []
     for name, path in camera_paths:
@@ -234,6 +256,31 @@ def main() -> int:
     parser.add_argument(
         "--skip-hardware", action="store_true", help="Skip real robot connection."
     )
+    parser.add_argument(
+        "--left-follower-port",
+        default=_DEFAULT_LEFT_PORT,
+        help=f"Serial port for the left follower arm (default: {_DEFAULT_LEFT_PORT}).",
+    )
+    parser.add_argument(
+        "--right-follower-port",
+        default=_DEFAULT_RIGHT_PORT,
+        help=f"Serial port for the right follower arm (default: {_DEFAULT_RIGHT_PORT}).",
+    )
+    parser.add_argument(
+        "--left-wrist-camera",
+        default=_DEFAULT_LEFT_WRIST_CAMERA,
+        help=f"Path or index for the left wrist camera (default: {_DEFAULT_LEFT_WRIST_CAMERA}).",
+    )
+    parser.add_argument(
+        "--right-wrist-camera",
+        default=_DEFAULT_RIGHT_WRIST_CAMERA,
+        help=f"Path or index for the right wrist camera (default: {_DEFAULT_RIGHT_WRIST_CAMERA}).",
+    )
+    parser.add_argument(
+        "--left-global-camera",
+        default=_DEFAULT_LEFT_GLOBAL_CAMERA,
+        help=f"Path or index for the left global/high camera (default: {_DEFAULT_LEFT_GLOBAL_CAMERA}).",
+    )
     args = parser.parse_args()
 
     print("SO101 + RLinf environment verification")
@@ -241,9 +288,31 @@ def main() -> int:
 
     steps = [
         ("LeRobot import", step_lerobot_import()),
-        ("Serial ports", step_serial_ports()),
-        ("BiSOFollower connectivity", step_robot_connect(args.skip_hardware)),
-        ("Camera read", step_camera(args.skip_camera, args.skip_hardware)),
+        (
+            "Serial ports",
+            step_serial_ports(args.left_follower_port, args.right_follower_port),
+        ),
+        (
+            "BiSOFollower connectivity",
+            step_robot_connect(
+                args.skip_hardware,
+                args.left_follower_port,
+                args.right_follower_port,
+                args.left_wrist_camera,
+                args.right_wrist_camera,
+                args.left_global_camera,
+            ),
+        ),
+        (
+            "Camera read",
+            step_camera(
+                args.skip_camera,
+                args.skip_hardware,
+                args.left_wrist_camera,
+                args.right_wrist_camera,
+                args.left_global_camera,
+            ),
+        ),
         ("RLinf SO101Env dummy", step_rlinf_env()),
     ]
 
