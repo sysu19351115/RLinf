@@ -117,6 +117,26 @@ env:
       use_dense_reward: False
       use_reward_model: True
       reward_image_key: "cam_high"
+      left_follower_port: "/dev/ttyACM0"
+      right_follower_port: "/dev/ttyACM1"
+      left_wrist_camera:
+        index_or_path: "/dev/video2"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      right_wrist_camera:
+        index_or_path: "/dev/video4"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      left_global_camera:
+        index_or_path: "/dev/video0"
+        width: 640
+        height: 480
+        fps: 25
+        fourcc: "MJPG"
       reward_worker_cfg:
         use_reward_model: True
         model:
@@ -142,6 +162,26 @@ env:
       tele_mode: true
       use_reward_model: True
       reward_image_key: "cam_high"
+      left_follower_port: "/dev/ttyACM0"
+      right_follower_port: "/dev/ttyACM1"
+      left_wrist_camera:
+        index_or_path: "/dev/video2"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      right_wrist_camera:
+        index_or_path: "/dev/video4"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      left_global_camera:
+        index_or_path: "/dev/video0"
+        width: 640
+        height: 480
+        fps: 25
+        fourcc: "MJPG"
       reward_worker_cfg:
         use_reward_model: True
         model:
