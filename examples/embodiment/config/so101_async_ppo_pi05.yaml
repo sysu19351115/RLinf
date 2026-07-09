@@ -115,7 +115,19 @@ env:
       is_dummy: False
       tele_mode: true
       use_dense_reward: False
-      use_reward_model: False
+      use_reward_model: True
+      reward_image_key: "cam_high"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "resnet"
+          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          arch: "resnet18"
+          hidden_dim: 256
+          dropout: 0.1
+          image_size: [3, 224, 224]
+          normalize: true
+          precision: "fp32"
       max_num_steps: 240
       # Physical rest/reset pose recorded from the actual robot (RLinf units).
       initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
@@ -128,7 +140,19 @@ env:
     override_cfg:
       is_dummy: False
       tele_mode: true
-      use_reward_model: False
+      use_reward_model: True
+      reward_image_key: "cam_high"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "resnet"
+          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          arch: "resnet18"
+          hidden_dim: 256
+          dropout: 0.1
+          image_size: [3, 224, 224]
+          normalize: true
+          precision: "fp32"
       max_num_steps: 240
       initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 

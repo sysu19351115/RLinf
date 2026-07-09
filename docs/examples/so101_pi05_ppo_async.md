@@ -60,7 +60,8 @@ python rlinf/envs/realworld/so101/verify_env.py \
   --right-follower-port /dev/ttyACM1 \
   --left-wrist-camera /dev/video2 \
   --right-wrist-camera /dev/video4 \
-  --left-global-camera /dev/video0
+  --left-global-camera /dev/video0 \
+  --test-control
 ```
 
 如果只想验证串口和机械臂连接、跳过相机，可加 `--skip-camera`。
@@ -68,6 +69,8 @@ python rlinf/envs/realworld/so101/verify_env.py \
 全部通过后，将串口/相机路径填入 `examples/embodiment/config/so101_async_ppo_pi05.yaml` 的 `cluster.node_groups[1].hardware.configs`。
 
 ## 2. 模型准备
+
+### 2.1 pi0.5 SFT checkpoint
 
 将 pi0.5 SO101 checkpoint 放到 `checkpoints/pi05_so101_cache_torch/`：
 
@@ -78,6 +81,122 @@ checkpoints/pi05_so101_cache_torch/
 ├── config.json
 └── ...
 ```
+
+### 2.2 Reward Model（推荐）
+
+SO101 基础环境没有可靠的几何成功判断，真实任务建议训练一个基于视觉的 reward model。整体流程为：**拍摄成功/失败案例图片 → 转换为二分类数据集 → 训练 ResNet 奖励模型 → 在 RL YAML 中启用**。
+
+#### 2.2.1 拍摄数据集
+
+使用 `examples/reward/collect_reward_images.py` 调用全局相机拍摄图片。脚本会自动创建 `success/` 和 `failure/` 两个文件夹：
+
+```bash
+cd /home/zylab/project/RLinf
+source .venv/bin/activate
+
+python examples/reward/collect_reward_images.py \
+    --camera /dev/video0 \
+    --output-dir datasets/so101_reward_images \
+    --width 640 \
+    --height 480 \
+    --fps 25 \
+    --headless
+```
+
+操作说明（预览窗口需处于焦点状态）：
+- **p**：拍一张照并保存到当前目标文件夹
+- **q**：切换当前目标文件夹（`success` ↔ `failure`）
+- **ESC / e**：退出采集
+
+如果是 SSH/无显示器环境，加上 `--headless` 即可在终端中采集（同样按 `p`/`q`，`e` 退出）：
+
+
+> 提示：
+> - 请把双臂和场景摆到任务完成状态后拍入 `success`，摆到明显失败/未完成任务状态后拍入 `failure`。
+> - 文件名包含时间戳，重复采集不会互相覆盖。
+> - 若相机不是 `/dev/video0`，请替换为实际路径（如 `/dev/v4l/by-path/...`）。
+
+#### 2.2.2 转换数据集
+
+拍摄完成后，使用 `examples/reward/convert_reward_images_to_pt.py` 把图片转成 reward model 训练所需的 `train.pt` 和 `test.pt`：
+
+```bash
+python examples/reward/convert_reward_images_to_pt.py \
+    --input-dir datasets/so101_reward_images \
+    --output-dir logs/so101_reward_data/processed \
+    --test-ratio 0.2 \
+    --seed 42
+```
+
+输出：
+- `logs/so101_reward_data/processed/train.pt`
+- `logs/so101_reward_data/processed/test.pt`
+
+> 说明：`test.pt` 在 `so101_reward_training.yaml` 中作为验证集（`val_data_paths`）用于 early stopping。如需调整为其他拆分比例，可修改 `--test-ratio`。
+
+#### 2.2.3 训练
+
+推荐使用单卡 standalone 训练脚本，避免 Ray/FSDP 在单 rank 下可能卡死的问题：
+
+```bash
+python examples/reward/train_reward_model_simple.py --config-name so101_reward_training
+```
+
+训练配置在 `examples/reward/config/so101_reward_training.yaml`。关键参数：
+- `data.train_data_paths` / `data.val_data_paths`：指向步骤 2.2.2 的输出
+- `actor.model.arch`：默认 `resnet18`
+- `actor.model.hidden_dim`：默认 `256`
+- `actor.micro_batch_size`：根据 GPU 显存调整
+- `actor.optim.lr`：学习率
+
+checkpoint 默认保存路径：
+```
+logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt
+```
+
+> 如果你有多卡并且想用 FSDP 训练，也可以运行：
+> ```bash
+> python examples/reward/train_reward_model.py --config-name so101_reward_training
+> ```
+
+#### 2.2.4 Dummy 验证
+
+```bash
+python examples/reward/verify_reward_model_dummy.py \
+    --env-type so101 \
+    --checkpoint-path logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt \
+    --data-pt logs/so101_reward_data/processed/test.pt \
+    --reward-image-key cam_high
+```
+
+#### 2.2.5 配置 RL YAML（已默认启用）
+
+`examples/embodiment/config/so101_async_ppo_pi05.yaml` 中 `env.train.override_cfg` 和 `env.eval.override_cfg` 已默认启用 reward model：
+
+```yaml
+env:
+  train:
+    override_cfg:
+      use_reward_model: True
+      reward_image_key: "cam_high"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "resnet"
+          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          arch: "resnet18"
+          hidden_dim: 256
+          dropout: 0.1
+          image_size: [3, 224, 224]
+          normalize: true
+          precision: "fp32"
+```
+
+> 注意：
+> - 默认 `model_path` 使用 `${oc.env:PWD}` 解析为当前工作目录。如果 checkpoint 不在该路径，请改为绝对路径，并确保本地（robot）节点可以访问。
+> - `hidden_dim` 必须与训练时保持一致。
+> - 同步代码时确保 checkpoint 文件也同步到本地节点。
+> - `reward_image_key` 可改为 `cam_left_wrist`、`cam_right_wrist` 等，需与采集时使用的相机一致。若使用全局相机采集，这里应填 `cam_high`。
 
 ## 3. 记录初始位姿
 
@@ -115,4 +234,4 @@ python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05
 
 ## 7. Reward Model（可选）
 
-参考 `docs/examples/rebot_pi05_ppo_async.md` 第 2.2 节训练 vision-based reward model，并在 YAML 中启用 `use_reward_model`。
+详见本文第 2.2 节训练 vision-based reward model，并在 YAML 中启用 `use_reward_model`。
