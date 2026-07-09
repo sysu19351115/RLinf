@@ -254,14 +254,13 @@ ray start --head --port=6379 \
 
 ```bash
 source .venv/bin/activate
-
-export RLINF_NODE_RANK=1
-export RLINF_COMM_NET_DEVICES=enp130s0
-
 # 如果走 VPN 或网络延迟较大，可适当放宽心跳容忍，避免 GCS 误判节点 dead：
 # export RAY_health_check_initial_delay_ms=30000
 # export RAY_health_check_period_ms=10000
 # export RAY_num_heartbeats_timeout=300
+
+export RLINF_NODE_RANK=1
+export RLINF_COMM_NET_DEVICES=enp130s0
 
 ray start --address='192.168.3.223:6379' \
   --node-ip-address=192.168.3.224 \

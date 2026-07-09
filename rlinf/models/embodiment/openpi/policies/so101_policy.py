@@ -87,7 +87,13 @@ class SO101PolicyInputs(transforms.DataTransformFn):
             if isinstance(extra, (list, tuple)):
                 extra = [np.asarray(x) for x in extra]
             else:
-                extra = [np.asarray(extra)]
+                extra = np.asarray(extra)
+                # The env stacks multiple extra-view images along the first axis,
+                # giving shape [N, H, W, C]. Split into separate [H, W, C] images.
+                if extra.ndim == 4 and extra.shape[0] > 1:
+                    extra = [extra[i] for i in range(extra.shape[0])]
+                else:
+                    extra = [extra]
             if len(extra) >= 1:
                 images["left_wrist_0_rgb"] = _parse_image(extra[0])
                 image_masks["left_wrist_0_rgb"] = np.True_
