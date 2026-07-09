@@ -187,7 +187,7 @@ actor:
       value_after_vlm: True
       num_images_in_input: 3
       noise_method: "flow_noise"
-      action_horizon: 6
+      action_horizon: 50
       noise_params: [0.16, 0.12, 200]
       joint_logprob: True
       action_chunk: ${actor.model.num_action_chunks}

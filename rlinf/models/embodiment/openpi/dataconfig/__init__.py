@@ -349,7 +349,7 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_so101",
-        model=pi0_config.Pi0Config(pi05=True, action_dim=12),
+        model=pi0_config.Pi0Config(pi05=True),
         data=SO101DataConfig(
             repo_id="",
             assets=AssetsConfig(
