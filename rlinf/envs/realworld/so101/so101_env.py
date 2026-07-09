@@ -232,6 +232,12 @@ class SO101Env(gym.Env):
         from .so101_controller import SO101Controller
 
         hw = self.hardware_info.config if self.hardware_info is not None else None
+        self._logger.info(
+            f"[SO101 DEBUG] node_rank={self.node_rank}, "
+            f"hardware_info={self.hardware_info}, "
+            f"hw.config.left_follower_port={getattr(hw, 'left_follower_port', None) if hw else None}, "
+            f"env_cfg.left_follower_port={self.config.left_follower_port}"
+        )
 
         def _from_hw(key: str, default: Any = None):
             return getattr(hw, key, default) if hw is not None else default
