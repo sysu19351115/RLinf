@@ -121,7 +121,7 @@ env:
         use_reward_model: True
         model:
           model_type: "resnet"
-          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          model_path: "/home/tyz/project/RLinf/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
           arch: "resnet18"
           hidden_dim: 256
           dropout: 0.1
@@ -146,7 +146,7 @@ env:
         use_reward_model: True
         model:
           model_type: "resnet"
-          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          model_path: "/home/tyz/project/RLinf/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
           arch: "resnet18"
           hidden_dim: 256
           dropout: 0.1

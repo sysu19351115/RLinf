@@ -183,7 +183,7 @@ env:
         use_reward_model: True
         model:
           model_type: "resnet"
-          model_path: "${oc.env:PWD}/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
+          model_path: "/home/tyz/project/RLinf/logs/so101_reward_model/so101_reward_training/checkpoints/best_model/actor/model_state_dict/full_weights.pt"
           arch: "resnet18"
           hidden_dim: 256
           dropout: 0.1
@@ -193,9 +193,13 @@ env:
 ```
 
 > 注意：
-> - 默认 `model_path` 使用 `${oc.env:PWD}` 解析为当前工作目录。如果 checkpoint 不在该路径，请改为绝对路径，并确保本地（robot）节点可以访问。
+> - 当前配置走 **选择 A**：reward worker 默认跑在 head 节点，因此 `model_path` 必须是 **head 节点上的绝对路径**。
+> - 训练完成后，请把 robot 节点上的 checkpoint 同步到 head 节点：
+>   ```bash
+>   rsync -avP /home/zylab/project/RLinf/logs/so101_reward_model tyz@192.168.3.223:/home/tyz/project/RLinf/logs/
+>   ```
+> - 如果 head 用户名或项目路径不同，请相应修改 `model_path` 中的 `/home/tyz/project/RLinf`。
 > - `hidden_dim` 必须与训练时保持一致。
-> - 同步代码时确保 checkpoint 文件也同步到本地节点。
 > - `reward_image_key` 可改为 `cam_left_wrist`、`cam_right_wrist` 等，需与采集时使用的相机一致。若使用全局相机采集，这里应填 `cam_high`。
 
 ## 3. 记录初始位姿
@@ -213,7 +217,66 @@ python rlinf/envs/realworld/so101/record_joints.py \
 
 ## 4. 启动 Ray 集群
 
-参考 `docs/examples/rebot_pi05_ppo_async.md` 第 3 节，设置 `RLINF_NODE_RANK` 与 `RLINF_COMM_NET_DEVICES` 后启动 Ray。
+SO101 异步训练需要两台机器组成一个 Ray 集群：
+- **云端 head**（rank 0）：运行 actor 训练，有 GPU。
+- **本地 robot 节点**（rank 1）：运行 rollout + env worker，连接机械臂和相机。
+
+两台机器之间需要可互相访问的 IP 地址。如果当前网络环境不满足（例如单向 NAT），可先参考 `docs/wireguard_build.md` 或 `docs/ssh_reverse_tunnel_build.md` 搭建虚拟网卡/隧道。
+
+### 4.1 查看 IP 与网卡
+
+在每台机器上执行：
+
+```bash
+ip addr                 # 找到本机用于内网通信的 IP
+ip route | grep default # 找到默认路由对应的网口，例如 enp130s0
+```
+
+假设：
+- 云端 head IP：`192.168.3.223`
+- 本地 robot IP：`192.168.3.224`
+- 两端通信网口均为 `enp130s0`（按你实际网口名填写）
+
+### 4.2 云端 head 启动 Ray
+
+```bash
+source .venv/bin/activate
+
+export RLINF_NODE_RANK=0
+export RLINF_COMM_NET_DEVICES=enp130s0
+
+ray start --head --port=6379 \
+  --node-ip-address=192.168.3.223 \
+  --disable-usage-stats
+```
+
+### 4.3 本地 robot 节点加入 Ray
+
+```bash
+source .venv/bin/activate
+
+export RLINF_NODE_RANK=1
+export RLINF_COMM_NET_DEVICES=enp130s0
+
+# 如果走 VPN 或网络延迟较大，可适当放宽心跳容忍，避免 GCS 误判节点 dead：
+# export RAY_health_check_initial_delay_ms=30000
+# export RAY_health_check_period_ms=10000
+# export RAY_num_heartbeats_timeout=300
+
+ray start --address='192.168.3.223:6379' \
+  --node-ip-address=192.168.3.224 \
+  --disable-usage-stats
+```
+
+### 4.4 验证跨节点通信
+
+在云端 head 执行：
+
+```bash
+python tests/unit_tests/diag_cloud_to_local.py
+```
+
+通过的条件是输出包含 `Test 1: cloud driver -> LOCAL node ... SUCCESS`，且两个节点 `alive=True`。
 
 ## 5. Dummy 验证
 
