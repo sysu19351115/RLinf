@@ -106,11 +106,11 @@ env:
   group_name: "EnvGroup"
 
   train:
-    rollout_epoch: 5
+    rollout_epoch: 2
     ignore_terminations: False
     total_num_envs: 1
-    max_episode_steps: 240
-    max_steps_per_rollout_epoch: 240
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
     override_cfg:
       is_dummy: False
       tele_mode: false
@@ -148,7 +148,7 @@ env:
           image_size: [3, 224, 224]
           normalize: true
           precision: "fp32"
-      max_num_steps: 240
+      max_num_steps: 500
       step_frequency: 30.0
       # Physical rest/reset pose recorded from the actual robot (RLinf units).
       #initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
@@ -156,8 +156,8 @@ env:
   eval:
     rollout_epoch: 1
     total_num_envs: 1
-    max_episode_steps: 240
-    max_steps_per_rollout_epoch: 240
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
     override_cfg:
       is_dummy: False
       tele_mode: false
@@ -194,7 +194,7 @@ env:
           image_size: [3, 224, 224]
           normalize: true
           precision: "fp32"
-      max_num_steps: 240
+      max_num_steps: 500
       #initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 
 rollout:
@@ -212,7 +212,7 @@ actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
   micro_batch_size: 10
-  global_batch_size: 120
+  global_batch_size: 100
   seed: 0
   enable_offload: False
 
