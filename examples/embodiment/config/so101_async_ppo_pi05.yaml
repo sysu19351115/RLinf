@@ -194,7 +194,7 @@ env:
           normalize: true
           precision: "fp32"
       max_num_steps: 240
-      initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
+      #initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 
 rollout:
   group_name: "RolloutGroup"
