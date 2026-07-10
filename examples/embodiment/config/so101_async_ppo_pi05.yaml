@@ -219,9 +219,9 @@ actor:
     model_path: "checkpoints/pi05_so101_cache_torch"
     model_type: "openpi"
     add_value_head: True
-    num_action_chunks: 4
+    num_action_chunks: 10
     action_dim: 12
-    num_steps: 4
+    num_steps: 5
     openpi:
       config_name: "pi05_so101"
       value_after_vlm: True
