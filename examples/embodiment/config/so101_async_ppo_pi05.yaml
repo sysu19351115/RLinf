@@ -50,7 +50,7 @@ cluster:
               fps: 25
               fourcc: "MJPG"
             robot_id: "bi"
-            max_relative_target: 10.0
+            max_relative_target: 30.0
             node_rank: 1
 
 runner:
