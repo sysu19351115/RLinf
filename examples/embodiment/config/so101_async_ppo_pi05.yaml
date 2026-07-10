@@ -226,9 +226,11 @@ actor:
       config_name: "pi05_so101"
       value_after_vlm: True
       num_images_in_input: 3
-      noise_method: "flow_noise"
+      #noise_method: "flow_noise"
+      #noise_params: [0.16, 0.12, 200]
+      noise_method: "flow_sde"
+      noise_level: 0.1
       action_horizon: 50
-      noise_params: [0.16, 0.12, 200]
       joint_logprob: True
       action_chunk: ${actor.model.num_action_chunks}
       action_env_dim: ${actor.model.action_dim}
