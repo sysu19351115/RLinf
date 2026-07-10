@@ -142,6 +142,18 @@ class SO101RobotConfig:
     use_reward_model: bool = False
     """Use a learned vision-based reward model."""
 
+    reward_mode: str = "per_step"
+    """Reward computation mode: ``per_step`` or ``terminal``.
+
+    ``per_step`` calls the reward model every step and uses the returned score
+    both as the step reward and as the success signal.
+
+    ``terminal`` only calls the reward model once at the final step of the
+    episode (when ``truncated`` is True) and returns 0 for all earlier steps.
+    This is useful for slow VLM reward models that cannot keep up with the
+    control frequency.
+    """
+
     reward_worker_cfg: Optional[dict] = None
     """Configuration dict passed to the embodied reward worker."""
 
@@ -238,6 +250,7 @@ class SO101Env(gym.Env):
 
         self._num_steps = 0
         self._success_hold_counter = 0
+        self._terminal_reward_computed = False
         self._reward_worker = None
 
         if not self.config.is_dummy:
@@ -393,9 +406,14 @@ class SO101Env(gym.Env):
         observation = self._get_observation()
         reward = self._calc_step_reward(observation)
 
-        terminated = (reward >= 1.0) and (
-            self._success_hold_counter >= self.config.success_hold_steps
-        )
+        if self.config.reward_mode == "terminal":
+            # Terminal reward mode does not use per-step reward for early
+            # termination; the episode runs until max_num_steps.
+            terminated = False
+        else:
+            terminated = (reward >= 1.0) and (
+                self._success_hold_counter >= self.config.success_hold_steps
+            )
         truncated = self._num_steps >= self.config.max_num_steps
 
         return observation, reward, terminated, truncated, {}
@@ -406,9 +424,11 @@ class SO101Env(gym.Env):
 
     def reset(self, seed=None, options=None):
         if self.config.is_dummy:
+            self._terminal_reward_computed = False
             return self._get_observation(), {}
 
         self._success_hold_counter = 0
+        self._terminal_reward_computed = False
         self._move_to_initial_pose()
         self._num_steps = 0
         if not self.config.is_dummy:
@@ -432,6 +452,19 @@ class SO101Env(gym.Env):
             return 0.0
 
         if self.config.use_reward_model:
+            if self.config.reward_mode == "terminal":
+                # Only evaluate the reward model once at the final step of an
+                # episode. After the truncation boundary we keep returning 0
+                # until the runner resets us.
+                if (
+                    self._num_steps >= self.config.max_num_steps
+                    and not self._terminal_reward_computed
+                ):
+                    self._terminal_reward_computed = True
+                    reward = self._compute_reward_model(observation)
+                    return max(0.0, min(1.0, float(reward)))
+                return 0.0
+
             reward = self._compute_reward_model(observation)
             if reward >= 1.0:
                 self._success_hold_counter += 1

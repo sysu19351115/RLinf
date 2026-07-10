@@ -81,6 +81,126 @@ def _parse_qwentrend_output(text: str) -> str | None:
     return matches[-1] if matches else None
 
 
+def _parse_smolvlm_output(text: str) -> float | None:
+    """Extract a reward in [0, 1] from SmolVLM-style text output.
+
+    Supported patterns (case-insensitive):
+      - A single float in [0, 1], e.g. ``0.85`` or ``Task completion: 0.85``.
+      - JSON with ``score`` or ``success``, e.g. ``{"score": 0.85}``.
+      - Binary words: ``success``/``failure``, ``yes``/``no``.
+    """
+    text = str(text).strip()
+    lowered = text.lower()
+
+    # 1. JSON object: look for score / success.
+    obj = _extract_json_object(text)
+    if obj is not None:
+        score_val = obj.get("score")
+        if score_val is not None:
+            try:
+                return float(score_val)
+            except Exception:
+                pass
+        success_val = obj.get("success")
+        if isinstance(success_val, bool):
+            return 1.0 if success_val else 0.0
+
+    # 2. Explicit binary words.
+    if re.search(r"\bsuccess\b", lowered):
+        return 1.0
+    if re.search(r"\bfailure\b|\bfail\b", lowered):
+        return 0.0
+    if re.search(r"\byes\b", lowered):
+        return 1.0
+    if re.search(r"\bno\b", lowered):
+        return 0.0
+
+    # 3. Extract the first float in [0, 1].
+    numbers = re.findall(r"\b0?\.\d+\b|\b1\.0+\b", lowered)
+    if numbers:
+        try:
+            value = float(numbers[0])
+            if 0.0 <= value <= 1.0:
+                return value
+        except Exception:
+            pass
+
+    # 4. Integer 0 or 1 (but not larger numbers).
+    int_matches = re.findall(r"\b[01]\b", lowered)
+    if int_matches:
+        try:
+            return float(int_matches[0])
+        except Exception:
+            pass
+
+    return None
+
+
+@register_reward_parser("smolvlm_reward_parser")
+class SmolVLMRewardParser(BaseRewardParser):
+    def __init__(
+        self,
+        success_reward: float = 1.0,
+        failure_reward: float = 0.0,
+        invalid_reward: float = 0.0,
+        clamp: bool = True,
+        debug_print: bool = False,
+        debug_print_every: int = 10,
+        debug_sample_texts: int = 2,
+    ) -> None:
+        self.success_reward = float(success_reward)
+        self.failure_reward = float(failure_reward)
+        self.invalid_reward = float(invalid_reward)
+        self.clamp = bool(clamp)
+        self.debug_print = bool(debug_print)
+        self.debug_print_every = max(1, int(debug_print_every))
+        self.debug_sample_texts = max(0, int(debug_sample_texts))
+        self._call_idx = 0
+
+    def parse_rewards(self, outputs: list[str]) -> torch.Tensor:
+        rewards: list[float] = []
+        success_count, failure_count, invalid_count = 0, 0, 0
+        invalid_examples: list[str] = []
+
+        for output in outputs:
+            value = _parse_smolvlm_output(output)
+            if value is None:
+                rewards.append(self.invalid_reward)
+                invalid_count += 1
+                if len(invalid_examples) < self.debug_sample_texts:
+                    invalid_examples.append(str(output).replace("\n", "\\n")[:220])
+            else:
+                if self.clamp:
+                    value = max(0.0, min(1.0, value))
+                if value >= 0.5:
+                    success_count += 1
+                else:
+                    failure_count += 1
+                rewards.append(value)
+
+        self._call_idx += 1
+        if self.debug_print and (
+            self._call_idx <= 10 or self._call_idx % self.debug_print_every == 0
+        ):
+            logger.info(
+                "[RMDBG_PARSE] parser=smolvlm call=%d batch=%d "
+                "mean=%.3f min=%.3f max=%.3f "
+                "labels={success:%d, failure:%d, invalid:%d}",
+                self._call_idx,
+                len(outputs),
+                float(torch.tensor(rewards).mean()) if rewards else 0.0,
+                float(torch.tensor(rewards).min()) if rewards else 0.0,
+                float(torch.tensor(rewards).max()) if rewards else 0.0,
+                success_count,
+                failure_count,
+                invalid_count,
+            )
+            if invalid_examples:
+                logger.info("[RMDBG_PARSE] invalid_samples=%s", invalid_examples)
+
+        return torch.tensor(rewards, dtype=torch.float32)
+
+
 @register_reward_parser("qwentrend_reward_parser")
 class QwentrendRewardParser(BaseRewardParser):
     def __init__(

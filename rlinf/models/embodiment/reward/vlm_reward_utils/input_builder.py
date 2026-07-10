@@ -16,6 +16,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
+import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoProcessor
@@ -29,18 +30,28 @@ logger = logging.getLogger(__name__)
 
 
 def _to_pil_images(
-    images: Union[torch.Tensor, list[torch.Tensor]],
+    images: Union[torch.Tensor, np.ndarray, list[Any]],
 ) -> list[Image.Image]:
-    """Convert EnvOutput image tensors to per-sample PIL image lists.
+    """Convert EnvOutput image tensors/arrays to per-sample PIL image lists.
 
-    Expected EnvOutput image formats: [B, H, W, C]
+    Expected EnvOutput image formats: [B, H, W, C] or list of [H, W, C].
     """
     if isinstance(images, torch.Tensor):
         arr = images.detach().cpu().numpy()
+    elif isinstance(images, np.ndarray):
+        arr = images
     elif isinstance(images, list):
         if len(images) == 0:
             return []
-        arr = torch.stack(images).cpu().numpy()
+        # Mixed list of tensors, arrays, or PIL images.
+        if isinstance(images[0], Image.Image):
+            return [img.convert("RGB") for img in images]
+        if isinstance(images[0], torch.Tensor):
+            arr = torch.stack(images).cpu().numpy()
+        elif isinstance(images[0], np.ndarray):
+            arr = np.stack(images)
+        else:
+            raise TypeError(f"Unsupported list element type: {type(images[0])}")
     else:
         raise TypeError(f"Unsupported image input type: {type(images)}")
 
@@ -176,6 +187,57 @@ class BaseVLMInputBuilder(BaseInputBuilder):
                 else:
                     processed_inputs[key] = value
         return processed_inputs
+
+
+@register_input_builder("smolvlm_input_builder")
+@dataclass
+class SmolVLMInputBuilder(BaseVLMInputBuilder):
+    """Input builder tuned for SmolVLM reward models.
+
+    SmolVLM is small and works best with an explicit, constrained prompt. This
+    builder also falls back to ``default_task_description`` when the env does not
+    provide ``task_descriptions`` in the observation dict (e.g. SO101's internal
+    reward-model path only passes images).
+    """
+
+    default_task_description: str = ""
+
+    def prepare_inputs(self, observations: dict[str, Any], valid_input_ids: list[int]):
+        images = extract_images(observations, self.image_keys)
+        images_list = [images[env_idx] for env_idx in valid_input_ids]
+
+        task_descriptions = observations.get("task_descriptions", None)
+        if task_descriptions is None or len(task_descriptions) == 0:
+            task_descriptions = [self.default_task_description] * len(valid_input_ids)
+
+        prompt_texts_list: list[str] = []
+        for env_idx in valid_input_ids:
+            task_description = str(task_descriptions[env_idx] or self.default_task_description).strip()
+            prompt_texts = [
+                f"Task: {task_description}\n\n"
+                "Rate task completion from 0 to 1. Reply with only a number, e.g. 0.85."
+            ]
+            prompt_texts_list.append(prompt_texts)
+
+        return {
+            "images_list": images_list,
+            "videos_list": None,
+            "prompt_texts_list": prompt_texts_list,
+        }
+
+
+@register_input_builder("api_vlm_input_builder")
+@dataclass
+class APIVLMInputBuilder(SmolVLMInputBuilder):
+    """Input builder for remote API VLM reward models.
+
+    Reuses the SmolVLM prompt format but skips the HuggingFace processor step;
+    the raw ``images_list`` and ``prompt_texts_list`` are passed directly to
+    :class:`APIVLMRewardModel` for base64 encoding and HTTP submission.
+    """
+
+    def process_inputs(self, prepared_inputs: dict[str, Any]) -> dict[str, Any]:
+        return prepared_inputs
 
 
 @register_input_builder("history_vlm_input_builder")

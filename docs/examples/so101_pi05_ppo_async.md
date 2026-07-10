@@ -82,9 +82,9 @@ checkpoints/pi05_so101_cache_torch/
 └── ...
 ```
 
-### 2.2 Reward Model（推荐）
+### 2.2 CNN Reward Model（可选）
 
-SO101 基础环境没有可靠的几何成功判断，真实任务建议训练一个基于视觉的 reward model。整体流程为：**拍摄成功/失败案例图片 → 转换为二分类数据集 → 训练 ResNet 奖励模型 → 在 RL YAML 中启用**。
+SO101 基础环境没有可靠的几何成功判断。除了第 2.3 节的人工评分方案外，也可以训练一个基于视觉的 CNN reward model。整体流程为：**拍摄成功/失败案例图片 → 转换为二分类数据集 → 训练 ResNet 奖励模型 → 在 RL YAML 中启用**。
 
 #### 2.2.1 拍摄数据集
 
@@ -169,9 +169,9 @@ python examples/reward/verify_reward_model_dummy.py \
     --reward-image-key cam_high
 ```
 
-#### 2.2.5 配置 RL YAML（已默认启用）
+#### 2.2.5 配置 RL YAML（使用 CNN reward model 时）
 
-`examples/embodiment/config/so101_async_ppo_pi05.yaml` 中 `env.train.override_cfg` 和 `env.eval.override_cfg` 已默认启用 reward model：
+如果你选择训练 CNN reward model 而不是第 2.3 节的人工评分，修改 `examples/embodiment/config/so101_async_ppo_pi05.yaml` 的 `env.train.override_cfg` 和 `env.eval.override_cfg`：
 
 ```yaml
 env:
@@ -201,6 +201,90 @@ env:
 > - 如果 head 用户名或项目路径不同，请相应修改 `model_path` 中的 `/home/tyz/project/RLinf`。
 > - `hidden_dim` 必须与训练时保持一致。
 > - `reward_image_key` 可改为 `cam_left_wrist`、`cam_right_wrist` 等，需与采集时使用的相机一致。若使用全局相机采集，这里应填 `cam_high`。
+
+### 2.3 人工评分奖励（可选替代方案）
+
+如果训练 CNN reward model 效果不佳，或者任务成功/失败边界比较主观，可以让**人工在每个 episode 结束时看图打分**。当前示例 YAML（`examples/embodiment/config/so101_async_ppo_pi05.yaml`）默认使用此方案。
+
+#### 2.3.1 启动人工评分服务
+
+在 **head/cloud 节点**启动 Flask 网页服务：
+
+```bash
+source .venv/bin/activate
+python examples/embodiment/human_reward_server.py \
+    --port 12345 \
+    --log_dir logs/human_rewards
+```
+
+可选参数：
+- `--host`：默认 `0.0.0.0`，如需仅本地访问可改为 `127.0.0.1`。
+- `--default_reward`：超时未评分时的默认奖励，默认 `0.0`。
+- `--wait_timeout`：服务端单次长轮询超时时间，默认 `60.0` 秒。
+
+#### 2.3.2 打开评分页面
+
+在浏览器中访问 head 节点的 IP 和端口：
+
+```text
+http://<head-ip>:12345
+```
+
+如果操作者不在同一内网，可通过 SSH 隧道转发到本地：
+
+```bash
+ssh -L 12345:localhost:12345 <head-user>@<head-ip>
+```
+
+然后浏览器打开 `http://localhost:12345`。
+
+#### 2.3.3 配置说明
+
+`examples/embodiment/config/so101_async_ppo_pi05.yaml` 中已默认启用人工评分：
+
+```yaml
+env:
+  train:
+    override_cfg:
+      use_reward_model: True
+      reward_mode: terminal
+      reward_image_key: "cam_high"
+      reward_worker_node_rank: 0
+      reward_worker_node_group: "cloud"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "human"
+          human_reward_url: "http://127.0.0.1:12345"
+          timeout: 600.0
+          server_wait_timeout: 60.0
+          default_reward: 0.0
+          task_description: "Place all objects into the box to clean the table."
+```
+
+关键字段：
+- `model_type: "human"`：使用 `HumanRewardModel`。
+- `human_reward_url`：人工评分服务的地址。如果服务不在 head 节点本机，请改为实际 IP。
+- `timeout`：单个 episode 最多等待人工评分的时间（秒），默认 600 秒。
+- `reward_mode: terminal`：只在每个 episode 最后一步调一次人工评分，不影响控制频率。
+
+#### 2.3.4 测试
+
+启动服务后，可用测试脚本提交一张图片并等待点击：
+
+```bash
+python examples/embodiment/test_human_reward_server.py \
+    --image tmp/vlm_debug_frame.jpg \
+    --url http://127.0.0.1:12345
+```
+
+在浏览器点击 **成功** 或 **失败** 后，终端会打印收到的奖励值。
+
+#### 2.3.5 注意事项
+
+- 必须有人实时盯着浏览器；超时未评分会返回 `default_reward`（默认 0.0）。
+- 每个 episode 的最终帧和评分结果会自动保存到 `--log_dir`，方便事后复核。
+- 如果想改回 CNN reward model，请参考第 2.2 节修改 `reward_worker_cfg.model` 部分。
 
 ## 3. 记录初始位姿
 
@@ -294,6 +378,7 @@ python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05 \
 python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05
 ```
 
-## 7. Reward Model（可选）
+## 7. 奖励方案（可选）
 
-详见本文第 2.2 节训练 vision-based reward model，并在 YAML 中启用 `use_reward_model`。
+- CNN reward model：详见第 2.2 节。
+- 人工评分：详见第 2.3 节。当前示例 YAML 默认使用此方案。
