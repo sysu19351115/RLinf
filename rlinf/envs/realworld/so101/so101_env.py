@@ -14,8 +14,10 @@
 """SO101 bimanual robot environment for RLinf real-world RL."""
 
 import copy
+import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 import cv2
@@ -59,6 +61,30 @@ def _camera_spec(
         "fps": fps,
         "fourcc": fourcc,
     }
+
+
+def _load_joints_from_json(pose_kind: str) -> Optional[np.ndarray]:
+    """Load ``initial_joints`` or ``end_joints`` from the recorded JSON file.
+
+    ``record_joints.py --pose-kind={initial,end}`` writes
+    ``rlinf/envs/realworld/so101/{pose_kind}_joints.json``.  If the file exists,
+    return the positions as a ``(12,)`` numpy array; otherwise return ``None``.
+    """
+    json_path = Path(__file__).resolve().parent / f"{pose_kind}_joints.json"
+    if not json_path.exists():
+        return None
+    try:
+        with json_path.open("r") as f:
+            data = json.load(f)
+        positions = np.asarray(data["positions"], dtype=np.float64)
+        if positions.shape != (12,):
+            raise ValueError(f"Expected 12 positions, got shape {positions.shape}")
+        return positions
+    except Exception as e:
+        get_logger().warning(
+            f"Failed to load {pose_kind}_joints from {json_path}: {e}"
+        )
+        return None
 
 
 @dataclass
@@ -203,6 +229,12 @@ class SO101Env(gym.Env):
             for key, value in override_cfg.items():
                 if hasattr(self.config, key):
                     setattr(self.config, key, value)
+
+        # Fall back to recorded JSON poses when not provided by config.
+        if self.config.initial_joints is None:
+            self.config.initial_joints = _load_joints_from_json("initial")
+        if self.config.end_joints is None:
+            self.config.end_joints = _load_joints_from_json("end")
 
         self._num_steps = 0
         self._success_hold_counter = 0
