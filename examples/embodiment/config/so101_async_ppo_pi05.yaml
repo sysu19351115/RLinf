@@ -106,7 +106,7 @@ env:
   group_name: "EnvGroup"
 
   train:
-    rollout_epoch: 2
+    rollout_epoch: 5
     ignore_terminations: False
     total_num_envs: 1
     max_episode_steps: 240
@@ -150,7 +150,7 @@ env:
           precision: "fp32"
       max_num_steps: 240
       # Physical rest/reset pose recorded from the actual robot (RLinf units).
-      initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
+      #initial_joints: [3.96, -100.24, 96.91, 75.56, 1.49, 2.70, -3.49, -99.84, 101.71, 74.55, 5.54, 1.99]
 
   eval:
     rollout_epoch: 1
