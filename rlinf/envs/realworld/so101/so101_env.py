@@ -40,6 +40,9 @@ _DEFAULT_JOINT_LIMIT_HIGH = np.array(
 # Camera ordering used in the observation space and RealWorldEnv main_image_key.
 _CAMERA_ORDER = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
+# OpenPI pi0/pi0.5 and the SO101 reward model expect 224x224 RGB images.
+_IMAGE_SIZE = 224
+
 
 def _camera_spec(
     index_or_path: str,
@@ -320,7 +323,7 @@ class SO101Env(gym.Env):
         frame_spaces = {}
         for name in _CAMERA_ORDER:
             frame_spaces[name] = gym.spaces.Box(
-                0, 255, shape=(128, 128, 3), dtype=np.uint8
+                0, 255, shape=(_IMAGE_SIZE, _IMAGE_SIZE, 3), dtype=np.uint8
             )
 
         self.observation_space = gym.spaces.Dict(
@@ -457,7 +460,7 @@ class SO101Env(gym.Env):
             frames = self._crop_and_resize_frames(obs["images"])
             if not frames:
                 frames = {
-                    name: np.zeros((128, 128, 3), dtype=np.uint8)
+                    name: np.zeros((_IMAGE_SIZE, _IMAGE_SIZE, 3), dtype=np.uint8)
                     for name in _CAMERA_ORDER
                 }
             state = {"arm_joint_position": self._state.arm_joint_position}
@@ -480,7 +483,7 @@ class SO101Env(gym.Env):
             start_x = (w - crop_size) // 2
             start_y = (h - crop_size) // 2
             cropped = img[start_y : start_y + crop_size, start_x : start_x + crop_size]
-            resized = cv2.resize(cropped, (128, 128))
+            resized = cv2.resize(cropped, (_IMAGE_SIZE, _IMAGE_SIZE))
             frames[name] = resized
         return frames
 

@@ -113,7 +113,7 @@ env:
     max_steps_per_rollout_epoch: 240
     override_cfg:
       is_dummy: False
-      tele_mode: true
+      tele_mode: false
       use_dense_reward: False
       use_reward_model: True
       reward_image_key: "cam_high"
@@ -159,7 +159,7 @@ env:
     max_steps_per_rollout_epoch: 240
     override_cfg:
       is_dummy: False
-      tele_mode: true
+      tele_mode: false
       use_reward_model: True
       reward_image_key: "cam_high"
       left_follower_port: "/dev/ttyACM0"
