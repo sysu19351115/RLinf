@@ -39,6 +39,9 @@ from rlinf.envs.realworld.common.wrappers.reward_done_wrapper import (
     KeyboardRewardDoneMultiStageWrapper,
     KeyboardRewardDoneWrapper,
 )
+from rlinf.envs.realworld.common.wrappers.so101_keyboard_intervention import (
+    SO101KeyboardIntervention,
+)
 from rlinf.envs.realworld.common.wrappers.spacemouse_intervention import (
     SpacemouseIntervention,
 )
@@ -131,6 +134,38 @@ def apply_single_arm_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
     if cfg.get("use_relative_frame", True):
         env = RelativeFrame(env)
     env = Quat2EulerWrapper(env)
+    return env
+
+
+def apply_so101_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
+    """Wrapper stack for SO101 bimanual real-world envs.
+
+    Adds optional keyboard-based 6D end-effector intervention. The underlying
+    :class:`SO101Env` must expose ``get_joint_positions()``.
+    """
+    config = env.get_wrapper_attr("config")
+    use_keyboard = cfg.get("use_keyboard_intervention", False)
+    active_in_dummy = not config.is_dummy or cfg.get(
+        "use_intervention_in_dummy", False
+    )
+
+    if use_keyboard and active_in_dummy:
+        kcfg = cfg.get("keyboard_intervention", {})
+        env = SO101KeyboardIntervention(
+            env,
+            active_arm=kcfg.get("active_arm", "left"),
+            position_delta=float(kcfg.get("position_delta", 0.005)),
+            rotation_delta=float(kcfg.get("rotation_delta", 0.05)),
+            gripper_delta=float(kcfg.get("gripper_delta", 5.0)),
+            urdf_path=kcfg.get("urdf_path", None),
+            end_effector_link=kcfg.get("end_effector_link", "gripper_frame_link"),
+            toggle_key=kcfg.get("toggle_key", "h"),
+            model_key=kcfg.get("model_key", "m"),
+            quit_keys=tuple(kcfg.get("quit_keys", ("Key.esc",))),
+            switch_arm_key=kcfg.get("switch_arm_key", "Tab"),
+        )
+
+    env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))
     return env
 
 

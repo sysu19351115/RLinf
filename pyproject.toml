@@ -180,6 +180,7 @@ so101 = [
     "imageio[ffmpeg]",
     "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
     "feetech-servo-sdk>=1.0.0,<2.0.0",
+    "pin>=3.0.0",
 ]
 realworld-env = [
     "gymnasium>=0.29.1",

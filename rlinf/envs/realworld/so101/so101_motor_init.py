@@ -69,9 +69,7 @@ def _patch_scservo_timeout() -> None:
     def _set_packet_timeout(self, packet_length: int) -> None:
         self.packet_start_time = self.getCurrentTime()
         self.packet_timeout = (
-            self.tx_time_per_byte * packet_length
-            + self.tx_time_per_byte * 3.0
-            + 50.0
+            self.tx_time_per_byte * packet_length + self.tx_time_per_byte * 3.0 + 50.0
         )
 
     _set_packet_timeout._rlinf_patched = True  # type: ignore[attr-defined]
@@ -99,7 +97,9 @@ def _open_raw_port(port: str):
     return port_handler, packet_handler
 
 
-def configure_feetech_port(port: str, motor_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6)) -> None:
+def configure_feetech_port(
+    port: str, motor_ids: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
+) -> None:
     """Configure a single SO101 arm port so that LeRobot can sync-read reliably.
 
     This must be called *before* LeRobot opens the same port.  It writes:
@@ -185,9 +185,7 @@ def configure_feetech_port(port: str, motor_ids: tuple[int, ...] = (1, 2, 3, 4, 
             packet_handler.write1ByteTxOnly(
                 port_handler, mid, _MAXIMUM_ACCELERATION_ADDR, 254
             )
-            packet_handler.write1ByteTxOnly(
-                port_handler, mid, _ACCELERATION_ADDR, 254
-            )
+            packet_handler.write1ByteTxOnly(port_handler, mid, _ACCELERATION_ADDR, 254)
         time.sleep(0.02)
         port_handler.ser.reset_input_buffer()
 
@@ -271,13 +269,13 @@ def _patch_feetech_autocorrect() -> None:
 
     import numpy as np
     from lerobot.common.robot_devices.motors.feetech import (
-        CalibrationMode,
-        FeetechMotorsBus,
         HALF_TURN_DEGREE,
         LOWER_BOUND_DEGREE,
         LOWER_BOUND_LINEAR,
         UPPER_BOUND_DEGREE,
         UPPER_BOUND_LINEAR,
+        CalibrationMode,
+        FeetechMotorsBus,
     )
 
     if getattr(FeetechMotorsBus.autocorrect_calibration, "_rlinf_patched", False):
@@ -298,13 +296,21 @@ def _patch_feetech_autocorrect() -> None:
                 if drive_mode:
                     values[i] *= -1
 
-                calib_val = (values[i] + homing_offset) / (resolution // 2) * HALF_TURN_DEGREE
-                in_range = (calib_val > LOWER_BOUND_DEGREE) and (calib_val < UPPER_BOUND_DEGREE)
+                calib_val = (
+                    (values[i] + homing_offset) / (resolution // 2) * HALF_TURN_DEGREE
+                )
+                in_range = (calib_val > LOWER_BOUND_DEGREE) and (
+                    calib_val < UPPER_BOUND_DEGREE
+                )
                 low_factor = (
-                    -HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                    -HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2)
+                    - values[i]
+                    - homing_offset
                 ) / resolution
                 upp_factor = (
-                    HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2) - values[i] - homing_offset
+                    HALF_TURN_DEGREE / HALF_TURN_DEGREE * (resolution // 2)
+                    - values[i]
+                    - homing_offset
                 ) / resolution
 
             elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
@@ -312,7 +318,9 @@ def _patch_feetech_autocorrect() -> None:
                 end_pos = self.calibration["end_pos"][calib_idx]
 
                 calib_val = (values[i] - start_pos) / (end_pos - start_pos) * 100
-                in_range = (calib_val > LOWER_BOUND_LINEAR) and (calib_val < UPPER_BOUND_LINEAR)
+                in_range = (calib_val > LOWER_BOUND_LINEAR) and (
+                    calib_val < UPPER_BOUND_LINEAR
+                )
                 low_factor = (start_pos - values[i]) / resolution
                 upp_factor = (end_pos - values[i]) / resolution
 
@@ -320,11 +328,15 @@ def _patch_feetech_autocorrect() -> None:
                 if low_factor < upp_factor:
                     factor = math.ceil(low_factor)
                     if factor > upp_factor:
-                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
+                        raise ValueError(
+                            f"No integer found between bounds [{low_factor=}, {upp_factor=}]"
+                        )
                 else:
                     factor = math.ceil(upp_factor)
                     if factor > low_factor:
-                        raise ValueError(f"No integer found between bounds [{low_factor=}, {upp_factor=}]")
+                        raise ValueError(
+                            f"No integer found between bounds [{low_factor=}, {upp_factor=}]"
+                        )
 
                 self.calibration["homing_offset"][calib_idx] += resolution * factor
 
@@ -386,11 +398,11 @@ def build_so101_manipulator(
 
     config = So101RobotConfig(
         calibration_dir=str(calibration_dir),
-        leader_arms={},
         follower_arms={
             "left": _arm_config(left_follower_port),
             "right": _arm_config(right_follower_port),
         },
+        leader_arms={},
         cameras=cameras or {},
         max_relative_target=max_relative_target,
     )

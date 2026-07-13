@@ -296,7 +296,6 @@ class SO101Env(gym.Env):
         right_port = self.config.right_follower_port or _from_hw(
             "right_follower_port", "/dev/ttyACM3"
         )
-
         left_wrist = self.config.left_wrist_camera or _from_hw(
             "left_wrist_camera",
             {"index_or_path": "/dev/video0"},
@@ -553,6 +552,25 @@ class SO101Env(gym.Env):
         return frames
 
     # ── Utilities ─────────────────────────────────────────────────────────────
+
+    def get_joint_positions(self) -> np.ndarray:
+        """Return the current follower arm joint positions in RLinf units.
+
+        Reads fresh state from the hardware when connected so that callers such
+        as the keyboard intervention wrapper see the actual robot pose, not the
+        state cached at the end of the previous step.
+        """
+        if not self.config.is_dummy and hasattr(self, "_controller"):
+            try:
+                state = self._controller.get_state().wait()[0]
+                return np.asarray(state.arm_joint_position, dtype=np.float64)
+            except Exception as e:
+                self._logger.warning(
+                    f"Failed to read fresh joint positions: {e}; falling back to cache."
+                )
+        if hasattr(self, "_state") and self._state is not None:
+            return np.asarray(self._state.arm_joint_position, dtype=np.float64)
+        return np.zeros(12, dtype=np.float64)
 
     def close(self):
         """Release hardware resources."""

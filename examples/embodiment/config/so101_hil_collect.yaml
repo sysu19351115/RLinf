@@ -1,0 +1,142 @@
+defaults:
+  - env/realworld_so101@env.eval
+  - model/pi0_5@actor.model
+  - override hydra/job_logging: stdout
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: so101
+      placement: 0
+  node_groups:
+    - label: so101
+      node_ranks: 0
+      hardware:
+        type: SO101Arm
+        configs:
+          - node_rank: 0
+
+runner:
+  task_type: embodied
+  logger:
+    # Relative to the working directory where the script is launched.
+    log_path: "logs/so101_hil_collect"
+    project_name: rlinf
+    experiment_name: "so101-hil-collect"
+    logger_backends: ["tensorboard"]
+  # Large upper bound; the operator decides when to stop via ESC.
+  num_data_episodes: 10000
+  record_task_description: False
+
+# Set to True (or pass --use_dummy_policy=True) to run without loading a
+# real checkpoint and without connecting hardware.
+use_dummy_policy: False
+
+env:
+  group_name: "EnvGroup"
+  eval:
+    ignore_terminations: False
+    auto_reset: False
+    total_num_envs: 1
+    # Large safety cap; the operator ends each episode with Enter.
+    max_episode_steps: 10000
+    max_steps_per_rollout_epoch: 10000
+    main_image_key: cam_left_wrist
+    override_cfg:
+      is_dummy: ${use_dummy_policy}
+      tele_mode: false
+      use_dense_reward: False
+      use_reward_model: False
+      max_num_steps: 10000
+      # Let the keyboard intervention wrapper own episode ends (Enter/ESC).
+      manual_episode_control_only: True
+      # Physical rest/reset pose recorded from the actual robot (RLinf units).
+      # Loaded from rlinf/envs/realworld/so101/initial_joints.json so the file
+      # can be updated without changing YAML.
+      initial_joints: ${json_load:rlinf/envs/realworld/so101/initial_joints.json,positions}
+      # Drive the robot at the same frequency as the dataset frame rate.
+      step_frequency: ${env.eval.data_collection.fps}
+
+    # Override default SO101 serial ports (env/realworld_so101.yaml defaults to
+    # /dev/ttyACM2 and /dev/ttyACM3).
+    init_params:
+      left_follower_port: "/dev/ttyACM0"
+      right_follower_port: "/dev/ttyACM1"
+      left_wrist_camera:
+        index_or_path: "/dev/video2"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      right_wrist_camera:
+        index_or_path: "/dev/video4"
+        width: 640
+        height: 480
+        fps: 30
+        fourcc: "MJPG"
+      left_global_camera:
+        index_or_path: "/dev/video0"
+        width: 640
+        height: 480
+        fps: 25
+        fourcc: "MJPG"
+
+    # Human-in-the-loop intervention via keyboard 6D end-effector control.
+    use_keyboard_intervention: True
+    use_intervention_in_dummy: True
+
+    keyboard_intervention:
+      active_arm: "left"               # left / right; Tab switches during ENGAGE
+      position_delta: 0.005            # meters per step
+      rotation_delta: 0.05             # radians per step
+      gripper_delta: 5.0               # [0, 100] per step
+      toggle_key: "h"
+      model_key: "m"
+      done_key: "Key.enter"            # end current episode and start next
+      quit_keys: ["Key.esc"]           # save current episode and exit program
+      switch_arm_key: "Key.tab"
+
+    data_collection:
+      enabled: True
+      # Relative to the RLinf project root, so the dataset lands directly in
+      # logs/so101_hil_collect/collected_data/ no matter where Hydra runs.
+      save_dir: ${project_path:logs/so101_hil_collect/collected_data}
+      export_format: "lerobot"
+      only_success: False
+      robot_type: "so101"
+      fps: 25
+      finalize_interval: 100
+      resume: False
+      # Reduce LeRobot image writer concurrency to avoid hangs on single-machine runs.
+      image_writer_threads: 1
+      image_writer_processes: 1
+
+actor:
+  model:
+    model_path: "checkpoints/pi05_so101_cache_torch"
+    model_type: "openpi"
+    precision: null
+    num_action_chunks: 10
+    action_dim: 12
+    num_steps: 5
+    openpi:
+      config_name: "pi05_so101"
+      train_expert_only: True
+      value_after_vlm: True
+      num_images_in_input: 3
+      noise_method: "flow_ode"
+      #action_horizon: 50
+      #noise_params: [0.16, 0.12, 200]
+      joint_logprob: True
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}

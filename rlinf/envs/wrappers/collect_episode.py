@@ -118,6 +118,8 @@ class CollectEpisode(gym.Wrapper):
         only_success: bool = False,
         finalize_interval: int = 100,
         resume: bool = False,
+        image_writer_threads: int = 1,
+        image_writer_processes: int = 1,
     ):
         if isinstance(env, gym.Env):
             super().__init__(env)
@@ -139,6 +141,8 @@ class CollectEpisode(gym.Wrapper):
         self.fps = fps
         self.only_success = only_success
         self.finalize_interval = finalize_interval
+        self.image_writer_threads = image_writer_threads
+        self.image_writer_processes = image_writer_processes
 
         self._preexisting_episode_count = 0
         self._next_shard_id = 0
@@ -548,6 +552,15 @@ class CollectEpisode(gym.Wrapper):
                 "intervene_flag": np.array([intervene_flag], dtype=bool),
                 "segment_id": np.array([seg_id], dtype=np.uint8),
             }
+            if (
+                "model_action" in info_with_intervene
+                and info_with_intervene["model_action"] is not None
+            ):
+                model_action = self._to_numpy(info_with_intervene["model_action"])
+                if model_action is not None:
+                    frame["model_action"] = (
+                        np.asarray(model_action).astype(np.float32).flatten()
+                    )
             if image is not None:
                 frame["image"] = self._to_uint8(np.asarray(image))
             for key, img in self._expand_multi_view_images(
@@ -580,6 +593,15 @@ class CollectEpisode(gym.Wrapper):
             first = ep_data[0]
             wrist_image_keys = self._collect_image_keys(first, "wrist_image")
             extra_view_image_keys = self._collect_image_keys(first, "extra_view_image")
+            custom_features = None
+            if "model_action" in first:
+                custom_features = {
+                    "model_action": {
+                        "dtype": "float32",
+                        "shape": (int(first["model_action"].shape[-1]),),
+                        "names": ["model_action"],
+                    }
+                }
             self._lerobot_writer.create(
                 repo_id=os.path.join(
                     self.save_dir, f"rank_{self.rank}", f"id_{shard_id}"
@@ -594,6 +616,9 @@ class CollectEpisode(gym.Wrapper):
                 extra_view_image_keys=extra_view_image_keys,
                 has_intervene_flag="intervene_flag" in first,
                 has_segment_id="segment_id" in first,
+                custom_features=custom_features,
+                image_writer_threads=self.image_writer_threads,
+                image_writer_processes=self.image_writer_processes,
             )
             self._next_shard_id = shard_id + 1
         return self._lerobot_writer

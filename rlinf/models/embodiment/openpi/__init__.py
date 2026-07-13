@@ -18,6 +18,8 @@ import os
 import torch
 from omegaconf import DictConfig
 
+from rlinf.utils.logging import get_logger
+
 
 def get_model(cfg: DictConfig, torch_dtype=None):
     import glob
@@ -87,6 +89,17 @@ def get_model(cfg: DictConfig, torch_dtype=None):
         model.load_state_dict(all_state_dict, strict=False)
 
     model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
+
+    # Move model to GPU for inference if available.
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda:0"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    model = model.to(device)
+    model_device = next(model.parameters()).device
+    get_logger().info(f"[OpenPI] model loaded on device: {model_device}")
+
     # fsdp replace
     # model.paligemma_with_expert.replace_gemma_decoder_layers()
     # load data stats

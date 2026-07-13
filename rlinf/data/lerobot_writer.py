@@ -15,6 +15,7 @@
 """LeRobot dataset writer for saving rollout data."""
 
 import gc
+import shutil
 from typing import Any
 
 from rlinf.utils.logging import get_logger
@@ -71,6 +72,7 @@ class LeRobotDatasetWriter:
         extra_view_image_keys: dict[str, tuple[int, ...]] | None = None,
         has_intervene_flag: bool = True,
         has_segment_id: bool = False,
+        custom_features: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """
         Create a new LeRobot dataset.
@@ -98,6 +100,8 @@ class LeRobotDatasetWriter:
             has_segment_id: Whether to include per-frame ``segment_id``
                 (uint8, shape ``(1,)``) in auto-generated features. Used for
                 in-episode sub-task boundaries set by KeyboardStartEndWrapper.
+            custom_features: Additional feature definitions merged into the
+                auto-generated schema. Ignored when ``features`` is provided.
 
         """
         from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -153,6 +157,23 @@ class LeRobotDatasetWriter:
                             "shape": list(shape),
                             "names": ["height", "width", "channel"],
                         }
+            if custom_features:
+                features.update(custom_features)
+
+        # LeRobot places datasets under ~/.cache/huggingface/lerobot/{repo_id} by
+        # default. If a previous run left that directory behind, create() raises
+        # FileExistsError. Remove the stale cache directory before creating.
+        try:
+            from lerobot.common.constants import HF_LEROBOT_HOME
+
+            cache_root = HF_LEROBOT_HOME / repo_id
+            if cache_root.exists():
+                shutil.rmtree(cache_root)
+                self.logger.warning(
+                    f"Removed stale LeRobot cache directory: {cache_root}"
+                )
+        except Exception:
+            pass
 
         self.logger.info(
             f"Creating LeRobot dataset: repo_id={repo_id}, robot_type={robot_type}, fps={fps}"

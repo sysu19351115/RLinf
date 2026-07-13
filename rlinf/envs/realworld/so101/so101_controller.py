@@ -227,7 +227,8 @@ class SO101Controller(Worker):
         )
         self._robot.connect()
         self._logger.info(
-            f"SO101Controller connected: left={left_follower_port}, right={right_follower_port}"
+            f"SO101Controller connected: left={left_follower_port}, "
+            f"right={right_follower_port}"
         )
 
     def close(self):

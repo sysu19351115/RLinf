@@ -91,7 +91,8 @@ class SO101ArmRobot(Hardware):
     @staticmethod
     def _validate_serial_ports(config: "SO101ArmConfig", node_rank: int) -> None:
         """Warn if the serial ports are not visible on this node."""
-        for port in (config.left_follower_port, config.right_follower_port):
+        ports = [config.left_follower_port, config.right_follower_port]
+        for port in ports:
             if not os.path.exists(port):
                 warnings.warn(
                     f"Serial port '{port}' not found on node rank {node_rank}. "

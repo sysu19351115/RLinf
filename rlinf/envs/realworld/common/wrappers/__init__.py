@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 from .apply import (
     apply_dual_franka_joint_wrappers,
     apply_single_arm_wrappers,
+    apply_so101_wrappers,
 )
 from .dual_euler_obs import DualQuat2EulerWrapper
 from .dual_gello_joint_intervention import DualGelloJointIntervention
@@ -34,6 +35,7 @@ from .reward_done_wrapper import (
     KeyboardRewardDoneMultiStageWrapper,
     KeyboardRewardDoneWrapper,
 )
+from .so101_keyboard_intervention import SO101KeyboardIntervention
 from .spacemouse_intervention import SpacemouseIntervention
 
 if TYPE_CHECKING:
@@ -54,9 +56,11 @@ __all__ = [
     "LeaderFollowerKeyboardIntervention",
     "Quat2EulerWrapper",
     "RelativeFrame",
+    "SO101KeyboardIntervention",
     "SpacemouseIntervention",
     "apply_dual_franka_joint_wrappers",
     "apply_single_arm_wrappers",
+    "apply_so101_wrappers",
 ]
 
 
