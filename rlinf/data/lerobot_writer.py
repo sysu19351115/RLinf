@@ -104,6 +104,7 @@ class LeRobotDatasetWriter:
                 auto-generated schema. Ignored when ``features`` is provided.
 
         """
+
         from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
         _silence_hf_datasets_progress_bars()

@@ -6,97 +6,103 @@ GR00T模型强化学习训练
    :height: 16px
    :class: inline-icon
 
-本示例提供了一份完整指南，介绍如何在LIBERO环境中使用RLinf框架，通过强化学习对GR00T模型进行微调。内容涵盖从环境设置、核心算法设计到训练配置、评估和可视化的全过程，并提供可复现的命令和配置片段。
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/gr00t.png
+   :align: center
+   :width: 70%
+
+   NVIDIA GR00T：跨具身的 VLA 基础模型。
+
+使用 RLinf 在 **LIBERO** 上对 **GR00T** 模型进行强化学习微调——SFT 冷启动、PPO 训练、评估与可视化。
 
 .. note::
 
    RLinf 同时支持 GR00T-N1.5、GR00T-N1.6 和 GR00T-N1.7。N1.6 引入了流匹配动作头、FSDP 训练和更强的跨具身支持；N1.7 则进一步将官方 backbone 升级到 Cosmos-Reason2-2B / Qwen3-VL，并显著扩展了官方通用 state/action 空间。版本差异以 **N1.5** / **N1.6** / **N1.7** 标注区分。
 
-环境
------------
+概览
+----------------------------------------
 
-**LIBERO环境**
+在 LIBERO 上用 PPO（actor-critic）微调 GR00T（N1.5 / N1.6 / N1.7）。
 
-- **环境**：基于robosuite（MuJoCo）构建的LIBERO仿真基准。
-- **任务**：控制7自由度机械臂执行各种家庭操作技能（拾取放置、堆叠、打开抽屉、空间重排）。
+.. grid:: 2 4 4 4
+   :gutter: 2
 
-**N1.5:**
+   .. grid-item-card:: 环境
+      :text-align: center
 
-- **观测**：由放置在工作区周围的离屏摄像头捕获的RGB图像（典型分辨率为128×128或224×224）。
-- **动作空间**：7维连续动作——3D末端执行器位置控制（x、y、z）、3D旋转控制（横滚、俯仰、偏航）、夹爪控制（打开/关闭）
+      LIBERO · IsaacLab
 
-**N1.6:**
+   .. grid-item-card:: 算法
+      :text-align: center
 
-- **观测**：由放置在工作区周围的离屏摄像头捕获的RGB图像（典型分辨率为128×128、224×224或256×256）。
-- **动作空间**：环境原生提供7维连续动作。*注：GR00T-N1.6 在底层会通过具身标签将该7维动作统一零填充至128维的跨具身通用动作空间中。*
+      PPO
 
-**N1.7:**
+   .. grid-item-card:: 任务
+      :text-align: center
 
-- **观测**：在当前 RLinf 的 LIBERO-N1.7 集成中，环境仍然提供主视角图像、手腕视角图像，以及一个原始 8 维的 LIBERO state 张量；RLinf 再把它们转换为官方 GR00T-N1.7 processor 所需的输入格式。
-- **动作空间**：对 LIBERO 而言，环境侧动作仍然是7维连续控制；在官方 GR00T-N1.7 模型内部，动作会先按其动作表示进行解码，再映射回 LIBERO 的 7 维控制空间。
+      LIBERO Spatial · Object · Goal · Long
 
-**任务描述格式**
+   .. grid-item-card:: 硬件
+      :text-align: center
 
-GR00T 直接将环境提供的自然语言任务描述作为语言模型的输入。
+      1 节点 · GPU
 
-**N1.5:**
+| **你将完成：** 安装目标 GR00T 版本 → 下载 SFT / 任务 checkpoint → 选择配置 → 启动 ``run_embodiment.sh`` → 观察 ``env/success_once``。
+| **前置条件：** :doc:`安装 </rst_source/start/installation>` · 一个 GR00T LIBERO checkpoint（见下文）。
 
-**数据结构**
+任务
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- **图像**：主视角和手腕视角的RGB张量，分别命名为"main_images"和"wrist_images"，形状为``[batch_size, 224, 224, 3]``
-- **状态**：末端执行器的位置、姿态和夹爪状态
-- **任务描述**：自然语言指令
-- **奖励**：稀疏的成功/失败奖励
+根据环境、任务族以及配置或权重工件选择对应的模型页面。
 
-**N1.6:**
+.. list-table::
+   :header-rows: 1
+   :widths: 22 24 30 24
 
-**数据结构**
+   * - 环境
+     - 任务 / 套件
+     - 配置 / 权重
+     - 重点
+   * - LIBERO
+     - LIBERO-Spatial
+     - ``libero_spatial_ppo_gr00t``
+     - 在 spatial 操作任务上使用 GR00T-N1.x 与 Flow-SDE PPO。
+   * - LIBERO
+     - LIBERO-Object
+     - ``libero_object_ppo_gr00t``
+     - 使用 GR00T 进行物体操作微调。
+   * - LIBERO
+     - LIBERO-Goal
+     - ``libero_goal_ppo_gr00t``
+     - 进行目标条件操作微调。
+   * - LIBERO
+     - LIBERO-10
+     - ``libero_10_ppo_gr00t``
+     - 使用 GR00T 进行长程 LIBERO 训练。
 
-- **图像**：主视角和手腕视角的连续RGB视频帧，通常命名为``main_images``和``wrist_images``。考虑到时间步历史，形状通常为``[batch_size, seq_len, 224, 224, 3]``。
-- **状态**：末端执行器的位置、姿态和夹爪状态（在网络底层与视觉特征拼接作为状态表征）。
-- **任务描述**：自然语言指令。
-- **奖励**：用于PPO强化的稀疏奖励（成功为1，失败为0）。
+观测与动作
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-**N1.7:**
+.. list-table::
+   :header-rows: 1
+   :widths: 24 38
 
-**数据结构**
+   * - 字段
+     - 说明
+   * - Observation
+     - GR00T dataconfig 所需的多视角 RGB 图像与机器人本体状态。
+   * - Action
+     - GR00T 策略生成的连续动作块。
+   * - Reward
+     - PPO 使用的 LIBERO 任务成功信号或仿真器奖励。
+   * - Prompt
+     - 每个 LIBERO episode 提供的自然语言任务 prompt。
 
-- **图像**：RLinf 当前从 LIBERO 读取 ``main_images`` 和 ``wrist_images``，并在调用官方 processor 之前，将它们转换为 GR00T-N1.7 的观测字段（例如 ``video.image`` 和 ``video.wrist_image``）。
-- **状态**：RLinf 当前接收一个原始 8 维的 LIBERO state 张量，并将其拆分为 ``state.x``、``state.y``、``state.z``、``state.roll``、``state.pitch``、``state.yaw`` 和 ``state.gripper``。因此，当前 LIBERO 示例在环境边界仍沿用 RLinf/LIBERO 现有的 state 契约，而官方 N1.7 模型内部使用的是更大的通用 state/action 表示。
-- **任务描述**：``task_descriptions`` 会映射为官方 processor 所需的 ``annotation.human.action.task_description``。
-- **奖励**：用于 PPO 强化的稀疏奖励（成功为1，失败为0）。
+安装
+----------------------------------------
 
-算法
----------
+.. include:: _setup_common.rst
 
-**核心算法组件**
-
-1. **PPO（Proximal Policy Optimization）**
-
-   - 使用GAE（广义优势估计）进行优势估计
-   - 带比例限制的策略裁剪
-   - 价值函数裁剪
-   - 熵正则化
-
-依赖安装
------------------------
-
-1. 克隆 RLinf 仓库
-~~~~~~~~~~~~~~~~~~~~
-
-.. code:: bash
-
-   # 为提高国内下载速度，可以使用：
-   # git clone https://ghfast.top/github.com/RLinf/RLinf.git
-   git clone https://github.com/RLinf/RLinf.git
-   cd RLinf
-
-2. 安装依赖
-~~~~~~~~~~~~~~~~
-
-**选项 1：Docker 镜像**
-
-使用 Docker 镜像运行实验。
+**选项 1：Docker 镜像** —— 镜像标签 ``agentic-rlinf0.3-maniskill_libero``：
 
 .. code:: bash
 
@@ -105,9 +111,9 @@ GR00T 直接将环境提供的自然语言任务描述作为语言模型的输�
       --network host \
       --name rlinf \
       -v .:/workspace/RLinf \
-      rlinf/rlinf:agentic-rlinf0.2-maniskill_libero
+      rlinf/rlinf:agentic-rlinf0.3-maniskill_libero
       # 如果需要国内加速下载镜像，可以使用：
-      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.2-maniskill_libero
+      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.3-maniskill_libero
 
 请通过镜像内置的 `switch_env` 工具切换到对应的虚拟环境：
 
@@ -155,8 +161,8 @@ GR00T 直接将环境提供的自然语言任务描述作为语言模型的输�
    bash requirements/install.sh embodied --model gr00t_n1d7 --env maniskill_libero
    source .venv/bin/activate
 
-模型下载
---------------
+下载模型
+----------------------------------------
 
 开始训练前，您需要下载相应的预训练模型。
 
@@ -183,11 +189,19 @@ GR00T 直接将环境提供的自然语言任务描述作为语言模型的输�
 
 **N1.6: GR00T-N1.6 SFT模型**
 
-需要先运行RLinf提供的GR00T-N1.6的SFT，获得经过格式转换的模型，并将模型路径配置到指定的yaml文件中。
+目前提供libero Spatial 任务，并作为GR00T N1.6的示例：
 
-RLinf SFT的模型将会后续放出，敬请期待！
+.. code:: bash
 
-目前支持四种libero任务：Spatial, Object, Goal, 10。
+   # 方法1：使用git clone
+   git lfs install
+   git clone https://huggingface.co/RLinf/RLinf-Gr00t-N1.6-SFT-Spatial
+
+   # 方法2：使用huggingface-hub
+   # 为提升国内下载速度，可以设置：
+   # export HF_ENDPOINT=https://hf-mirror.com
+   pip install huggingface-hub
+   hf download RLinf/RLinf-Gr00t-N1.6-SFT-Spatial --local-dir RLinf/RLinf-Gr00t-N1.6-SFT-Spatial
 
 **N1.7：当前临时使用官方 release checkpoint**
 
@@ -233,7 +247,7 @@ RLinf 目前还没有提供一个由本仓库产出的、专门用于这个 RL �
 --------------
 
 GR00T 核心设计理念
------------------------------
+----------------------------------------
 
 **N1.5:**
 
@@ -245,7 +259,7 @@ GR00T 核心设计理念
 **1.1 增强的LeRobot数据集**
 
 LeRobot数据集包含一个meta文件夹，其中详细记录了数据集的所有元数据。
-GR00T-N1.5进一步定义了一个**modality.json**文件，用于确定数据集的数据接口。
+GR00T-N1.5进一步定义了一个modality.json文件，用于确定数据集的数据接口。
 
 **1.2 DataConfig类**
 
@@ -335,8 +349,8 @@ RLinf 框架针对GR00T-N1.6采用了高度解耦的两阶段训练架构：
 
 ---------------
 
-运行脚本
----------------
+运行
+----------------------------------------
 
 **1. 关键集群配置**
 
@@ -523,7 +537,7 @@ GR00T-N1.5的动作头包含dropout层，这会干扰对数概率的计算，因
 --------------
 
 可视化与结果
--------------------------
+----------------------------------------
 
 **1. TensorBoard日志**
 
@@ -534,26 +548,10 @@ GR00T-N1.5的动作头包含dropout层，这会干扰对数概率的计算，因
 
 --------------
 
-**2. 关键监控指标**
+**2. 关键指标**
 
-- **训练指标**
-
-  - ``actor/loss``：策略损失
-  - ``actor/value_loss``：价值函数损失（PPO）
-  - ``actor/grad_norm``：梯度范数
-  - ``actor/approx_kl``：新旧策略之间的KL散度
-  - ``actor/pg_clipfrac``：策略裁剪比例
-  - ``actor/value_clip_ratio``：价值损失裁剪比例（PPO）
-
-- **rollout指标**
-
-  - ``rollout/returns_mean``：平均回合回报
-  - ``rollout/advantages_mean``：平均优势值
-
-- **环境指标**
-
-  - ``env/episode_len``：平均回合长度
-  - ``env/success_once``：任务成功率
+关注任务成功率指标 ``env/success_once``。各项指标的含义见
+:doc:`训练指标 <../../reference/metrics>`。
 
 --------------
 

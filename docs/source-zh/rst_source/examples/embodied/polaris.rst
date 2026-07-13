@@ -1,117 +1,133 @@
 基于 PolaRiS 仿真平台的强化学习训练
-==========================================
+========================================
 
-本文档给出在 RLinf 框架内使用 **π05 (OpenPI)** 模型在 `PolaRiS <https://github.com/arhanjain/polaris>`_ 仿真平台上进行 PPO 强化学习训练的完整指南。
+.. figure:: https://raw.githubusercontent.com/RLinf/misc/main/pic/polaris.png
+   :align: center
+   :width: 90%
 
-环境
--------
+   PolaRiS（图片来源：`PolaRiS <https://github.com/arhanjain/polaris>`__）。
 
-**PolaRiS (Policy Learning and Benchmarking in Realistic Simulated Environments)**
+`PolaRiS <https://github.com/arhanjain/polaris>`__ 是基于 Isaac Sim 的机器人基准，
+使用 Gaussian Splatting 渲染桌面操作任务。你将使用 RLinf 在 DROID 风格的 PolaRiS
+任务上，通过 PPO 微调 OpenPI π₀ 或 π₀.₅ 策略。
 
-PolaRiS 是一个基于 Isaac Sim 和 Gaussian Splatting 渲染的高保真机器人仿真平台，
-支持多种桌面操作任务，提供逼真的视觉渲染效果。
+概览
+----------------------------------------
 
-- **仿真平台**：基于 NVIDIA Isaac Sim
-- **渲染**：Gaussian Splatting 实时渲染，支持高质量（expensive）和快速渲染模式切换
-- **观测空间**：
+在 PolaRiS 上使用两个 RGB 视角、本体状态和 chunked 8 维动作微调 OpenPI 策略。
 
-  - 外部相机（桌面视角）RGB 图像（224×224）
-  - 腕部相机 RGB 图像（224×224）
-  - 机器人本体状态：7 维关节位置 + 1 维夹爪位置（共 8 维）
+.. grid:: 2 4 4 4
+   :gutter: 2
 
-- **动作空间**：8 维连续动作
+   .. grid-item-card:: 模型
+      :text-align: center
 
-  - 7 维关节速度控制
-  - 1 维夹爪位置控制
+      π₀ · π₀.₅
 
-- **任务**：支持多种桌面操作任务，例如：
+   .. grid-item-card:: 算法
+      :text-align: center
 
-  - TapeIntoContainer：将胶带放入容器
-  - PanClean：锅具清洁
-  - BlockStackKitchen：厨房积木堆叠
-  - FoodBussing：餐盘收拾
-  - MoveLatteCup：移动拿铁杯
-  - OrganizeTools：工具整理
+      PPO
 
-- **回合长度**：默认 30 秒（15Hz 采样率 = 450 步）
+   .. grid-item-card:: 任务
+      :text-align: center
 
-算法
--------
+      6 个 DROID 桌面任务
 
-**核心算法组件**
+   .. grid-item-card:: 硬件
+      :text-align: center
 
-1. **PPO（Proximal Policy Optimization）**
+      1 节点 · 1 GPU
 
-   - 使用 GAE（Generalized Advantage Estimation）进行优势估计
-   - 基于比率的策略裁剪
-   - 价值函数裁剪
-   - 熵正则化
+| **你将完成：** 安装 → 下载 Isaac Sim + 数据集 + 模型 → 启动 ``run_embodiment.sh`` → 观察 ``env/success_once``。
+| **前置条件：** :doc:`安装 </rst_source/start/installation>` · Isaac Sim · PolaRiS-Hub · OpenPI 检查点。
 
-2. **π05 Flow Matching 策略**
+任务
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-   - 基于 OpenPI 的 π05 架构
-   - Flow Matching 动作生成（SDE 采样模式）
-   - 支持 Value Head 用于 Critic 估计
-   - Action Chunking：一次生成多步动作（默认 15 步），开环执行
+.. list-table::
+   :header-rows: 1
+   :widths: 28 42 30
 
-3. **DROID 数据格式**
+   * - 任务
+     - 描述
+     - 环境配置
+   * - ``DROID-TapeIntoContainer``
+     - 将胶带放入容器。
+     - ``polaris_droid_tapeintocontainer.yaml``
+   * - ``DROID-PanClean``
+     - 用黄色海绵擦洗蓝色手柄煎锅。
+     - ``polaris_droid_panclean.yaml``
+   * - ``DROID-BlockStackKitchen``
+     - 将积木放到绿色托盘上并堆叠。
+     - ``polaris_droid_blockstackkitchen.yaml``
+   * - ``DROID-FoodBussing``
+     - 将所有食物放入碗中。
+     - ``polaris_droid_foodbussing.yaml``
+   * - ``DROID-MoveLatteCup``
+     - 将拉花杯放到砧板上。
+     - ``polaris_droid_movelattecup.yaml``
+   * - ``DROID-OrganizeTools``
+     - 将剪刀放入大容器。
+     - ``polaris_droid_organizetools.yaml``
 
-   - 使用 DROID 数据集格式的观测 key 映射
-   - 状态编码：关节位置（7维）+ 夹爪位置（1维）
-   - 图像编码：外部相机左图 + 腕部相机左图
+观测与动作
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-依赖安装
------------
+.. list-table::
+   :header-rows: 1
+   :widths: 18 82
 
-1. 克隆 RLinf 仓库
-~~~~~~~~~~~~~~~~~~~~
+   * - 字段
+     - 规格
+   * - 观测
+     - 224×224 外部 RGB 相机、腕部 RGB 相机，以及 8 维机器人状态。
+   * - 动作
+     - 8 维连续动作：7 维关节速度和 1 维夹爪位置。
+   * - 奖励
+     - PolaRiS 环境提供的任务完成奖励。
+   * - 提示词
+     - ``init_params.task_description`` 中的任务描述。
 
-.. code:: bash
+安装
+----------------------------------------
 
-   # 为提高国内下载速度，可以使用：
-   # git clone https://ghfast.top/github.com/RLinf/RLinf.git
-   git clone https://github.com/RLinf/RLinf.git
-   cd RLinf
+.. include:: _setup_common.rst
 
-2. 安装依赖
-~~~~~~~~~~~~~~
-
-**方式一：Docker 镜像**
-
-使用 Docker 镜像进行实验。
+**Docker 镜像**
 
 .. code:: bash
 
    docker run -it --rm --gpus all \
-      --shm-size 20g \
+      --shm-size 32g \
       --network host \
       --name rlinf \
       -v .:/workspace/RLinf \
-      rlinf/rlinf:agentic-rlinf0.2-polaris
-      # 为提高国内镜像拉取速度，可以使用：
-      # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.2-polaris
+      rlinf/rlinf:agentic-rlinf0.3-polaris
 
-请通过镜像内置的 `switch_env` 工具切换到对应的虚拟环境：
+   # 国内用户可使用：
+   # docker.1ms.run/rlinf/rlinf:agentic-rlinf0.3-polaris
+
+在镜像中切换到 OpenPI 虚拟环境：
 
 .. code:: bash
 
    source switch_env openpi
 
-**方式二：自定义环境**
+**自定义环境**
 
-直接在本地环境中运行以下命令安装依赖：
+安装 PolaRiS 与 OpenPI 依赖：
 
 .. code:: bash
 
-   # 为提高国内下载速度，可以在 install.sh 命令中添加 `--use-mirror` 参数。
-
+   # 国内用户可添加 --use-mirror。
    bash requirements/install.sh embodied --model openpi --env polaris
    source .venv/bin/activate
 
-3. Isaac Sim 下载
-~~~~~~~~~~~~~~~~~~~~~~~~~
+下载 Isaac Sim
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-使用 PolaRiS 前需要先下载并配置 Isaac Sim：
+下载 Isaac Sim 5.1.0 并初始化其 shell 环境：
 
 .. code-block:: bash
 
@@ -120,235 +136,144 @@ PolaRiS 是一个基于 Isaac Sim 和 Gaussian Splatting 渲染的高保真机�
    wget https://download.isaacsim.omniverse.nvidia.com/isaac-sim-standalone-5.1.0-linux-x86_64.zip
    unzip isaac-sim-standalone-5.1.0-linux-x86_64.zip
    rm isaac-sim-standalone-5.1.0-linux-x86_64.zip
-
-下载完成后，通过以下方式设置环境变量：
-
-.. code-block:: bash
-
    source ./setup_conda_env.sh
 
 .. warning::
 
-   每次打开新终端并使用 Isaac Sim 时都需要执行该步骤。
+   每次在新终端中启动 PolaRiS 前，都需要运行 ``source ./setup_conda_env.sh``。
 
-数据集下载
---------------
+下载数据集
+----------------------------------------
 
-PolaRiS 有两个数据集：一个用于评估，一个用于协同训练。
-
-**1. 评估数据集 — PolaRiS-Hub**
-
-`PolaRiS-Hub <https://huggingface.co/datasets/owhan/PolaRiS-Hub>`_ 包含场景 USD 文件和初始条件配置，用于评估。
+下载评估场景和初始条件：
 
 .. code:: bash
 
+   # export HF_ENDPOINT=https://hf-mirror.com
    hf download owhan/PolaRiS-Hub --repo-type=dataset --local-dir ./PolaRiS-Hub
-
-下载完成后，通过环境变量 ``POLARIS_DATA_PATH`` 指定数据集路径（``run_embodiment.sh`` 与 ``evaluations/run_eval.sh`` 会自动读取）：
-
-.. code:: bash
-
    export POLARIS_DATA_PATH=/path/to/PolaRiS-Hub
 
-或者在配置 YAML 文件 ``examples/embodiment/config/env/polaris_droid_*.yaml`` 中修改 ``init_params.dataset_path`` 和 ``init_params.usd_file``。
-
-**2. 协同训练数据集 — PolaRiS-datasets**
-
-`PolaRiS-datasets <https://huggingface.co/datasets/owhan/PolaRiS-datasets>`_ 包含用于对模型进行协同训练微调的演示数据。
+可选下载 co-training 演示数据：
 
 .. code:: bash
 
    hf download owhan/PolaRiS-datasets --repo-type=dataset --local-dir ./PolaRiS-datasets
 
-模型下载
----------
+下载模型
+----------------------------------------
 
-开始训练前，需要下载对应的预训练模型：
+下载你要微调的 OpenPI 模型检查点。
 
-**方式一：下载已转换的 PyTorch 模型（推荐）**
-
-预训练的 PyTorch 模型已上传至 HuggingFace，由原始 JAX checkpoint 转换而来。
-
-.. code:: bash
-
-   # 下载模型（任选一种方式）
-   # 方式一：使用 git clone
-   git lfs install
-   git clone https://huggingface.co/RLinf/RLinf-Pi05-Polaris-droid_jointpos
-   git clone https://huggingface.co/RLinf/RLinf-Pi0-Polaris-droid_jointpos
-
-   # 方式二：使用 huggingface-hub
-   # 为提高国内下载速度，可以使用：
-   # export HF_ENDPOINT=https://hf-mirror.com
-   pip install huggingface-hub
-   hf download RLinf/RLinf-Pi05-Polaris-droid_jointpos --local-dir ./checkpoints/RLinf-Pi05-Polaris-droid_jointpos
-   hf download RLinf/RLinf-Pi0-Polaris-droid_jointpos --local-dir ./checkpoints/RLinf-Pi0-Polaris-droid_jointpos
-
-**方式二：下载 JAX Checkpoint 并转换**
-
-也可以下载原始 JAX checkpoint 并转换为 PyTorch 格式。
-
-.. code:: bash
-
-   # 下载 JAX checkpoints
-   gsutil -m cp -r gs://openpi-assets/checkpoints/polaris/pi05_droid_jointpos_polaris /path/to/checkpoints/
-   gsutil -m cp -r gs://openpi-assets/checkpoints/polaris/pi0_droid_jointpos_polaris /path/to/checkpoints/
-
-   # 将 π0.5 Polaris 转换为 PyTorch
-   python /path/to/polaris/third_party/openpi/examples/convert_jax_model_to_pytorch.py \
-       --checkpoint_dir /path/to/checkpoints/pi05_droid_jointpos_polaris \
-       --config_name pi05_droid_jointpos_polaris \
-       --output_path /path/to/checkpoints/pi05_droid_jointpos_polaris_new
-   cp -r /path/to/checkpoints/pi05_droid_jointpos_polaris/assets /path/to/checkpoints/pi05_droid_jointpos_polaris_new/
-
-   # 将 π0 Polaris 转换为 PyTorch
-   python /path/to/polaris/third_party/openpi/examples/convert_jax_model_to_pytorch.py \
-       --checkpoint_dir /path/to/checkpoints/pi0_droid_jointpos_polaris \
-       --config_name pi0_droid_jointpos_polaris \
-       --output_path /path/to/checkpoints/pi0_droid_jointpos_polaris_new
-   cp -r /path/to/checkpoints/pi0_droid_jointpos_polaris/assets /path/to/checkpoints/pi0_droid_jointpos_polaris_new/
-
-下载完成后，请在配置 YAML 文件中正确设置模型路径。
-下面示例使用 π0.5 checkpoint；对于 π0 配置，请改用 ``RLinf-Pi0-Polaris-droid_jointpos``。
-
-.. code-block:: yaml
-
-   rollout:
-     model:
-       model_path: "./checkpoints/RLinf-Pi05-Polaris-droid_jointpos"
-   actor:
-     model:
-       model_path: "./checkpoints/RLinf-Pi05-Polaris-droid_jointpos"
-
-运行脚本
------------
-
-**1. 配置文件**
-
-PolaRiS 目前支持以下训练配置：
-
-- **PPO 训练**
-
-  - ``examples/embodiment/config/polaris_tapeintocontainer_ppo_openpi_pi05.yaml``
-  - ``examples/embodiment/config/polaris_tapeintocontainer_ppo_openpi.yaml``
-
-- **评估**
-
-  - ``evaluations/polaris/polaris_tapeintocontainer_openpi_pi05_eval.yaml`` （TapeIntoContainer + π₀.₅）
-  - ``evaluations/polaris/polaris_movelattecup_openpi_eval.yaml`` （MoveLatteCup + π₀）
-
-每个任务有独立的环境配置文件，位于 ``examples/embodiment/config/env/`` 下：
-
-- ``polaris_droid_tapeintocontainer.yaml``
-- ``polaris_droid_panclean.yaml``
-- ``polaris_droid_blockstackkitchen.yaml``
-- ``polaris_droid_foodbussing.yaml``
-- ``polaris_droid_movelattecup.yaml``
-- ``polaris_droid_organizetools.yaml``
-
-**2. 关键参数配置**
-
-以下参数位于训练配置文件 ``examples/embodiment/config/polaris_tapeintocontainer_ppo_openpi_pi05.yaml`` 中。
-
-.. code-block:: yaml
-
-   cluster:
-     num_nodes: 1
-     component_placement:
-       actor,rollout,env: 0
-
-你可以灵活配置 Actor、Rollout、Env 三个组件的 GPU 分配。
-
-- **Actor（训练）**：占用显存最大（权重 + 梯度 + 优化器），建议放在显存最充裕的卡上。
-- **Rollout（推理）**：只需模型权重和 KV Cache。
-- **Env（环境）**：与 Rollout 可共享一张卡，PolaRiS 环境需 GPU 进行 Gaussian Splatting 渲染。
-
-.. code-block:: yaml
-
-   actor:
-     model:
-       num_action_chunks: 15
-       action_dim: 8
-       openpi:
-         config_name: "pi05_droid_polaris"
-         num_images_in_input: 2
-
-- ``num_action_chunks: 15``：模型一次生成 15 步动作
-- ``action_dim: 8``：7 维关节速度 + 1 维夹爪位置
-- ``config_name: "pi05_droid_polaris"``：使用 DROID 数据格式的 PolaRiS 配置
-- ``num_images_in_input: 2``：外部相机 + 腕部相机共 2 张图
-
-**3. 环境参数**
-
-``init_params`` 位于环境配置文件 ``examples/embodiment/config/env/polaris_droid_*.yaml`` 中，
-训练配置文件通过 Hydra defaults 引用它们（例如 ``defaults: - env/polaris_droid_tapeintocontainer@env.train``）。
-
-.. code-block:: yaml
-
-   init_params:
-     open_loop_horizon: ${actor.model.num_action_chunks}
-
-``open_loop_horizon`` 控制 Gaussian Splatting 高质量渲染的频率。在动作块（chunk）执行期间，
-每隔 ``open_loop_horizon`` 步进行一次高质量渲染，中间步骤使用低质量渲染以加速仿真。
-
-**4. 启动训练**
+**OpenPI π₀.₅**
 
 .. code-block:: bash
 
-   source /path/to/isaac_sim/setup_conda_env.sh
+   cd /path/to/save/model
 
-   # pi05
+   git lfs install
+   git clone https://huggingface.co/RLinf/RLinf-Pi05-Polaris-droid_jointpos
+
+   # 或使用 huggingface-hub：
+   # export HF_ENDPOINT=https://hf-mirror.com
+   pip install huggingface-hub
+   hf download RLinf/RLinf-Pi05-Polaris-droid_jointpos --local-dir RLinf-Pi05-Polaris-droid_jointpos
+
+**OpenPI π₀**
+
+.. code-block:: bash
+
+   cd /path/to/save/model
+
+   git lfs install
+   git clone https://huggingface.co/RLinf/RLinf-Pi0-Polaris-droid_jointpos
+
+   # 或使用 huggingface-hub：
+   # export HF_ENDPOINT=https://hf-mirror.com
+   pip install huggingface-hub
+   hf download RLinf/RLinf-Pi0-Polaris-droid_jointpos --local-dir RLinf-Pi0-Polaris-droid_jointpos
+
+.. include:: _model_path.rst
+
+运行
+----------------------------------------
+
+选择一个训练配置，并在已初始化 Isaac Sim 的终端中启动：
+
+.. list-table::
+   :header-rows: 1
+   :widths: 24 48 28
+
+   * - 配方
+     - 配置
+     - 命令后缀
+   * - π₀.₅ + PPO
+     - ``examples/embodiment/config/polaris_tapeintocontainer_ppo_openpi_pi05.yaml``
+     - ``polaris_tapeintocontainer_ppo_openpi_pi05``
+   * - π₀ + PPO
+     - ``examples/embodiment/config/polaris_tapeintocontainer_ppo_openpi.yaml``
+     - ``polaris_tapeintocontainer_ppo_openpi``
+
+.. code:: bash
+
+   source /path/to/isaac_sim/setup_conda_env.sh
+   export POLARIS_DATA_PATH=/path/to/PolaRiS-Hub
+
    bash examples/embodiment/run_embodiment.sh polaris_tapeintocontainer_ppo_openpi_pi05
-   # pi0
    bash examples/embodiment/run_embodiment.sh polaris_tapeintocontainer_ppo_openpi
+
+这条命令会：
+
+1. 使用选定的 Hydra 配置启动 embodied 训练入口。
+2. 为 actor、rollout 和 PolaRiS env 组件创建 Ray worker。
+3. 使用 chunked OpenPI 动作和 Gaussian Splatting 渲染观测运行 PPO。
+
+独立评估请走 :doc:`PolaRiS 评测指南 <../../evaluations/guides/polaris>`。
+该指南负责 ``POLARIS_DATA_PATH``、可用评测配置
+（``polaris_tapeintocontainer_openpi_pi05_eval`` 与 ``polaris_movelattecup_openpi_eval``）
+和结果解读。
 
 .. note::
 
-   如果你在配置文件中硬编码了 ``POLARIS_DATA_PATH``，请确保路径正确。
-   也可以在运行前设置环境变量：
+   训练配置默认使用 ``polaris_droid_tapeintocontainer``。如需切换任务，请将 Hydra
+   env defaults 改为其他 ``polaris_droid_*`` 环境配置，并保持 ``POLARIS_DATA_PATH``
+   指向 ``PolaRiS-Hub``。
 
-   .. code-block:: bash
+在调优动作 / 渲染流水线时，以下 PolaRiS 专有字段值得了解：
 
-      export POLARIS_DATA_PATH=/path/to/PolaRiS-Hub
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
 
-**5. 启动评估**
-
-.. code-block:: bash
-
-   source /path/to/isaac_sim/setup_conda_env.sh
-
-   # π₀.₅ + TapeIntoContainer
-   bash evaluations/run_eval.sh polaris polaris_tapeintocontainer_openpi_pi05_eval
-   # π₀ + MoveLatteCup
-   bash evaluations/run_eval.sh polaris polaris_movelattecup_openpi_eval
-
-完整评测流程（环境变量、配置字段、结果查看）见 :doc:`PolaRiS 评测指南 <../../evaluations/guides/polaris>`。
+   * - 配置项
+     - 含义
+   * - ``open_loop_horizon``
+     - **高质量** Gaussian Splatting 渲染的频率。在一个动作 chunk 内，每 ``open_loop_horizon``
+       步执行一次高质量渲染，中间步则使用低质量渲染以加速仿真。
+   * - ``num_action_chunks``
+     - 模型一次生成的动作步数（如 ``15``）。
+   * - ``num_images_in_input``
+     - 输入给策略的相机图像数量（如 ``2``：外部相机 + 腕部相机）。
+   * - ``config_name``
+     - OpenPI 配置 / 数据格式选择（如 ``pi05_droid_polaris`` 对应 DROID 数据格式）。
 
 可视化与结果
------------------
+----------------------------------------
 
-**1. TensorBoard 日志**
+在 RLinf 仓库根目录启动 TensorBoard：
 
-.. code-block:: bash
+.. code:: bash
 
-   tensorboard --logdir ./logs --port 6006
+   tensorboard --logdir ../results --port 6006
 
-**2. 关键监控指标**
+关键指标是 ``env/success_once``。完整指标说明见
+:doc:`训练指标 <../../reference/metrics>`。
 
-- **环境指标**：
+如需评估视频，请在环境配置中启用 video：
 
-  - ``env/success_once``：任务成功率，建议使用该指标监控训练效果
-  - ``env/return``：回合总回报
-  - ``env/episode_len``：回合实际步数
+.. code:: yaml
 
-- **训练指标**：
-
-  - ``train/actor/policy_loss``：PPO 策略损失
-  - ``train/critic/value_loss``：价值函数损失
-  - ``train/actor/approx_kl``：近似 KL 散度，监控策略更新幅度
-
-- **Rollout 指标**：
-
-  - ``rollout/rewards``：逐步奖励
-  - ``rollout/advantages_mean``：优势函数均值
-
+   env:
+     eval:
+       video_cfg:
+         save_video: True
+         video_base_dir: ${runner.logger.log_path}/video/eval
