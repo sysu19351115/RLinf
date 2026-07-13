@@ -1,6 +1,6 @@
 # RLinf 复现
 
-本项目提供四个端到端训练示例，覆盖仿真环境与真实机器人场景。每个示例的详细步骤已拆分到独立文档中，请点击对应链接查看。
+本项目提供多个端到端训练与数据采集示例，覆盖仿真环境与真实机器人场景。每个示例的详细步骤已拆分到独立文档中，请点击对应链接查看。
 
 ## 示例列表
 
@@ -9,9 +9,8 @@
 | 示例1 | LIBERO + PI0 + PPO（仿真） | [docs/examples/libero_pi0_ppo.md](docs/examples/libero_pi0_ppo.md) |
 | 示例2 | Gym Aloha + PI0 + PPO（仿真） | [docs/examples/gym_aloha_pi0_ppo.md](docs/examples/gym_aloha_pi0_ppo.md) |
 | 示例3 | ReBot + PI0.5 + PPO 异步真机训练 | [docs/examples/rebot_pi05_ppo_async.md](docs/examples/rebot_pi05_ppo_async.md) |
-| 示例4 | ReBot + PI0.5 + PPO 单节点真机训练 | [docs/examples/rebot_pi05_ppo_single_node.md](docs/examples/rebot_pi05_ppo_single_node.md) |
-| 示例5 | SO101 + PI0.5 + PPO 异步真机训练 | [docs/source-zh/rst_source/examples/embodied/so101.rst](docs/source-zh/rst_source/examples/embodied/so101.rst) |
-| 示例6 | SO101 + PI0.5 + PPO 单节点真机训练 | [examples/embodiment/config/so101_single_node_ppo_pi05.yaml](examples/embodiment/config/so101_single_node_ppo_pi05.yaml) |
+| 示例4 | SO101 + PI0.5 + PPO 异步真机训练 | [docs/source-zh/rst_source/examples/embodied/so101.rst](docs/source-zh/rst_source/examples/embodied/so101.rst) |
+| 示例5 | SO101 人在环（HIL）数据采集 | [docs/examples/so101_hil_data_collection.md](docs/examples/so101_hil_data_collection.md) |
 
 ## 通用资源
 

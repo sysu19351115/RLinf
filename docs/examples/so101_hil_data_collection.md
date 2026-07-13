@@ -156,6 +156,8 @@ python collect_so101_hil_data.py --config-name so101_hil_collect use_dummy_polic
 ```bash
 cd examples/embodiment
 export EMBODIED_PATH="$(pwd)"
+export RLINF_KEYBOARD_DEVICE=/dev/input/event17
+sudo chmod a+r /dev/input/event17
 python collect_so101_hil_data.py --config-name so101_hil_collect
 ```
 
