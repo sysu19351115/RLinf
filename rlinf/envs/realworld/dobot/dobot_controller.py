@@ -352,23 +352,47 @@ class DobotController(Worker):
         init_steps: int = 60,
         init_fps: int = 30,
     ) -> None:
-        """Move to a joint reset pose (homing) via the controller's MovJ.
+        """Move to a joint reset pose via joint-space linear ServoJ interpolation.
 
-        Homing is a point-to-point motion from the current pose to the
-        configured ``joints_rad``. It uses the Dobot controller's native MovJ
-        planning (``move_j`` + ``wait_until_reached``), which plans a smooth
-        trajectory *and takes the shortest angular path per joint on its own* —
-        so multi-turn joint-angle representations (config vs. feedback differing
-        by ~±2π) cannot trigger the ServoJ jump guard. This matches the
-        openpi-verified homing path.
+        Homing streams a short joint-space trajectory with ServoJ (NOT MovJ:
+        the Dobot controller's MovJ has a bug that makes it unreliable for
+        homing, so ServoJ interpolation is required). Because the Dobot reports
+        joint angles over a multi-turn range, the configured reset pose and the
+        current feedback can differ by ~±2π while describing the *same* physical
+        pose; a naive linear interpolation would command a full revolution and
+        be rejected by the SDK's ServoJ jump guard (``max_jump_deg``). We
+        therefore wrap each per-joint delta into ``[-π, π]`` (shortest path)
+        before interpolating.
 
         Args:
             joints_rad: Target joint positions (6,) in radians.
-            init_steps: Deprecated, kept for backward compatibility (unused).
-                MovJ planning replaces the previous ServoJ interpolation.
-            init_fps: Deprecated, kept for backward compatibility (unused).
+            init_steps: Number of ServoJ interpolation steps.
+            init_fps: Interpolation frequency (Hz).
         """
-        self.move_joints(np.asarray(joints_rad, dtype=float).reshape(6))
+        import time
+
+        start = np.asarray(self.get_joint_status(), dtype=float)
+        target = np.asarray(joints_rad, dtype=float).reshape(6)
+        # Shortest-path (angular wrapping) per joint so a ~±2π multi-turn
+        # representation never becomes a full-revolution command.
+        delta = target - start
+        delta = (delta + np.pi) % (2 * np.pi) - np.pi
+        max_wrap_corr = float(np.max(np.abs((target - start) - delta)))
+        if max_wrap_corr > 1e-6:
+            self._robot._warn_jump(
+                f"reset_to_pose 角度回绕修正：某关节配置值与当前反馈相差约一整圈，"
+                f"已取最短路径（最大修正 {np.degrees(max_wrap_corr):.1f}°），"
+                f"避免触发 ServoJ 跳变护栏"
+            )
+        dt = 1.0 / float(init_fps)
+        self._robot.reset_smoothing()
+        for i in range(1, init_steps + 1):
+            alpha = float(i) / float(init_steps)
+            q = start + delta * alpha
+            q_deg = (q * _RAD2DEG).tolist()
+            self._robot.servo_joints(q_deg)
+            time.sleep(dt)
+        self._follower_engaged = False
 
     def reset_pose_tracker(self) -> None:
         """Clear the pose-mode ``prev_state`` tracker (call on env reset)."""
