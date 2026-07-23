@@ -163,9 +163,9 @@ actor:
       config_name: "pi05_rebot"
       value_after_vlm: True
       num_images_in_input: 1
-      noise_method: "flow_noise"
+      noise_method: "flow_ode" #"flow_noise"
       action_horizon: 6        # Reduced vs single-node (8) to lower rollout/actor cost
-      noise_params: [0.16, 0.12, 200]
+      #noise_params: [0.16, 0.12, 200]
       joint_logprob: True
       action_chunk: ${actor.model.num_action_chunks}
       action_env_dim: ${actor.model.action_dim}
