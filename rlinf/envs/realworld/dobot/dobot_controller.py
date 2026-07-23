@@ -352,26 +352,23 @@ class DobotController(Worker):
         init_steps: int = 60,
         init_fps: int = 30,
     ) -> None:
-        """Move to a joint reset pose via joint-space linear interpolation.
+        """Move to a joint reset pose (homing) via the controller's MovJ.
+
+        Homing is a point-to-point motion from the current pose to the
+        configured ``joints_rad``. It uses the Dobot controller's native MovJ
+        planning (``move_j`` + ``wait_until_reached``), which plans a smooth
+        trajectory *and takes the shortest angular path per joint on its own* —
+        so multi-turn joint-angle representations (config vs. feedback differing
+        by ~±2π) cannot trigger the ServoJ jump guard. This matches the
+        openpi-verified homing path.
 
         Args:
             joints_rad: Target joint positions (6,) in radians.
-            init_steps: Number of interpolation steps.
-            init_fps: Interpolation frequency (Hz).
+            init_steps: Deprecated, kept for backward compatibility (unused).
+                MovJ planning replaces the previous ServoJ interpolation.
+            init_fps: Deprecated, kept for backward compatibility (unused).
         """
-        start = np.asarray(self.get_joint_status(), dtype=float)
-        target = np.asarray(joints_rad, dtype=float).reshape(6)
-        dt = 1.0 / float(init_fps)
-        self._robot.reset_smoothing()
-        for i in range(1, init_steps + 1):
-            alpha = float(i) / float(init_steps)
-            q = start + (target - start) * alpha
-            q_deg = (q * _RAD2DEG).tolist()
-            self._robot.servo_joints(q_deg)
-            import time
-
-            time.sleep(dt)
-        self._follower_engaged = False
+        self.move_joints(np.asarray(joints_rad, dtype=float).reshape(6))
 
     def reset_pose_tracker(self) -> None:
         """Clear the pose-mode ``prev_state`` tracker (call on env reset)."""

@@ -640,7 +640,7 @@ class DobotEnv(gym.Env):
         """Move to the rest configuration (joint space, always)."""
         self._controller.reset_to_pose(
             self._initial_joints_rad(), init_steps=60, init_fps=30
-        ).wait()[0]
+        ).wait()
         time.sleep(0.5)
 
     def _check_robot_health(self):
