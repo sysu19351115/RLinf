@@ -30,11 +30,26 @@ RLinf 提供两种安装方式：**选项 1（UV）** 在本地构建与机器�
 
 - 使用 ``--venv <dir>`` 指定虚拟环境目录。
 - 使用 ``--use-mirror`` 加速中国大陆环境下的下载。
-- 仅在依赖需要时使用 ``--python <version>``。默认版本是 Python 3.11.14；部分环境
-  如 ``behavior`` 和 ``d4rl`` 需要 Python 3.10。
+- RLinf 仅支持 Python 3.10 和 3.11。默认版本是 Python 3.11.14；部分环境
+  如 ``behavior`` 和 ``d4rl`` 需要 Python 3.10。Python 3.12 及以上版本超出
+  已验证的通用锁范围，安装器会直接拒绝。
 - 仅在需要不同 PyTorch wheel 时使用 ``--torch <version>``。
 - 使用 ``--platform amd`` 或 ``--platform ascend`` 进行实验性的非 NVIDIA 安装。
   参见 :doc:`../guides/amd_rocm` 和 :doc:`../guides/ascend_cann`。
+
+安装 OpenPI 真机环境时，每次只选择一种机器人。例如：
+
+.. code-block:: bash
+
+   bash requirements/install_local.sh embodied \
+      --model openpi \
+      --env dobot \
+      --force \
+      --no-root
+
+可按需将 ``dobot`` 替换为 ``so101`` 或 ``rebot``。切换机器人目标时应重新运行
+安装器，不要直接执行裸 ``uv sync``：安装器会临时选择与当前平台匹配的 PyTorch
+索引，而各机器人 extra 被设计为互斥。
 
 选项 2：Docker
 --------------

@@ -37,6 +37,15 @@ class CameraInfo:
     fps: int = 15
     enable_depth: bool = False
     crop_region: Optional[tuple[float, float, float, float]] = None
+    fourcc: Optional[str] = None
+    """Optional V4L2 pixel format FOURCC (e.g. ``"MJPG"``, ``"YUYV"``).
+
+    Only used by the generic OpenCV USB backend (:class:`OpenCVUSBCamera`).
+    When set, the adapter configures the format *before* resolution/FPS via a
+    native OpenCV path (LeRobot's ``OpenCVCamera`` does not expose FOURCC and
+    cannot reach high resolutions such as 1080p, where the default YUYV stream
+    is bandwidth-limited). ``None`` keeps the backend default (LeRobot path).
+    """
 
 
 class BaseCamera(ABC):

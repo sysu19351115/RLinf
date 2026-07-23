@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from .auto_config import RobotAutoConfig
+from .dobot import DobotConfig, DobotHWInfo
 from .dosw1 import DOSW1HWConfig, DOSW1HWInfo
 from .dual_franka import DualFrankaConfig, DualFrankaHWInfo
 from .franka import FrankaConfig, FrankaHWInfo
@@ -23,6 +24,8 @@ from .xsquare import Turtle2Config, Turtle2HWInfo
 
 __all__ = [
     "RobotAutoConfig",
+    "DobotConfig",
+    "DobotHWInfo",
     "DOSW1HWConfig",
     "DOSW1HWInfo",
     "DualFrankaConfig",

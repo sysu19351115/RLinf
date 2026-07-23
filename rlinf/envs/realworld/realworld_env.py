@@ -215,6 +215,11 @@ class RealWorldEnv(gym.Env):
         full_states = np.concatenate([state[k] for k in sorted(state)], axis=-1)
         obs["states"] = full_states
 
+        # Forward prev_states for pose-mode envs (e.g. DobotCartesianEnv).
+        # If present in raw_obs, pass through to the policy pipeline.
+        if "prev_state" in raw_obs:
+            obs["prev_states"] = raw_obs["prev_state"]
+
         frames = raw_obs["frames"]
         if self.main_image_key not in frames:
             raise KeyError(

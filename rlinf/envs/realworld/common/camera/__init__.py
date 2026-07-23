@@ -31,6 +31,8 @@ def create_camera(camera_info: CameraInfo) -> BaseCamera:
     * ``"realsense"`` / ``"rs"`` — Intel RealSense (requires ``pyrealsense2``)
     * ``"zed"`` — Stereolabs ZED (requires the ZED SDK / ``pyzed``)
     * ``"lumos"`` — LUMOS V4L2 USB camera (requires ``opencv-python``)
+    * ``"opencv"`` / ``"usb"`` / ``"v4l2"`` — generic USB/V4L2 camera via
+      LeRobot's ``OpenCVCamera`` (requires ``lerobot`` + ``opencv-python``)
     """
     camera_type = camera_info.camera_type.lower()
     if camera_type == "zed":
@@ -43,6 +45,11 @@ def create_camera(camera_info: CameraInfo) -> BaseCamera:
         from .lumos_camera import LumosCamera
 
         return LumosCamera(camera_info)
+    if camera_type in ("opencv", "usb", "v4l2"):
+        from .opencv_camera import OpenCVUSBCamera
+
+        return OpenCVUSBCamera(camera_info)
     raise ValueError(
-        f"Unsupported camera_type={camera_type!r}. Supported types: 'realsense', 'zed', 'lumos'."
+        f"Unsupported camera_type={camera_type!r}. Supported types: "
+        "'realsense', 'zed', 'lumos', 'opencv', 'usb', 'v4l2'."
     )

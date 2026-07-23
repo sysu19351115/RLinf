@@ -155,6 +155,18 @@ _env_package_installed() {
         gym_aloha)
             "$WORK_DIR/.venv/bin/python" -c "import gym_aloha" 2>/dev/null || return 1
             ;;
+        rebot)
+            "$WORK_DIR/.venv/bin/python" -c \
+                "import motorbridge, pinocchio" 2>/dev/null || return 1
+            ;;
+        so101)
+            "$WORK_DIR/.venv/bin/python" -c \
+                "import lerobot, pinocchio" 2>/dev/null || return 1
+            ;;
+        dobot)
+            "$WORK_DIR/.venv/bin/python" -c \
+                "import cv2, motorbridge, scipy" 2>/dev/null || return 1
+            ;;
     esac
     return 0
 }
@@ -250,6 +262,7 @@ if [[ "$CPU_ONLY" -eq 1 ]]; then
             gim_arm)          _EXTRA_ARGS+=("--extra" "gim_arm") ;;
             rebot)            _EXTRA_ARGS+=("--extra" "rebot") ;;
             so101)            _EXTRA_ARGS+=("--extra" "so101") ;;
+            dobot)            _EXTRA_ARGS+=("--extra" "dobot") ;;
             frankasim)        _EXTRA_ARGS+=("--extra" "franka") ;;
             *)
                 echo "[install_local.sh] WARNING: --env '$_ENV_NAME' has no matching"

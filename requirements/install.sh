@@ -81,7 +81,7 @@ NO_ROOT=0
 NO_INSTALL_RLINF_CMD="--no-install-project"
 SUPPORTED_TARGETS=("embodied" "agentic" "docs")
 SUPPORTED_MODELS=("openvla" "openvla-oft" "openpi" "gr00t" "gr00t_n1d6" "gr00t_n1d7" "dexbotic" "starvla" "lingbotvla" "dreamzero" "qwen3_vl" "abot_m0")
-SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "rebot" "so101" "dummy" "polaris" "gym_aloha")
+SUPPORTED_ENVS=("behavior" "maniskill_libero" "libero" "metaworld" "calvin" "isaaclab" "robocasa" "franka" "franka-dexhand" "franka-franky" "frankasim" "robotwin" "habitat" "opensora" "wan" "genesis" "xsquare_turtle2" "liberopro" "liberoplus" "roboverse" "embodichain" "d4rl" "dosw1" "gim_arm" "rebot" "so101" "dobot" "dummy" "polaris" "gym_aloha")
 
 #=======================Utility Functions=======================
 
@@ -120,7 +120,7 @@ Common options:
                            system (/opt/rocm/.info/version, hipconfig, rocminfo). Composes
                            UV_TORCH_BACKEND=rocm<version>. Ignored on other platforms.
     --python <version>     Python version for the venv (e.g. 3.11.14). Defaults to 3.11.14.
-                           Must be >=3.10. Some envs (behavior, d4rl) require 3.10 and will override this.
+                           Must be >=3.10,<3.12. Some envs (behavior, d4rl) require 3.10 and will override this.
     --use-mirror           Use mirrors for faster downloads.
     --no-root              Avoid system dependency installation for non-root users. Only use this if you are certain system dependencies are already installed.
     --no-flash-attn        Skip flash-attn install. Useful when the host lacks a CUDA build
@@ -265,12 +265,15 @@ validate_python_version() {
         exit 1
     fi
 
-    # Soft-check against pyproject.toml's requires-python = ">=3.10".
+    # Keep the installer aligned with pyproject.toml's supported range.  uv
+    # resolves every supported Python/platform split when updating uv.lock;
+    # accepting an untested future Python version can therefore break installs
+    # even when the active interpreter is 3.10/3.11.
     local py_major py_minor _py_patch
     IFS='.' read -r py_major py_minor _py_patch <<< "$PYTHON_VERSION"
-    local mm="${py_major}.${py_minor}"
-    if [ "$(printf '%s\n3.10\n' "$mm" | sort -V | head -n1)" != "3.10" ]; then
-        echo "[install.sh] WARNING: Python ${PYTHON_VERSION} is below the pyproject.toml requires-python minimum (>=3.10). The install may fail." >&2
+    if (( py_major != 3 || py_minor < 10 || py_minor >= 12 )); then
+        echo "[install.sh] Python ${PYTHON_VERSION} is unsupported; expected >=3.10,<3.12." >&2
+        exit 1
     fi
 }
 
@@ -1362,6 +1365,13 @@ install_openpi_model() {
             install_flash_attn
             install_so101_env
             ;;
+        dobot)
+            create_and_sync_venv
+            install_common_embodied_deps
+            uv pip install git+${GITHUB_PREFIX}https://github.com/RLinf/openpi
+            install_flash_attn
+            install_dobot_env
+            ;;
         *)
             echo "Environment '$ENV_NAME' is not supported for OpenPI model." >&2
             exit 1
@@ -1724,6 +1734,9 @@ install_env_only() {
         so101)
             install_so101_env
             ;;
+        dobot)
+            install_dobot_env
+            ;;
         dosw1)
             install_dosw1_env
             ;;
@@ -1749,6 +1762,10 @@ install_rebot_env() {
 
 install_so101_env() {
     uv sync --extra so101 --inexact --active $NO_INSTALL_RLINF_CMD
+}
+
+install_dobot_env() {
+    uv sync --extra dobot --inexact --active $NO_INSTALL_RLINF_CMD
 }
 
 install_gym_aloha_env() {

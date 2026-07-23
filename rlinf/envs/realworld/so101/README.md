@@ -6,7 +6,7 @@ SO101 双机械臂在 RLinf `realworld` 环境下的集成。
 
 - 2x SO101 follower arms，通过 USB 串口连接（默认 `/dev/ttyACM2`、`/dev/ttyACM3`）。
 - 3x USB 相机：左全局相机、左手腕相机、右手腕相机。
-- Ubuntu 22.04+，Python 3.10+。
+- Ubuntu 22.04+，Python 3.10 或 3.11。
 
 ## 安装
 

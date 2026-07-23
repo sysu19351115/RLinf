@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from .dobot import DobotEnv, DobotRobotConfig, DobotRobotState
+from .dobot import tasks as dobot_tasks
 from .dosw1 import DOSW1Config, DOSW1Env
 from .dosw1 import tasks as dosw1_tasks
 from .franka import FrankaEnv, FrankaRobotConfig, FrankaRobotState
@@ -47,6 +49,10 @@ __all__ = [
     "DOSW1Config",
     "DOSW1Env",
     "dosw1_tasks",
+    "DobotEnv",
+    "DobotRobotConfig",
+    "DobotRobotState",
+    "dobot_tasks",
     "FrankaEnv",
     "FrankaRobotConfig",
     "FrankaRobotState",

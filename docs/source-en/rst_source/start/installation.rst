@@ -32,12 +32,29 @@ environment list.
 
 - Use ``--venv <dir>`` to choose the virtual environment directory.
 - Use ``--use-mirror`` for faster downloads from mainland China.
-- Use ``--python <version>`` only when a package requires it. The default is
-  Python 3.11.14; some environments such as ``behavior`` and ``d4rl`` require
-  Python 3.10.
+- RLinf supports Python 3.10 and 3.11. The default is Python 3.11.14; some
+  environments such as ``behavior`` and ``d4rl`` require Python 3.10. Python
+  3.12 and later are rejected because they are outside the project's tested
+  universal-lock range.
 - Use ``--torch <version>`` only when you need a different PyTorch wheel.
 - Use ``--platform amd`` or ``--platform ascend`` for experimental non-NVIDIA
   installs. See :doc:`../guides/amd_rocm` and :doc:`../guides/ascend_cann`.
+
+For an OpenPI real-world robot environment, select exactly one robot target.
+For example:
+
+.. code-block:: bash
+
+   bash requirements/install_local.sh embodied \
+      --model openpi \
+      --env dobot \
+      --force \
+      --no-root
+
+Replace ``dobot`` with ``so101`` or ``rebot`` as needed. Use the installer
+again when changing the robot target; do not run a bare ``uv sync`` command.
+The installer temporarily selects the correct platform-specific PyTorch index,
+and the robot extras are intentionally mutually exclusive.
 
 Option 2: Docker
 ----------------

@@ -11,6 +11,7 @@
 | 示例3 | ReBot + PI0.5 + PPO 异步真机训练 | [docs/examples/rebot_pi05_ppo_async.md](docs/examples/rebot_pi05_ppo_async.md) |
 | 示例4 | SO101 + PI0.5 + PPO 异步真机训练 | [docs/source-zh/rst_source/examples/embodied/so101.rst](docs/source-zh/rst_source/examples/embodied/so101.rst) |
 | 示例5 | SO101 人在环（HIL）数据采集 | [docs/examples/so101_hil_data_collection.md](docs/examples/so101_hil_data_collection.md) |
+| 示例6 | Dobot CR5AF + PI0.5 + PPO 真机训练 | [docs/examples/dobot_pi05_ppo.md](docs/examples/dobot_pi05_ppo.md) |
 
 ## 通用资源
 

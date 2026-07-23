@@ -34,6 +34,9 @@ from rlinf.models.embodiment.openpi.dataconfig.behavior_dataconfig import (
 from rlinf.models.embodiment.openpi.dataconfig.calvin_dataconfig import (
     LeRobotCalvinDataConfig,
 )
+from rlinf.models.embodiment.openpi.dataconfig.dobot_dataconfig import (
+    DobotDataConfig,
+)
 from rlinf.models.embodiment.openpi.dataconfig.dual_franka_tcp_rot6d_dataconfig import (
     DualFrankaTcpRot6dDataConfig,
 )
@@ -409,6 +412,35 @@ _CONFIGS = [
         ),
         num_train_steps=20_000,
         pytorch_weight_path="checkpoints/pi0_aloha_sim_pytorch",
+    ),
+    TrainConfig(
+        name="pi05_dobot_joint",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=DobotDataConfig(
+            use_pose=False,
+            repo_id="",
+            assets=AssetsConfig(
+                assets_dir="checkpoints/pi05_dobot_joint",
+                asset_id="dobot_lerobot_joint_data",
+            ),
+        ),
+        num_train_steps=20_000,
+        pytorch_weight_path="checkpoints/pi05_dobot_joint",
+    ),
+    TrainConfig(
+        name="pi05_dobot_pose",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=DobotDataConfig(
+            use_pose=True,
+            use_delta_joint_actions=False,
+            repo_id="",
+            assets=AssetsConfig(
+                assets_dir="checkpoints/pi05_dobot_pose",
+                asset_id="dobot_lerobot_pose_data",
+            ),
+        ),
+        num_train_steps=20_000,
+        pytorch_weight_path="checkpoints/pi05_dobot_pose",
     ),
     TrainConfig(
         name="pi05_rebot",

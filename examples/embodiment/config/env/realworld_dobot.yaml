@@ -1,0 +1,46 @@
+env_type: realworld
+
+total_num_envs: 1
+
+auto_reset: False
+ignore_terminations: False
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 500
+max_episode_steps: 500
+main_image_key: cam_left_wrist
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/eval
+
+init_params:
+  id: "DobotPickAndPlaceEnv-v1"
+  num_envs: null
+  ip: "192.168.5.1"
+  speed: 100
+  user_index: 0
+  tool_index: 0
+  action_mode: "joint"                    # "joint" | "cartesian" (pose mode)
+  state_mode: "joint"                     # "joint" | "pose"
+  gripper_port: "/dev/ttyACM0"
+  enable_gripper: true
+  gripper_closed_deg: 0.0
+  gripper_open_deg: -320.0
+  camera_serials:
+    - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
+  camera_type: "opencv"
+  camera_resolution: [1920, 1080]
+  camera_fps: 30
+  camera_fourcc: "MJPG"
+  enable_high_camera: false
+  is_dummy: false
+  enable_ft_sensor: true
+  task_description: "Pick up an object with the hole from the tray and hang it on an empty hook."
+  max_num_steps: 500
+  use_dense_reward: false
+  enable_gripper_penalty: false
+  initial_joint_pos: [-5.869, -0.799, -2.175, 1.890, 1.424, 0.621, 0.9]   # [j1..j6 rad, gripper norm]
+  step_frequency: 30.0

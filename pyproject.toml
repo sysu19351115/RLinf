@@ -8,7 +8,7 @@ version = "0.3.0"
 authors = [{ name = "RLinf Contributors" }]
 description = "Reinforcement Learning Infrastructure for Embodied and Agentic AI"
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"
 license = {file = "LICENSE"}
 keywords = [
     "reinforcement-learning",
@@ -167,7 +167,7 @@ rebot = [
     # runtime; only the SDK's Python dependencies are declared here.
     "motorbridge>=0.1.7",
     "pin>=3.9.0",
-    "numpy>=1.23.4",
+    "numpy>=1.23.4,<2",
     "pyyaml>=6.0",
     "meshcat>=0.3.2",
     "matplotlib>=3.10.0",
@@ -185,7 +185,21 @@ so101 = [
     "imageio[ffmpeg]",
     "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
     "feetech-servo-sdk>=1.0.0,<2.0.0",
-    "pin>=3.0.0",
+    # Pinocchio 3.x/4.x requires NumPy 2.x on some supported lock platforms,
+    # which conflicts with SO101/LeRobot's NumPy 1.x requirement.  The SO101
+    # FK/IK implementation only uses APIs available in Pinocchio 2.7.
+    "pin>=2.7.0,<3.0.0",
+]
+dobot = [
+    # Dobot CR5AF: dobot_zhiyu SDK (git submodule) + Damiao gripper (motorbridge).
+    # The SDK is auto-added to sys.path by the controller; only deps are declared here.
+    "motorbridge>=0.1.7",
+    "numpy>=1.23.4,<2",
+    "scipy",
+    "gymnasium",
+    "opencv-python",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "imageio[ffmpeg]",
 ]
 realworld-env = [
     "gymnasium>=0.29.1",
@@ -216,16 +230,23 @@ conflicts = [
       { extra = "gim_arm" },
       { extra = "rebot" },
       { extra = "so101" },
+      { extra = "dobot" },
     ],
     [  # Agentic backends require numpy 2.x; legacy real-world robots pin numpy 1.x
       { extra = "agentic-sglang" },
       { extra = "agentic-vllm" },
       { extra = "franka" },
       { extra = "xsquare_turtle2" },
+      { extra = "rebot" },
       { extra = "so101" },
+      { extra = "dobot" },
     ],
 ]
 override-dependencies = [
+    # Pinocchio 4 works with NumPy 1.26, but cmeel-boost's metadata requires
+    # NumPy 2.x.  Keep the override scoped to that package so agentic extras
+    # can still select NumPy 2.x while OpenPI robot environments stay on 1.x.
+    { package = { name = "cmeel-boost" }, dependencies = ["numpy>=1.26,<3"] },
     "torch==2.7.0",
     "torchvision==0.22.0",
     "torchaudio==2.7.0",

@@ -807,6 +807,8 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             processed_obs["observation/wrist_image"] = env_obs["wrist_images"]
         if env_obs["extra_view_images"] is not None:
             processed_obs["observation/extra_view_image"] = env_obs["extra_view_images"]
+        if env_obs.get("prev_states") is not None:
+            processed_obs["observation/prev_state"] = env_obs["prev_states"]
         return processed_obs
 
     def precision_processor(self, processed_obs):
@@ -836,6 +838,8 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
         **kwargs,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         to_process_obs = self.obs_processor(env_obs)  # env obs -> policy input obs
+        # Capture prev_state before input_transform (needed by AbsolutePose output transform).
+        prev_state = to_process_obs.get("observation/prev_state")
         processed_obs = self.input_transform(
             to_process_obs, transpose=False
         )  # policy input obs -> model input obs
@@ -865,7 +869,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
             # Step 3: Extract actual actions for environment interaction
             real_actions = self.output_transform(
-                {"actions": outputs["actions"], "state": observation.state}
+                {
+                    "actions": outputs["actions"],
+                    "state": observation.state,
+                    **({"prev_state": prev_state} if prev_state is not None else {}),
+                }
             )["actions"]
 
             # Return actual actions to environment, but forward_inputs stores noise.
@@ -880,7 +888,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
                 observation, mode=mode, compute_values=compute_values
             )
             actions = self.output_transform(
-                {"actions": outputs["actions"], "state": observation.state}
+                {
+                    "actions": outputs["actions"],
+                    "state": observation.state,
+                    **({"prev_state": prev_state} if prev_state is not None else {}),
+                }
             )["actions"]
             prev_logprobs = outputs["prev_logprobs"]
             prev_values = outputs["prev_values"]

@@ -241,7 +241,9 @@ class EmbodiedRewardWorker(Worker):
         self.reward_threshold = self.cfg.reward.get("reward_threshold", 0.6)
         self._use_reward_prob = self.cfg.reward.get("use_reward_prob", False)
 
-        self.env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        self.env_decoupled_mode = self.cfg.get("runner", {}).get(
+            "enable_decoupled_mode", False
+        )
 
         if self.env_decoupled_mode:
             # save the run-time imformation in communicate channel for decoupled mode
