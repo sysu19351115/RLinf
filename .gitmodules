@@ -1,0 +1,3 @@
+[submodule "third_party/dobot_zhiyu"]
+	path = third_party/dobot_zhiyu
+	url = https://cnb.cool/THU-HiGroup/dobot_zhiyu
