@@ -676,6 +676,34 @@ class DobotEnv(gym.Env):
             float(state.gripper_position),
         )
 
+    def get_pose_state(self) -> np.ndarray:
+        """Return fresh ``[x,y,z,qw,qx,qy,qz,gripper]`` without touching the prev tracker.
+
+        Reads the current TCP pose + gripper via ``controller.get_state()``
+        (which does **not** update :class:`PoseStateTracker`). This keeps the
+        observation ``prev_state`` semantics intact while giving the HIL
+        wrapper a safe initial target for ENGAGE.
+
+        Raises:
+            RuntimeError: if ``state_mode != "pose"``.
+        """
+        if self.config.state_mode != "pose":
+            raise RuntimeError("get_pose_state requires state_mode='pose'")
+        if self.config.is_dummy:
+            return np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5], dtype=np.float64)
+        state = self._controller.get_state().wait()[0]
+        pose = np.asarray(state.tcp_pose, dtype=np.float64).reshape(7)
+        return np.concatenate([pose, [float(state.gripper_position)]])
+
+    def reset_servo_smoothing(self) -> None:
+        """Restart slew smoothing from current feedback at a control-owner switch.
+
+        Delegates to ``controller.engage()`` (which calls
+        ``_robot.reset_smoothing()``). In dummy mode this is a no-op.
+        """
+        if not self.config.is_dummy:
+            self._controller.engage().wait()
+
     def _read_state_and_prev(self) -> tuple:
         """Read (state, prev_state) from the controller.
 

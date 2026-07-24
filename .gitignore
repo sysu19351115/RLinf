@@ -30,3 +30,4 @@ checkpoints
 libero
 datasets/
 tmp/
+.zcode/

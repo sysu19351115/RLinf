@@ -1,0 +1,148 @@
+defaults:
+  - env/realworld_dobot@env.eval
+  - model/pi0_5@actor.model
+  - override hydra/job_logging: stdout
+  - _self_
+
+# Dobot CR5AF + pi0.5 Pose — Keyboard Human-in-the-Loop Data Collection
+#
+# Three policy modes:
+#   dummy — no hardware, no model; tests the software pipeline end-to-end.
+#   hold  — connects to real robot but does not load a model; holds current pose.
+#   model — loads the PI0.5 checkpoint and uses it for MODEL-mode actions.
+#
+# Launch (dummy mode for verification):
+#   python examples/embodiment/collect_dobot_hil_data.py \
+#       --config-name dobot_hil_collect policy_mode=dummy
+#
+# Launch (hold mode for real-robot safety check):
+#   python examples/embodiment/collect_dobot_hil_data.py \
+#       --config-name dobot_hil_collect policy_mode=hold
+#
+# Launch (model mode for full HIL collection):
+#   python examples/embodiment/collect_dobot_hil_data.py \
+#       --config-name dobot_hil_collect policy_mode=model
+
+# policy_mode controls which policy is loaded:
+#   dummy → is_dummy=true (no hardware)
+#   hold  → is_dummy=false, HoldPolicy (real robot, no model)
+#   model → is_dummy=false, PI0.5 checkpoint
+policy_mode: dummy
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    env:
+      node_group: dobot
+      placement: 0
+  node_groups:
+    - label: dobot
+      node_ranks: 0
+      hardware:
+        type: Dobot
+        configs:
+          - node_rank: 0
+            ip: "192.168.5.1"
+            speed: 5
+            action_mode: "cartesian"
+            state_mode: "pose"
+            gripper_port: "/dev/ttyACM0"
+            camera_serials:
+              - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
+            camera_type: "opencv"
+            camera_resolution: [1920, 1080]
+            camera_fps: 30
+            camera_fourcc: "MJPG"
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "logs/dobot_hil_collect"
+    project_name: rlinf
+    experiment_name: "dobot-hil-collect"
+    logger_backends: ["tensorboard"]
+
+  num_data_episodes: 10000       # large cap; operator stops via ESC
+  record_task_description: False
+
+env:
+  group_name: "EnvGroup"
+
+  eval:
+    ignore_terminations: False
+    auto_reset: False
+    total_num_envs: 1
+    max_episode_steps: null       # external wrapper owns episode end
+    max_steps_per_rollout_epoch: 100000
+
+    main_image_key: cam_left_wrist
+
+    override_cfg:
+      # For dummy mode set is_dummy: true; for hold/model set is_dummy: false.
+      # Set this explicitly in the launch command, e.g.:
+      #   policy_mode=dummy env.eval.override_cfg.is_dummy=true
+      is_dummy: true
+      action_mode: "cartesian"
+      state_mode: "pose"
+      use_dense_reward: False
+      use_reward_model: False
+      manual_episode_control_only: True
+      max_num_steps: 100000
+      step_frequency: 30.0
+      initial_joint_pos: [6.108, 0.909, 1.645, -1.396, -1.43, 0.293, 0.9]
+      task_description: "Pick up an object with the hole from the tray and hang it on an empty hook."
+
+    # ── Keyboard HIL intervention ──────────────────────────────────────────
+    use_keyboard_intervention: True
+    use_intervention_in_dummy: True
+    keyboard_intervention:
+      position_delta: 0.002        # 2 mm per control frame
+      rotation_delta: 0.02         # ~1.15° per control frame
+      gripper_delta: 0.05          # normalized [0, 1] per control frame
+      # Optional software workspace clamp. Leave both unset to rely on the
+      # Dobot controller's hardware safety (max-jump guard + slew limiter).
+      # Set both bounds to add an absolute workspace limit, e.g.:
+      #   workspace_low: [0.2, -0.2, 0.1]
+      #   workspace_high: [0.6, 0.2, 0.4]
+      toggle_key: "h"
+      model_key: "m"
+      done_key: "Key.enter"
+      abort_key: "Key.backspace"
+      quit_keys: ["Key.esc"]
+      start_in_engage: false
+
+    # ── Data collection ─────────────────────────────────────────────────────
+    data_collection:
+      enabled: True
+      save_dir: ${project_path:logs/dobot_hil_collect/collected_data}
+      export_format: "lerobot"
+      robot_type: "dobot_cr5af"
+      fps: 30
+      only_success: True           # only save episodes ended with Enter
+      finalize_interval: 20        # frequent metadata flush for early HIL
+      resume: False
+      image_writer_threads: 1
+      image_writer_processes: 1
+
+actor:
+  model:
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch}
+    model_type: "openpi"
+    precision: bfloat16
+    add_value_head: false
+    num_action_chunks: 10
+    action_dim: 8
+    num_steps: 4
+    openpi:
+      config_name: "pi05_dobot_pose"
+      train_expert_only: True
+      value_after_vlm: False
+      num_images_in_input: 2
+      noise_method: "flow_ode"     # deterministic for collection
+      action_horizon: 50
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+    openpi_data:
+      repo_id: ""
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265_pose/norm_stats.json}

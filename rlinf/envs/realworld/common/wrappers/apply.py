@@ -20,6 +20,9 @@ from typing import Any, Mapping, Optional
 
 import gymnasium as gym
 
+from rlinf.envs.realworld.common.wrappers.dobot_keyboard_intervention import (
+    DobotKeyboardIntervention,
+)
 from rlinf.envs.realworld.common.wrappers.dual_gello_joint_intervention import (
     DualGelloJointIntervention,
 )
@@ -184,6 +187,47 @@ def apply_so101_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             model_key=kcfg.get("model_key", "m"),
             quit_keys=tuple(kcfg.get("quit_keys", ("Key.esc",))),
             switch_arm_key=kcfg.get("switch_arm_key", "Tab"),
+        )
+
+    env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))
+    return env
+
+
+def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
+    """Wrapper stack for Dobot CR5AF real-world envs.
+
+    Adds optional keyboard-based 6D Cartesian end-effector intervention.
+    The underlying :class:`DobotEnv` must be in ``state_mode='pose'`` /
+    ``action_mode='cartesian'`` and expose ``get_pose_state()`` /
+    ``reset_servo_smoothing()``.
+    """
+    config = env.get_wrapper_attr("config")
+    use_keyboard = cfg.get("use_keyboard_intervention", False)
+    active_in_dummy = not config.is_dummy or cfg.get(
+        "use_intervention_in_dummy", False
+    )
+
+    if use_keyboard and active_in_dummy:
+        if config.action_mode != "cartesian" or config.state_mode != "pose":
+            raise ValueError(
+                "DobotKeyboardIntervention requires action_mode='cartesian' and "
+                f"state_mode='pose', got action_mode={config.action_mode!r}, "
+                f"state_mode={config.state_mode!r}."
+            )
+        kcfg = cfg.get("keyboard_intervention", {})
+        env = DobotKeyboardIntervention(
+            env,
+            position_delta=float(kcfg.get("position_delta", 0.002)),
+            rotation_delta=float(kcfg.get("rotation_delta", 0.02)),
+            gripper_delta=float(kcfg.get("gripper_delta", 0.05)),
+            workspace_low=kcfg.get("workspace_low"),
+            workspace_high=kcfg.get("workspace_high"),
+            toggle_key=kcfg.get("toggle_key", "h"),
+            model_key=kcfg.get("model_key", "m"),
+            done_key=kcfg.get("done_key", "Key.enter"),
+            abort_key=kcfg.get("abort_key", "Key.backspace"),
+            quit_keys=tuple(kcfg.get("quit_keys", ("Key.esc",))),
+            start_in_engage=bool(kcfg.get("start_in_engage", False)),
         )
 
     env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))

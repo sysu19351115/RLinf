@@ -17,10 +17,12 @@
 from typing import TYPE_CHECKING
 
 from .apply import (
+    apply_dobot_wrappers,
     apply_dual_franka_joint_wrappers,
     apply_single_arm_wrappers,
     apply_so101_wrappers,
 )
+from .dobot_keyboard_intervention import DobotKeyboardIntervention
 from .dual_euler_obs import DualQuat2EulerWrapper
 from .dual_gello_joint_intervention import DualGelloJointIntervention
 from .dual_relative_frame import DualRelativeFrame, DualRelativeTargetFrame
@@ -59,10 +61,12 @@ __all__ = [
     "Quat2EulerWrapper",
     "RelativeFrame",
     "SO101KeyboardIntervention",
+    "DobotKeyboardIntervention",
     "SpacemouseIntervention",
     "apply_dual_franka_joint_wrappers",
     "apply_single_arm_wrappers",
     "apply_so101_wrappers",
+    "apply_dobot_wrappers",
 ]
 
 

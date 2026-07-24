@@ -172,7 +172,7 @@ actor:
   enable_offload: False
 
   model:
-    model_path: "checkpoints/pi05_dobot_t265_pose_train_800_torch"
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch}
     model_type: "openpi"
     add_value_head: True
     num_action_chunks: 10             # Dobot action_horizon=50; env executes first 10
@@ -192,7 +192,7 @@ actor:
       num_steps: ${actor.model.num_steps}
     openpi_data:
       repo_id: ""
-      norm_stats_path: "checkpoints/pi05_dobot_t265_pose_train_800_torch/dobot_cf5af_t265_pose/norm_stats.json"
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265_pose/norm_stats.json}
 
   optim:
     lr: 7.91e-6

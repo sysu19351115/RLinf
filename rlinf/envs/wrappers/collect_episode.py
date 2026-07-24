@@ -120,6 +120,7 @@ class CollectEpisode(gym.Wrapper):
         resume: bool = False,
         image_writer_threads: int = 1,
         image_writer_processes: int = 1,
+        required_observation_fields: tuple[str, ...] = (),
     ):
         if isinstance(env, gym.Env):
             super().__init__(env)
@@ -143,6 +144,7 @@ class CollectEpisode(gym.Wrapper):
         self.finalize_interval = finalize_interval
         self.image_writer_threads = image_writer_threads
         self.image_writer_processes = image_writer_processes
+        self.required_observation_fields = tuple(required_observation_fields)
 
         self._preexisting_episode_count = 0
         self._next_shard_id = 0
@@ -515,9 +517,13 @@ class CollectEpisode(gym.Wrapper):
         first_term_step: Optional[int] = None
         for i, action in enumerate(actions):
             obs = obs_steps[i] if i < len(obs_steps) else None
-            image, wrist_image, extra_view_image, state = self._extract_obs_image_state(
-                obs
-            )
+            (
+                image,
+                wrist_image,
+                extra_view_image,
+                state,
+                prev_state,
+            ) = self._extract_obs_image_state(obs)
             # Overwrite action with intervene action if present.
             np_action = self._to_numpy(action)
             raw_info = buf["infos"][i + 1]
@@ -541,6 +547,17 @@ class CollectEpisode(gym.Wrapper):
                     np_action = self._to_numpy(info_with_intervene["intervene_action"])
             if state is None or np_action is None:
                 continue
+            # Enforce required observation fields (e.g. prev_states for pose
+            # mode). Raise rather than silently skip, so misconfigured HIL
+            # pipelines fail loudly.
+            if self.required_observation_fields:
+                for req_field in self.required_observation_fields:
+                    # Map plural obs keys to the extracted variable.
+                    if req_field in ("prev_states", "prev_state") and prev_state is None:
+                        raise ValueError(
+                            f"required_observation_fields includes {req_field!r} "
+                            f"but it is missing from observation at step {i}."
+                        )
             intervene_flag = self._intervene_flag_from_info(info_with_intervene)
             seg_id = int(seg_ids[i]) if i < len(seg_ids) else 0
             frame: dict[str, Any] = {
@@ -561,6 +578,21 @@ class CollectEpisode(gym.Wrapper):
                     frame["model_action"] = (
                         np.asarray(model_action).astype(np.float32).flatten()
                     )
+            if (
+                "model_action_valid" in info_with_intervene
+                and info_with_intervene["model_action_valid"] is not None
+            ):
+                model_action_valid = self._to_numpy(
+                    info_with_intervene["model_action_valid"]
+                )
+                if model_action_valid is not None:
+                    frame["model_action_valid"] = (
+                        np.asarray(model_action_valid).astype(bool).flatten()
+                    )
+            if prev_state is not None:
+                frame["prev_state"] = (
+                    np.asarray(prev_state).astype(np.float32).flatten()
+                )
             if image is not None:
                 frame["image"] = self._to_uint8(np.asarray(image))
             for key, img in self._expand_multi_view_images(
@@ -601,6 +633,22 @@ class CollectEpisode(gym.Wrapper):
                         "shape": (int(first["model_action"].shape[-1]),),
                         "names": ["model_action"],
                     }
+                }
+            if "model_action_valid" in first:
+                if custom_features is None:
+                    custom_features = {}
+                custom_features["model_action_valid"] = {
+                    "dtype": "bool",
+                    "shape": (1,),
+                    "names": ["model_action_valid"],
+                }
+            if "prev_state" in first:
+                if custom_features is None:
+                    custom_features = {}
+                custom_features["prev_state"] = {
+                    "dtype": "float32",
+                    "shape": (int(first["prev_state"].shape[-1]),),
+                    "names": ["prev_state"],
                 }
             self._lerobot_writer.create(
                 repo_id=os.path.join(
@@ -795,24 +843,29 @@ class CollectEpisode(gym.Wrapper):
         return "unknown task"
 
     def _extract_obs_image_state(self, obs):
-        """Return ``(image, wrist_image, extra_view_image, state)`` from an obs dict.
+        """Return ``(image, wrist_image, extra_view_image, state, prev_state)`` from an obs dict.
 
         ``wrist_image`` and ``extra_view_image`` are returned as raw numpy
         arrays and may have shape ``[H, W, C]`` *or* ``[N, H, W, C]``.
         Use :meth:`_expand_multi_view_images` to fan them out into
         individually-keyed views before writing.
+
+        ``prev_state`` is the previous-frame state (pose mode only). It is
+        ``None`` when not present in the observation.
         """
         if not isinstance(obs, dict):
-            return None, None, None, None
+            return None, None, None, None, None
         image = obs.get("main_images", obs.get("image", obs.get("full_image")))
         wrist_image = obs.get("wrist_images", obs.get("wrist_image"))
         extra_view_image = obs.get("extra_view_images", obs.get("extra_view_image"))
         state = obs.get("states", obs.get("state"))
+        prev_state = obs.get("prev_states", obs.get("prev_state"))
         return (
             self._to_numpy(image),
             self._to_numpy(wrist_image),
             self._to_numpy(extra_view_image),
             self._to_numpy(state),
+            self._to_numpy(prev_state),
         )
 
     @staticmethod

@@ -17,8 +17,11 @@ from gymnasium.envs.registration import register
 from rlinf.envs.realworld.dobot.tasks.pick_and_place import (
     DobotPickAndPlaceEnv as DobotPickAndPlaceEnv,
 )
+from rlinf.envs.realworld.dobot.tasks.pick_and_place import (
+    create_dobot_pick_and_place_env as create_dobot_pick_and_place_env,
+)
 
 register(
     id="DobotPickAndPlaceEnv-v1",
-    entry_point="rlinf.envs.realworld.dobot.tasks:DobotPickAndPlaceEnv",
+    entry_point="rlinf.envs.realworld.dobot.tasks:create_dobot_pick_and_place_env",
 )

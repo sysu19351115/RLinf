@@ -24,11 +24,15 @@ overrides reward-related defaults; the action/state spaces are inherited
 from :class:`DobotEnv`.
 """
 
-from dataclasses import dataclass, field
-from typing import Optional
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Optional
+
+import gymnasium as gym
 import numpy as np
 
+from rlinf.envs.realworld.common.wrappers import apply_dobot_wrappers
 from rlinf.scheduler import WorkerInfo
 
 from ..dobot_env import DobotEnv, DobotRobotConfig
@@ -84,3 +88,29 @@ class DobotPickAndPlaceEnv(DobotEnv):
             env_cfg=env_cfg,
             **kwargs,
         )
+
+
+def create_dobot_pick_and_place_env(
+    override_cfg: dict[str, Any] | None = None,
+    worker_info: Any = None,
+    hardware_info: Any = None,
+    env_idx: int = 0,
+    env_cfg: Mapping[str, Any] | None = None,
+) -> gym.Env:
+    """Factory for the Dobot pick-and-place task with optional HIL wrappers.
+
+    Constructs the raw :class:`DobotPickAndPlaceEnv`, then applies
+    :func:`apply_dobot_wrappers` (which adds keyboard intervention when
+    ``env_cfg['use_keyboard_intervention']`` is enabled).
+
+    All arguments except ``override_cfg`` are optional so the factory can also
+    be used directly via ``gym.make`` for testing and verification.
+    """
+    env = DobotPickAndPlaceEnv(
+        override_cfg=override_cfg,
+        worker_info=worker_info,
+        hardware_info=hardware_info,
+        env_idx=env_idx,
+        env_cfg=env_cfg,
+    )
+    return apply_dobot_wrappers(env, env_cfg or {})

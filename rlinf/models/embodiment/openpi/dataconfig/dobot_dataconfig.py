@@ -66,11 +66,21 @@ class DobotDataConfig(DataConfigFactory):
         use_delta_joint_actions: Joint-mode delta actions (default True). Must
             be ``False`` when ``use_pose=True``.
         default_prompt: Optional default language prompt.
+        dataset_layout: Key layout of the source dataset.
+
+            - ``"native"`` (default): LeRobot nested keys
+              (``observation.images.cam_left_wrist``, ``observation.state``,
+              ``action``, ``prompt``). Use this for checkpoint-compatible SFT
+              data.
+            - ``"rlinf_hil"``: Flat keys produced by RLinf's HIL collector
+              (``image``, ``state``, ``actions``, ``task``). Use this for
+              data collected via ``collect_dobot_hil_data.py``.
     """
 
     use_pose: bool = False
     use_delta_joint_actions: bool = True
     default_prompt: str | None = None
+    dataset_layout: str = "native"
 
     def generate_observations(
         self,
@@ -94,16 +104,28 @@ class DobotDataConfig(DataConfigFactory):
 
         state_dim = 8 if self.use_pose else 7
 
-        # ── Repack: LeRobot nested keys → flat keys matching DobotPolicyInputs ─
-        repack_structure = {
-            "observation/image": "observation.images.cam_left_wrist",
-            "observation/state": "observation.state",
-            "actions": "action",
-            "prompt": "prompt",
-        }
-        if self.use_pose:
-            # DeltaPose needs the previous absolute pose, stored per-frame.
-            repack_structure["observation/prev_state"] = "observation.prev_state"
+        # ── Repack: source dataset keys → flat keys matching DobotPolicyInputs ─
+        if self.dataset_layout == "rlinf_hil":
+            # Flat keys produced by RLinf's CollectEpisode / HIL collector.
+            repack_structure = {
+                "observation/image": "image",
+                "observation/state": "state",
+                "actions": "actions",
+                "prompt": "task",
+            }
+            if self.use_pose:
+                # DeltaPose needs the previous absolute pose, stored per-frame.
+                repack_structure["observation/prev_state"] = "prev_state"
+        else:
+            # Native LeRobot nested keys (checkpoint-compatible SFT data).
+            repack_structure = {
+                "observation/image": "observation.images.cam_left_wrist",
+                "observation/state": "observation.state",
+                "actions": "action",
+                "prompt": "prompt",
+            }
+            if self.use_pose:
+                repack_structure["observation/prev_state"] = "observation.prev_state"
         repack_transform = _transforms.Group(
             inputs=[_transforms.RepackTransform(repack_structure)]
         )
