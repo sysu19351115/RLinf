@@ -26,15 +26,19 @@ ENGAGE frames.
 from __future__ import annotations
 
 from collections import deque
+from datetime import datetime
 from typing import Sequence
 
 import numpy as np
+import pytest
+from omegaconf import OmegaConf
 
 from rlinf.envs.realworld.common.wrappers.dobot_keyboard_intervention import (
     DobotKeyboardIntervention,
 )
 from rlinf.envs.realworld.dobot.dobot_env import DobotEnv, DobotRobotConfig
 from rlinf.envs.realworld.venv import NoAutoResetSyncVectorEnv
+from rlinf.envs.wrappers.collect_episode import resolve_collection_save_dir
 
 _DUMMY_POSE = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5], dtype=np.float64)
 _WS_LOW = np.array([-0.5, -0.5, 0.0])
@@ -44,7 +48,9 @@ _WS_HIGH = np.array([0.5, 0.5, 0.5])
 class FakeListener:
     """Deterministic keyboard listener for testing."""
 
-    def __init__(self, press_sequence: Sequence[str] | None = None, held: str | None = None):
+    def __init__(
+        self, press_sequence: Sequence[str] | None = None, held: str | None = None
+    ):
         self._presses: deque[str] = deque(press_sequence or [])
         self._held = held
 
@@ -63,7 +69,7 @@ class FakeListener:
         self._held = key
 
 
-def _make_env_stack():
+def _make_env_stack(gripper_relative_threshold: float | None = None):
     """Create the real wrapper stack: vector env → keyboard wrapper → dummy env."""
     env = DobotEnv(
         DobotRobotConfig(
@@ -72,6 +78,7 @@ def _make_env_stack():
             state_mode="pose",
             max_num_steps=100,
             step_frequency=10_000.0,
+            gripper_relative_threshold=gripper_relative_threshold,
         )
     )
     kb_wrapper = DobotKeyboardIntervention(
@@ -124,3 +131,56 @@ class TestModelActionValidPropagation:
         _, _, _, _, info = venv.step(_DUMMY_POSE[None, :].copy())
         assert not bool(np.asarray(info["model_action_valid"]).any())
         venv.close()
+
+    def test_engage_action_matches_binary_command_sent_by_environment(self):
+        venv, kb = _make_env_stack(gripper_relative_threshold=0.2)
+        venv.reset()
+        kb.gripper_delta = 0.3
+        kb.listener.press("h")
+        kb.listener.set_held(",")
+
+        _, _, _, _, info = venv.step(_DUMMY_POSE[None, :].copy())
+
+        executed = np.asarray(info["executed_action"])[0]
+        intervene = np.asarray(info["intervene_action"])[0]
+        assert executed[-1] == 0.0
+        np.testing.assert_array_equal(intervene, executed)
+        venv.close()
+
+
+class TestCollectionSessionDirectory:
+    def test_creates_timestamped_directory_and_collision_suffix(self, tmp_path):
+        cfg = OmegaConf.create(
+            {
+                "save_dir": str(tmp_path / "collected_data"),
+                "create_session_dir": True,
+                "session_name_format": "%Y%m%d_%H%M%S",
+                "resume": False,
+            }
+        )
+        now = datetime(2026, 7, 24, 20, 30, 15)
+
+        first = resolve_collection_save_dir(cfg, now=now)
+        second = resolve_collection_save_dir(cfg, now=now)
+
+        assert first.endswith("20260724_203015")
+        assert second.endswith("20260724_203015_01")
+        assert (tmp_path / "collected_data" / "20260724_203015").is_dir()
+        assert (tmp_path / "collected_data" / "20260724_203015_01").is_dir()
+
+    def test_resume_requires_explicit_existing_session(self, tmp_path):
+        cfg = OmegaConf.create(
+            {
+                "save_dir": str(tmp_path / "collected_data"),
+                "create_session_dir": True,
+                "resume": True,
+            }
+        )
+        with pytest.raises(ValueError, match="create_session_dir=false"):
+            resolve_collection_save_dir(cfg)
+
+        session = tmp_path / "collected_data" / "20260724_203015"
+        session.mkdir(parents=True)
+        cfg.create_session_dir = False
+        cfg.save_dir = str(session)
+        assert resolve_collection_save_dir(cfg) == str(session)

@@ -14,7 +14,7 @@ Dobot 已使用 8 维绝对 Cartesian action：
 - 旋转：工具局部坐标系 roll/pitch/yaw
 - 夹爪：归一化 `[0, 1]`
 
-键盘 wrapper 直接维护 8 维目标位姿，不使用 IK。人工动作与策略动作完全同构，导出的 `actions` 可直接用于 pose 数据管线。
+键盘 wrapper 直接维护 8 维目标位姿，不使用 IK。人工动作与策略动作完全同构，导出的 `action` 可直接用于 OpenPI pose 数据管线。
 
 ### MODEL/ENGAGE 状态机
 
@@ -131,11 +131,43 @@ test -f checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265
 
 ## 数据保存语义
 
-- **Enter**：`reward=1.0 + terminated=True + success_once=True`，episode 保存为新 LeRobot shard。
+- **Enter**：`reward=1.0 + terminated=True + success_once=True`，episode 写入当前会话数据集。
 - **Backspace**：`hil_event=abort`，collector 调用 `reset()` 丢弃 buffer，不增加 episode 计数。
 - **ESC**：`quit_program=True`，collector 先 `reset()` 回初始位姿再退出。
 
-每帧保存：`state`、`prev_state`、`actions`、`model_action`、`model_action_valid`、`intervene_flag`、`image`。`model_action_valid` 仅 MODEL 推理帧为 True，ENGAGE 帧和 ENGAGE→MODEL 过渡 hold 帧为 False。
+每次启动采集器都会创建一个独立的时间戳目录，例如：
+
+```text
+logs/dobot_hil_collect/collected_data/
+└── 20260724_203015/
+    └── rank_0/
+        └── id_0/
+            ├── data/
+            ├── meta/
+            └── videos/
+```
+
+同一秒内重复启动会依次使用 `_01`、`_02` 后缀。写入器不会删除已有数据集；如果目标 shard 已存在，会拒绝启动并报告 `FileExistsError`。
+
+主字段在保存时直接使用 OpenPI Dobot pose 格式：
+
+| 语义 | 数据集字段 |
+|------|------------|
+| 当前 pose 状态 | `observation.state` |
+| 真实执行动作 | `action` |
+| 上一 pose 状态 | `observation.prev_state` |
+| 单路 USB 图像 | `observation.images.cam_left_wrist` |
+
+额外保留 `model_action`、`model_action_valid`、`intervene_flag`、`segment_id`、`is_success` 和 `done`。`model_action_valid` 仅 MODEL 推理帧为 True，ENGAGE 帧和 ENGAGE→MODEL 过渡 hold 帧为 False。当前未采集真实六维力传感器数据，因此不会伪造 `observation.wrench`。
+
+当 `env.eval.override_cfg.gripper_relative_threshold` 配置为 `(0, 1)` 内的值（HIL 示例默认 `0.2`）时，环境在最终下发前使用带状态保持的相对阈值控制夹爪：
+
+- 模型或人工目标比真实夹爪反馈高出阈值时，全开（`1.0`）；
+- 真实夹爪反馈比目标高出阈值时，全闭（`0.0`）；
+- 差值未超过阈值时，保持上一开闭状态；
+- 每次 reset 清除保持状态，并由 reset 后的真实夹爪反馈初始化。
+
+数据集中的 `action` 和人工帧的 `intervene_action` 保存最终下发动作，因此夹爪维度为二值 `0.0/1.0`；`model_action` 保留模型原始连续输出用于诊断；观测 `observation.state` 中的夹爪位置始终是真实连续反馈。
 
 ## 数据集验收
 
@@ -143,18 +175,19 @@ test -f checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265
 
 ```bash
 python examples/embodiment/inspect_dobot_hil_dataset.py \
-    logs/dobot_hil_collect/collected_data/rank_0/id_0
+    logs/dobot_hil_collect/collected_data/<SESSION>/rank_0/id_0
 ```
 
 Dummy 模式允许常量图像：
 
 ```bash
 python examples/embodiment/inspect_dobot_hil_dataset.py \
-    logs/dobot_hil_collect/collected_data/rank_0/id_0 --allow-dummy-images
+    logs/dobot_hil_collect/collected_data/<SESSION>/rank_0/id_0 \
+    --allow-dummy-images
 ```
 
 检查内容包括：
-- Schema：state/prev_state/actions 各 8 维 float32
+- Schema：`observation.state` / `observation.prev_state` / `action` 各 8 维 float32
 - 数值安全：quaternion norm、gripper [0,1]、XYZ 在 workspace 内
 - prev_state 连续性
 - 每条 episode 最后一帧 `done=True`
@@ -162,7 +195,18 @@ python examples/embodiment/inspect_dobot_hil_dataset.py \
 
 ## 数据恢复
 
-设置 `data_collection.resume: true` 可跨会话续写，新 episode 落入新 `id_N` shard，不覆盖已 finalize 数据。
+恢复中断会话时必须显式指定已有会话目录，不能自动选择“最新”目录：
+
+```bash
+python examples/embodiment/collect_dobot_hil_data.py \
+    --config-name dobot_hil_collect \
+    policy_mode=model \
+    env.eval.data_collection.resume=true \
+    env.eval.data_collection.create_session_dir=false \
+    env.eval.data_collection.save_dir=/absolute/path/to/20260724_203015
+```
+
+新 episode 会写入该会话下的新 `id_N` shard，不覆盖已 finalize 数据。
 
 ## 常见故障
 

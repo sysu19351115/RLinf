@@ -449,7 +449,12 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
 
         info["model_action"] = model_action
         if replaced:
-            info["intervene_action"] = new_action
+            # The base Dobot environment may transform the gripper command
+            # (for example, stateful relative binarization). Record the command
+            # actually sent to the controller, not the pre-transform target.
+            info["intervene_action"] = np.asarray(
+                info.get("executed_action", new_action), dtype=np.float64
+            ).copy()
             info["intervene_flag"] = np.ones(1, dtype=bool)
             # ENGAGE frames are never valid model predictions.
             model_action_valid = False

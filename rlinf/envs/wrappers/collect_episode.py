@@ -21,6 +21,8 @@ import os
 import pickle
 import re
 from concurrent.futures import Future, ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
 
@@ -31,9 +33,70 @@ import torch
 from rlinf.utils.logging import get_logger
 
 _VALID_FORMATS = ("pickle", "lerobot")
+_VALID_DATASET_LAYOUTS = ("rlinf", "openpi_dobot_pose")
+
+_DOBOT_POSE_NAMES = [
+    "pos_x",
+    "pos_y",
+    "pos_z",
+    "quat_w",
+    "quat_x",
+    "quat_y",
+    "quat_z",
+    "gripper",
+]
 
 
 _ID_DIR_RE = re.compile(r"^id_(\d+)$")
+
+
+def resolve_collection_save_dir(
+    data_collection_cfg: Any,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Resolve a collision-safe directory for one data-collection session."""
+    base_dir = Path(str(data_collection_cfg.save_dir)).expanduser()
+    resume = bool(data_collection_cfg.get("resume", False))
+    create_session_dir = bool(data_collection_cfg.get("create_session_dir", True))
+
+    if resume:
+        if create_session_dir:
+            raise ValueError(
+                "data_collection.resume=true requires "
+                "create_session_dir=false and save_dir set to the exact "
+                "existing collection session."
+            )
+        if not base_dir.is_dir():
+            raise FileNotFoundError(
+                f"Cannot resume missing collection directory: {base_dir}"
+            )
+        return str(base_dir)
+
+    if not create_session_dir:
+        return str(base_dir)
+
+    timestamp = (now or datetime.now().astimezone()).strftime(
+        str(data_collection_cfg.get("session_name_format", "%Y%m%d_%H%M%S"))
+    )
+    if not timestamp or Path(timestamp).name != timestamp or timestamp in (".", ".."):
+        raise ValueError(
+            f"session_name_format produced invalid directory name: {timestamp!r}"
+        )
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+    for collision_index in range(100):
+        suffix = "" if collision_index == 0 else f"_{collision_index:02d}"
+        session_dir = base_dir / f"{timestamp}{suffix}"
+        try:
+            session_dir.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return str(session_dir)
+    raise FileExistsError(
+        f"Could not allocate a unique collection directory under {base_dir} "
+        f"for timestamp {timestamp}"
+    )
 
 
 def _scan_existing_lerobot_shards(save_dir: str, rank: int) -> tuple[int, int]:
@@ -103,6 +166,9 @@ class CollectEpisode(gym.Wrapper):
             (N = sum of episodes across pre-existing shards) so the in-progress
             write never touches previously-finalized data. Ignored for pickle.
             Defaults to False.
+        dataset_layout: LeRobot field layout. ``"rlinf"`` keeps the generic
+            flat schema; ``"openpi_dobot_pose"`` writes the nested field names
+            expected by OpenPI's Dobot pose data config. Defaults to ``"rlinf"``.
     """
 
     def __init__(
@@ -121,6 +187,7 @@ class CollectEpisode(gym.Wrapper):
         image_writer_threads: int = 1,
         image_writer_processes: int = 1,
         required_observation_fields: tuple[str, ...] = (),
+        dataset_layout: str = "rlinf",
     ):
         if isinstance(env, gym.Env):
             super().__init__(env)
@@ -131,6 +198,15 @@ class CollectEpisode(gym.Wrapper):
             raise ValueError(
                 f"Unsupported export_format={export_format!r}, "
                 f"expected one of {_VALID_FORMATS}"
+            )
+        if dataset_layout not in _VALID_DATASET_LAYOUTS:
+            raise ValueError(
+                f"Unsupported dataset_layout={dataset_layout!r}, "
+                f"expected one of {_VALID_DATASET_LAYOUTS}"
+            )
+        if dataset_layout != "rlinf" and export_format != "lerobot":
+            raise ValueError(
+                f"dataset_layout={dataset_layout!r} requires export_format='lerobot'"
             )
 
         self.save_dir = save_dir
@@ -145,6 +221,7 @@ class CollectEpisode(gym.Wrapper):
         self.image_writer_threads = image_writer_threads
         self.image_writer_processes = image_writer_processes
         self.required_observation_fields = tuple(required_observation_fields)
+        self.dataset_layout = dataset_layout
 
         self._preexisting_episode_count = 0
         self._next_shard_id = 0
@@ -396,8 +473,16 @@ class CollectEpisode(gym.Wrapper):
                 self._segment_ids[env_idx] += 1
 
             buf = self._buffers[env_idx]
+            recorded_action = self._slice_copy(action, env_idx)
+            if (
+                isinstance(env_info, dict)
+                and env_info.get("executed_action") is not None
+            ):
+                # Environments may safely transform a requested action before
+                # hardware dispatch. Dataset labels must match that command.
+                recorded_action = self._copy(env_info["executed_action"])
             buf["observations"].append(env_obs)
-            buf["actions"].append(self._slice_copy(action, env_idx))
+            buf["actions"].append(recorded_action)
             buf["rewards"].append(self._slice_copy(reward, env_idx))
             buf["terminated"].append(self._slice_copy(terminated, env_idx))
             buf["truncated"].append(self._slice_copy(truncated, env_idx))
@@ -524,7 +609,7 @@ class CollectEpisode(gym.Wrapper):
                 state,
                 prev_state,
             ) = self._extract_obs_image_state(obs)
-            # Overwrite action with intervene action if present.
+            # Prefer the command actually dispatched by the environment.
             np_action = self._to_numpy(action)
             raw_info = buf["infos"][i + 1]
             if isinstance(raw_info, dict) and "final_info" in raw_info:
@@ -539,7 +624,9 @@ class CollectEpisode(gym.Wrapper):
                 continue
             info_with_intervene = copy.deepcopy(raw_info)
 
-            if (
+            if info_with_intervene.get("executed_action") is not None:
+                np_action = self._to_numpy(info_with_intervene["executed_action"])
+            elif (
                 "intervene_flag" in info_with_intervene
                 and "intervene_action" in info_with_intervene
             ):
@@ -553,7 +640,10 @@ class CollectEpisode(gym.Wrapper):
             if self.required_observation_fields:
                 for req_field in self.required_observation_fields:
                     # Map plural obs keys to the extracted variable.
-                    if req_field in ("prev_states", "prev_state") and prev_state is None:
+                    if (
+                        req_field in ("prev_states", "prev_state")
+                        and prev_state is None
+                    ):
                         raise ValueError(
                             f"required_observation_fields includes {req_field!r} "
                             f"but it is missing from observation at step {i}."
@@ -561,7 +651,7 @@ class CollectEpisode(gym.Wrapper):
             intervene_flag = self._intervene_flag_from_info(info_with_intervene)
             seg_id = int(seg_ids[i]) if i < len(seg_ids) else 0
             frame: dict[str, Any] = {
-                "state": np.asarray(state).astype(np.float32),
+                "state": np.asarray(state).astype(np.float32).flatten(),
                 "actions": np.asarray(np_action).astype(np.float32).flatten(),
                 "task": task_desc,
                 "is_success": np.array([is_success], dtype=bool),
@@ -611,7 +701,90 @@ class CollectEpisode(gym.Wrapper):
         end = first_term_step if first_term_step is not None else len(steps)
         steps = steps[:end]
         steps[-1]["done"] = np.array([True], dtype=bool)
+        if self.dataset_layout == "openpi_dobot_pose":
+            steps = [self._to_openpi_dobot_pose_frame(frame) for frame in steps]
         return steps
+
+    @staticmethod
+    def _to_openpi_dobot_pose_frame(frame: dict[str, Any]) -> dict[str, Any]:
+        """Map a generic RLinf frame to OpenPI's Dobot pose field names."""
+        key_map = {
+            "state": "observation.state",
+            "actions": "action",
+            "prev_state": "observation.prev_state",
+            "image": "observation.images.cam_left_wrist",
+        }
+        return {key_map.get(key, key): value for key, value in frame.items()}
+
+    @staticmethod
+    def _openpi_dobot_pose_features(
+        frame: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        """Build an OpenPI-compatible Dobot pose schema including HIL fields."""
+        state = frame["observation.state"]
+        action = frame["action"]
+        if state.shape[-1] != len(_DOBOT_POSE_NAMES):
+            raise ValueError(
+                "openpi_dobot_pose requires an 8-D observation.state, "
+                f"got shape {state.shape}"
+            )
+        if action.shape[-1] != len(_DOBOT_POSE_NAMES):
+            raise ValueError(
+                f"openpi_dobot_pose requires an 8-D action, got shape {action.shape}"
+            )
+
+        pose_names = [_DOBOT_POSE_NAMES]
+        features: dict[str, dict[str, Any]] = {
+            "observation.state": {
+                "dtype": "float32",
+                "shape": (len(_DOBOT_POSE_NAMES),),
+                "names": pose_names,
+            },
+            "action": {
+                "dtype": "float32",
+                "shape": (len(_DOBOT_POSE_NAMES),),
+                "names": pose_names,
+            },
+        }
+        if "observation.prev_state" in frame:
+            features["observation.prev_state"] = {
+                "dtype": "float32",
+                "shape": (len(_DOBOT_POSE_NAMES),),
+                "names": pose_names,
+            }
+        image_key = "observation.images.cam_left_wrist"
+        if image_key in frame:
+            image_shape = tuple(frame[image_key].shape)
+            if len(image_shape) != 3:
+                raise ValueError(f"{image_key} must be HWC, got shape {image_shape}")
+            height, width, channels = image_shape
+            features[image_key] = {
+                "dtype": "image",
+                "shape": (channels, height, width),
+                "names": ["channels", "height", "width"],
+            }
+
+        extra_specs = {
+            "done": ("bool", (1,)),
+            "is_success": ("bool", (1,)),
+            "intervene_flag": ("bool", (1,)),
+            "segment_id": ("uint8", (1,)),
+            "model_action_valid": ("bool", (1,)),
+        }
+        for key, (dtype, shape) in extra_specs.items():
+            if key in frame:
+                features[key] = {
+                    "dtype": dtype,
+                    "shape": shape,
+                    "names": [key],
+                }
+        if "model_action" in frame:
+            features["model_action"] = {
+                "dtype": "float32",
+                "shape": (int(frame["model_action"].shape[-1]),),
+                "names": ["model_action"],
+            }
+        return features
 
     def _ensure_lerobot_writer(self, ep_data: dict):
         """Get-or-create the LeRobot writer. Must be called under ``_lerobot_lock``."""
@@ -623,6 +796,20 @@ class CollectEpisode(gym.Wrapper):
 
         if self._lerobot_writer.dataset is None:
             first = ep_data[0]
+            if self.dataset_layout == "openpi_dobot_pose":
+                self._lerobot_writer.create(
+                    repo_id=os.path.join(
+                        self.save_dir, f"rank_{self.rank}", f"id_{shard_id}"
+                    ),
+                    robot_type=self.robot_type,
+                    fps=self.fps,
+                    features=self._openpi_dobot_pose_features(first),
+                    image_writer_threads=self.image_writer_threads,
+                    image_writer_processes=self.image_writer_processes,
+                )
+                self._next_shard_id = shard_id + 1
+                return self._lerobot_writer
+
             wrist_image_keys = self._collect_image_keys(first, "wrist_image")
             extra_view_image_keys = self._collect_image_keys(first, "extra_view_image")
             custom_features = None

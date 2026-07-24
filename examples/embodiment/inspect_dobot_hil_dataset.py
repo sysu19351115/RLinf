@@ -21,11 +21,12 @@ integrity (last frame done, at least one intervene frame).
 Usage::
 
     python examples/embodiment/inspect_dobot_hil_dataset.py \\
-        logs/dobot_hil_collect/collected_data/rank_0/id_0
+        logs/dobot_hil_collect/collected_data/<SESSION>/rank_0/id_0
 
     # Allow constant images (dummy mode only):
     python examples/embodiment/inspect_dobot_hil_dataset.py \\
-        logs/dobot_hil_collect/collected_data/rank_0/id_0 --allow-dummy-images
+        logs/dobot_hil_collect/collected_data/<SESSION>/rank_0/id_0 \\
+        --allow-dummy-images
 
 Exit code is non-zero if any structural or safety invariant fails.
 """
@@ -43,7 +44,8 @@ def _load_dataset(data_path: str):
     """Load a LeRobot dataset and return (dataset, feature_schema)."""
     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
 
-    ds = LeRobotDataset(data_path)
+    root = Path(data_path).expanduser().resolve()
+    ds = LeRobotDataset(repo_id=root.name, root=root)
     features = ds.meta.info.get("features", {})
     return ds, features
 
@@ -51,13 +53,14 @@ def _load_dataset(data_path: str):
 def _check_schema(features: dict) -> list[str]:
     """Verify required fields exist with correct dtype/shape."""
     errors = []
+    is_openpi = "observation.state" in features
     required = {
-        "state": ("float32", 8),
-        "actions": ("float32", 8),
+        ("observation.state" if is_openpi else "state"): ("float32", 8),
+        ("action" if is_openpi else "actions"): ("float32", 8),
         "done": ("bool", None),
         "is_success": ("bool", None),
         "intervene_flag": ("bool", None),
-        "image": (None, None),
+        ("observation.images.cam_left_wrist" if is_openpi else "image"): (None, None),
     }
     for field, (dtype, dim) in required.items():
         if field not in features:
@@ -71,8 +74,9 @@ def _check_schema(features: dict) -> list[str]:
                 f"Field {field} has shape {f.get('shape')}, expected last dim {dim}"
             )
     # prev_state is required for pose mode.
-    if "prev_state" not in features:
-        errors.append("Missing prev_state (required for pose mode)")
+    prev_state_key = "observation.prev_state" if is_openpi else "prev_state"
+    if prev_state_key not in features:
+        errors.append(f"Missing {prev_state_key} (required for pose mode)")
     return errors
 
 
@@ -91,8 +95,12 @@ def _check_episode(ds, ep_idx: int, allow_dummy_images: bool) -> tuple[list[str]
         "has_intervene": False,
     }
 
-    ep_data = ds.get_episode(ep_idx)
-    frames = list(ep_data)
+    if hasattr(ds, "get_episode"):
+        frames = list(ds.get_episode(ep_idx))
+    else:
+        start = int(ds.episode_data_index["from"][ep_idx])
+        end = int(ds.episode_data_index["to"][ep_idx])
+        frames = [ds[i] for i in range(start, end)]
     if not frames:
         errors.append(f"Episode {ep_idx}: empty")
         return errors, stats
@@ -100,14 +108,19 @@ def _check_episode(ds, ep_idx: int, allow_dummy_images: bool) -> tuple[list[str]
     prev_state = None
     for i, frame in enumerate(frames):
         stats["frames"] += 1
-        state = np.asarray(frame.get("state", []), dtype=np.float32).flatten()
-        action = np.asarray(frame.get("action", frame.get("actions", [])), dtype=np.float32).flatten()
-        intervene = bool(
-            np.asarray(frame.get("intervene_flag", False)).any()
-        )
+        state = np.asarray(
+            frame.get("observation.state", frame.get("state", [])),
+            dtype=np.float32,
+        ).flatten()
+        action = np.asarray(
+            frame.get("action", frame.get("actions", [])), dtype=np.float32
+        ).flatten()
+        intervene = bool(np.asarray(frame.get("intervene_flag", False)).any())
 
         if state.shape[0] != 8:
-            errors.append(f"Episode {ep_idx} frame {i}: state dim {state.shape[0]} != 8")
+            errors.append(
+                f"Episode {ep_idx} frame {i}: state dim {state.shape[0]} != 8"
+            )
             continue
         if not np.isfinite(state).all():
             errors.append(f"Episode {ep_idx} frame {i}: non-finite state")
@@ -142,7 +155,7 @@ def _check_episode(ds, ep_idx: int, allow_dummy_images: bool) -> tuple[list[str]
             stats["has_intervene"] = True
 
         # prev_state continuity.
-        ps = frame.get("prev_state")
+        ps = frame.get("observation.prev_state", frame.get("prev_state"))
         if ps is not None:
             ps = np.asarray(ps, dtype=np.float32).flatten()
             if prev_state is not None:

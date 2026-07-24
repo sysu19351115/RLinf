@@ -35,8 +35,8 @@ Three ``policy_mode`` values are supported:
 * ``model`` -- loads the PI0.5 checkpoint and uses it for MODEL-mode actions.
 
 Collected episodes are exported in LeRobot format by the ``CollectEpisode``
-wrapper. Each frame records ``state``, ``prev_state``, ``actions``,
-``model_action``, ``model_action_valid``, ``intervene_flag``, and ``image``.
+wrapper using OpenPI's Dobot pose field names. HIL diagnostic fields such as
+``model_action``, ``model_action_valid``, and ``intervene_flag`` are retained.
 
 Launch (dummy mode for verification)::
 
@@ -58,6 +58,7 @@ from tqdm import tqdm
 from rlinf.envs.realworld.dobot.hold_policy import HoldPolicy
 from rlinf.envs.realworld.realworld_env import RealWorldEnv
 from rlinf.envs.wrappers import CollectEpisode
+from rlinf.envs.wrappers.collect_episode import resolve_collection_save_dir
 from rlinf.scheduler import Cluster, ComponentPlacement, Worker
 from rlinf.utils.logging import get_logger
 
@@ -90,6 +91,12 @@ class DobotHILCollector(Worker):
             )
 
         eval_cfg = cfg.env.eval
+        dc_cfg = eval_cfg.get("data_collection")
+        collection_save_dir = None
+        if dc_cfg and getattr(dc_cfg, "enabled", False):
+            collection_save_dir = resolve_collection_save_dir(dc_cfg)
+            self.log_info(f"Dobot HIL dataset session: {collection_save_dir}")
+
         self.env = RealWorldEnv(
             eval_cfg,
             num_envs=1,
@@ -98,13 +105,12 @@ class DobotHILCollector(Worker):
             worker_info=self.worker_info,
         )
 
-        dc_cfg = eval_cfg.get("data_collection")
         if dc_cfg and getattr(dc_cfg, "enabled", False):
             self.env = CollectEpisode(
                 self.env,
-                save_dir=dc_cfg.save_dir,
+                save_dir=collection_save_dir,
                 export_format=dc_cfg.get("export_format", "lerobot"),
-                robot_type=dc_cfg.get("robot_type", "dobot_cr5af"),
+                robot_type=dc_cfg.get("robot_type", "dobot_cf5af"),
                 fps=dc_cfg.get("fps", 30),
                 only_success=dc_cfg.get("only_success", True),
                 finalize_interval=dc_cfg.get("finalize_interval", 20),
@@ -112,6 +118,7 @@ class DobotHILCollector(Worker):
                 image_writer_threads=int(dc_cfg.get("image_writer_threads", 1)),
                 image_writer_processes=int(dc_cfg.get("image_writer_processes", 1)),
                 required_observation_fields=("prev_states",),
+                dataset_layout=dc_cfg.get("dataset_layout", "openpi_dobot_pose"),
             )
             self._preexisting = int(getattr(self.env, "preexisting_episode_count", 0))
         else:
@@ -193,7 +200,9 @@ class DobotHILCollector(Worker):
             state = state.detach().cpu().numpy()
         state = np.asarray(state, dtype=np.float64).reshape(1, self.action_dim)
         if not np.isfinite(state).all():
-            raise ValueError("Non-finite state in observation; cannot build hold action.")
+            raise ValueError(
+                "Non-finite state in observation; cannot build hold action."
+            )
         # Normalize quaternion (indices 3:7, wxyz).
         q = state[0, 3:7]
         norm = np.linalg.norm(q)
@@ -279,7 +288,10 @@ class DobotHILCollector(Worker):
                 is_model_action = (
                     prev_hil_state == "model"
                     and not self._pending_model_hold_step
-                    and (self._action_queue is not None and self._action_queue.shape[0] > 0)
+                    and (
+                        self._action_queue is not None
+                        and self._action_queue.shape[0] > 0
+                    )
                 )
                 # If the queue is empty, _get_action will infer (model action).
                 if prev_hil_state == "model" and (
@@ -307,9 +319,7 @@ class DobotHILCollector(Worker):
 
                 # ── HIL event handling (priority order) ───────────────────────
                 # 1. quit: reset, then exit.
-                quit_program = bool(
-                    np.asarray(info.get("quit_program", False)).any()
-                )
+                quit_program = bool(np.asarray(info.get("quit_program", False)).any())
                 if quit_program:
                     self.log_info(
                         "Quit requested by operator (ESC); resetting to initial "
@@ -346,17 +356,13 @@ class DobotHILCollector(Worker):
                     episodes_done += 1
                     progress.update(1)
                     if episodes_done < self.num_episodes:
-                        self.log_info(
-                            f"Episode {episodes_done} saved; continuing."
-                        )
+                        self.log_info(f"Episode {episodes_done} saved; continuing.")
                         obs, _ = self.env.reset()
                         self._action_queue = None
                         self._pending_model_hold_step = False
                         prev_hil_state = "model"
                     else:
-                        self.log_info(
-                            f"Episode {episodes_done} saved; reached limit."
-                        )
+                        self.log_info(f"Episode {episodes_done} saved; reached limit.")
 
                 elapsed = time.perf_counter() - iter_start
                 if self._target_step_period is not None:

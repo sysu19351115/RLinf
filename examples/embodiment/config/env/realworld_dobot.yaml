@@ -19,16 +19,19 @@ video_cfg:
 init_params:
   id: "DobotPickAndPlaceEnv-v1"
   num_envs: null
-  ip: "192.168.5.1"
+  ip: "192.168.5.2"
   speed: 100
   user_index: 0
-  tool_index: 0
+  tool_index: 2
   action_mode: "joint"                    # "joint" | "cartesian" (pose mode)
   state_mode: "joint"                     # "joint" | "pose"
   gripper_port: "/dev/ttyACM0"
   enable_gripper: true
   gripper_closed_deg: 0.0
-  gripper_open_deg: -320.0
+  gripper_open_deg: -300.0
+  # null keeps continuous control; set to (0,1), e.g. 0.2, to latch execution
+  # to fully closed/open based on model target versus measured gripper position.
+  gripper_relative_threshold: null
   camera_serials:
     - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
   camera_type: "opencv"
@@ -44,3 +47,15 @@ init_params:
   enable_gripper_penalty: false
   initial_joint_pos: [6.108, 0.909, 1.645, -1.396, -1.43, 0.293, 0.9]   # [j1..j6 rad, gripper norm]
   step_frequency: 30.0
+  # ServoJ-only reset limits (adaptive minimum-jerk; no MovJ fallback).
+  reset_fps: 30.0
+  reset_min_duration_s: 3.0
+  reset_max_duration_s: 20.0
+  reset_max_velocity_deg_s: 20.0
+  reset_max_acceleration_deg_s2: 30.0
+  reset_max_step_deg: 1.0
+  reset_feedback_interval_frames: 3
+  reset_max_tracking_error_deg: 8.0
+  reset_final_tolerance_deg: 1.0
+  reset_final_hold_frames: 10
+  reset_gripper_release_settle_s: 0.5

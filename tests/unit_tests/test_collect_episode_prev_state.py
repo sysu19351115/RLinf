@@ -25,6 +25,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from rlinf.data.lerobot_writer import LeRobotDatasetWriter
 from rlinf.envs.wrappers.collect_episode import CollectEpisode
 
 
@@ -149,6 +150,50 @@ class TestPrevStateExtraction:
             assert "prev_state" not in frame
 
 
+class TestExecutedActionPersistence:
+    def test_record_step_prefers_executed_action(self, tmp_path):
+        collector = _make_collector(tmp_path)
+        requested = np.full((1, 8), 0.4, dtype=np.float32)
+        executed = requested.copy()
+        executed[0, -1] = 0.0
+
+        collector._record_step(
+            requested,
+            obs={},
+            reward=np.array([0.0]),
+            terminated=np.array([False]),
+            truncated=np.array([False]),
+            info={"executed_action": executed},
+        )
+
+        np.testing.assert_array_equal(collector._buffers[0]["actions"][0], executed[0])
+        assert requested[0, -1] == pytest.approx(0.4)
+        collector.close()
+
+    def test_lerobot_frame_prefers_executed_over_intervene_action(self, tmp_path):
+        collector = _make_collector(tmp_path)
+        buf = _build_pose_buf(num_steps=1)
+        buf["actions"][0][-1] = 0.4
+        buf["infos"][1].update(
+            {
+                "executed_action": np.array(
+                    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+                    dtype=np.float32,
+                ),
+                "intervene_action": np.array(
+                    [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.7],
+                    dtype=np.float32,
+                ),
+                "intervene_flag": np.array([True]),
+            }
+        )
+
+        frames = collector._buffer_to_lerobot_ep(buf, env_idx=0, is_success=True)
+
+        assert frames[0]["actions"][-1] == 0.0
+        collector.close()
+
+
 class TestModelActionValidExtraction:
     def test_frame_contains_model_action_valid(self, tmp_path):
         collector = _make_collector(tmp_path)
@@ -197,3 +242,111 @@ class TestCustomFeaturesSchema:
         # Verify shapes for schema declaration.
         assert first["prev_state"].shape[-1] == 8
         assert first["model_action_valid"].shape == (1,)
+
+
+class TestOpenPIDobotPoseLayout:
+    def test_maps_primary_fields_and_keeps_hil_fields(self, tmp_path):
+        collector = _make_collector(
+            tmp_path,
+            dataset_layout="openpi_dobot_pose",
+            required_observation_fields=("prev_states",),
+        )
+        frames = collector._buffer_to_lerobot_ep(
+            _build_pose_buf(num_steps=2), env_idx=0, is_success=True
+        )
+
+        first = frames[0]
+        assert "observation.state" in first
+        assert "action" in first
+        assert "observation.prev_state" in first
+        assert "observation.images.cam_left_wrist" in first
+        assert "state" not in first
+        assert "actions" not in first
+        assert "prev_state" not in first
+        assert "image" not in first
+        assert "model_action" in first
+        assert "model_action_valid" in first
+        assert "intervene_flag" in first
+        assert "segment_id" in first
+        assert "is_success" in first
+        assert "done" in first
+
+    def test_schema_matches_openpi_pose_keys_and_shapes(self, tmp_path):
+        collector = _make_collector(
+            tmp_path,
+            dataset_layout="openpi_dobot_pose",
+            required_observation_fields=("prev_states",),
+        )
+        frames = collector._buffer_to_lerobot_ep(
+            _build_pose_buf(num_steps=1), env_idx=0, is_success=True
+        )
+
+        features = collector._openpi_dobot_pose_features(frames[0])
+        assert features["observation.state"]["shape"] == (8,)
+        assert features["action"]["shape"] == (8,)
+        assert features["observation.prev_state"]["shape"] == (8,)
+        assert features["observation.images.cam_left_wrist"]["shape"] == (
+            3,
+            224,
+            224,
+        )
+        assert "observation.wrench" not in features
+        for extra_key in (
+            "model_action",
+            "model_action_valid",
+            "intervene_flag",
+            "segment_id",
+            "is_success",
+            "done",
+        ):
+            assert extra_key in features
+
+    def test_written_dataset_can_be_reloaded_by_lerobot(self, tmp_path):
+        from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+
+        collector = _make_collector(
+            tmp_path,
+            dataset_layout="openpi_dobot_pose",
+            required_observation_fields=("prev_states",),
+        )
+        buf = _build_pose_buf(num_steps=2)
+        valid_pose = np.array(
+            [[0.3, 0.0, 0.2, 1.0, 0.0, 0.0, 0.0, 0.5]],
+            dtype=np.float32,
+        )
+        for obs in buf["observations"]:
+            obs["states"] = valid_pose.copy()
+            obs["prev_states"] = valid_pose.copy()
+        for index, action in enumerate(buf["actions"]):
+            action[:] = valid_pose[0]
+            action[-1] = float(index % 2)
+            buf["infos"][index + 1]["intervene_flag"] = np.array([True])
+        frames = collector._buffer_to_lerobot_ep(buf, env_idx=0, is_success=True)
+        collector._write_lerobot_episode(frames)
+        collector.close()
+
+        dataset_root = tmp_path / "collected_data" / "rank_0" / "id_0"
+        dataset = LeRobotDataset(repo_id=dataset_root.name, root=dataset_root)
+        features = dataset.meta.info["features"]
+        assert "observation.state" in features
+        assert "action" in features
+        assert "observation.prev_state" in features
+        assert "observation.images.cam_left_wrist" in features
+        assert "model_action" in features
+        assert "intervene_flag" in features
+        assert dataset.meta.info["total_episodes"] == 1
+        assert len(dataset) == 2
+
+
+class TestLeRobotWriterOverwriteProtection:
+    def test_existing_dataset_is_never_deleted(self, tmp_path):
+        dataset_root = tmp_path / "existing_dataset"
+        dataset_root.mkdir()
+        sentinel = dataset_root / "sentinel.txt"
+        sentinel.write_text("keep")
+
+        writer = LeRobotDatasetWriter()
+        with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+            writer.create(repo_id=str(dataset_root))
+
+        assert sentinel.read_text() == "keep"

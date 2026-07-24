@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Optional
 
 import numpy as np
@@ -349,34 +350,58 @@ class DobotController(Worker):
     def reset_to_pose(
         self,
         joints_rad: np.ndarray,
-        init_steps: int = 60,
-        init_fps: int = 30,
+        reset_fps: float = 30.0,
+        min_duration_s: float = 3.0,
+        max_duration_s: float = 20.0,
+        max_velocity_deg_s: float | np.ndarray = 20.0,
+        max_acceleration_deg_s2: float | np.ndarray = 30.0,
+        max_step_deg: float = 1.0,
+        feedback_interval_frames: int = 3,
+        max_tracking_error_deg: float = 8.0,
+        final_tolerance_deg: float = 1.0,
+        final_hold_frames: int = 10,
     ) -> None:
-        """Move to a joint reset pose via joint-space linear ServoJ interpolation.
+        """Reset using an adaptive minimum-jerk joint trajectory over ServoJ.
 
-        Homing streams a short joint-space trajectory with ServoJ (NOT MovJ:
-        the Dobot controller's MovJ has a bug that makes it unreliable for
-        homing, so ServoJ interpolation is required). Because the Dobot reports
-        joint angles over a multi-turn range, the configured reset pose and the
-        current feedback can differ by ~±2π while describing the *same* physical
-        pose; a naive linear interpolation would command a full revolution and
-        be rejected by the SDK's ServoJ jump guard (``max_jump_deg``). We
-        therefore wrap each per-joint delta into ``[-π, π]`` (shortest path)
-        before interpolating.
+        This method never calls MovJ. It time-scales a synchronized joint-space
+        path with ``s(u)=10u³-15u⁴+6u⁵``, whose velocity and acceleration are
+        zero at both endpoints. Duration is selected from the requested velocity,
+        acceleration, and per-frame step limits. The generated trajectory is
+        preflight-checked so the SDK's slew limiter is a last-resort guard rather
+        than part of normal trajectory generation.
+
+        Joint deltas use the shortest angular path in ``[-π, π]`` to handle the
+        Dobot's multi-turn feedback representation. During execution, ServoJ
+        acceptance, robot mode, tracking error, and final convergence are checked.
 
         Args:
             joints_rad: Target joint positions (6,) in radians.
-            init_steps: Number of ServoJ interpolation steps.
-            init_fps: Interpolation frequency (Hz).
+            reset_fps: ServoJ stream frequency.
+            min_duration_s: Minimum trajectory duration.
+            max_duration_s: Maximum allowed trajectory duration. If satisfying
+                the motion limits requires longer, reset fails before moving.
+            max_velocity_deg_s: Scalar or six per-joint velocity limits.
+            max_acceleration_deg_s2: Scalar or six per-joint acceleration limits.
+            max_step_deg: Maximum planned change per joint per ServoJ frame. This
+                must remain below the SDK slew limit.
+            feedback_interval_frames: Check feedback and RobotMode every N frames.
+            max_tracking_error_deg: Maximum command-to-feedback joint error.
+            final_tolerance_deg: Maximum final shortest-angle joint error.
+            final_hold_frames: Number of target hold frames before final feedback.
         """
-        import time
-
         start = np.asarray(self.get_joint_status(), dtype=float)
         target = np.asarray(joints_rad, dtype=float).reshape(6)
-        # Shortest-path (angular wrapping) per joint so a ~±2π multi-turn
-        # representation never becomes a full-revolution command.
-        delta = target - start
-        delta = (delta + np.pi) % (2 * np.pi) - np.pi
+        trajectory, effective_target, duration_s = self._plan_reset_trajectory(
+            start,
+            target,
+            reset_fps=reset_fps,
+            min_duration_s=min_duration_s,
+            max_duration_s=max_duration_s,
+            max_velocity_deg_s=max_velocity_deg_s,
+            max_acceleration_deg_s2=max_acceleration_deg_s2,
+            max_step_deg=max_step_deg,
+        )
+        delta = effective_target - start
         max_wrap_corr = float(np.max(np.abs((target - start) - delta)))
         if max_wrap_corr > 1e-6:
             self._robot._warn_jump(
@@ -384,15 +409,171 @@ class DobotController(Worker):
                 f"已取最短路径（最大修正 {np.degrees(max_wrap_corr):.1f}°），"
                 f"避免触发 ServoJ 跳变护栏"
             )
-        dt = 1.0 / float(init_fps)
+
+        feedback_interval_frames = int(feedback_interval_frames)
+        final_hold_frames = int(final_hold_frames)
+        if feedback_interval_frames <= 0:
+            raise ValueError("feedback_interval_frames must be positive")
+        if final_hold_frames < 0:
+            raise ValueError("final_hold_frames must be non-negative")
+        if max_tracking_error_deg <= 0 or final_tolerance_deg <= 0:
+            raise ValueError(
+                "max_tracking_error_deg and final_tolerance_deg must be positive"
+            )
+
+        self.assert_ready()
         self._robot.reset_smoothing()
-        for i in range(1, init_steps + 1):
-            alpha = float(i) / float(init_steps)
-            q = start + delta * alpha
-            q_deg = (q * _RAD2DEG).tolist()
-            self._robot.servo_joints(q_deg)
-            time.sleep(dt)
-        self._follower_engaged = False
+        self._follower_engaged = True
+        dt = 1.0 / float(reset_fps)
+        next_deadline = time.perf_counter()
+        try:
+            for frame_idx, q in enumerate(trajectory, start=1):
+                accepted = self._robot.servo_joints((q * _RAD2DEG).tolist())
+                if not accepted:
+                    raise RuntimeError(
+                        f"reset ServoJ rejected at frame {frame_idx}/"
+                        f"{len(trajectory)}"
+                    )
+                if (
+                    frame_idx % feedback_interval_frames == 0
+                    or frame_idx == len(trajectory)
+                ):
+                    self.assert_ready()
+                    feedback = np.asarray(self.get_joint_status(), dtype=float)
+                    tracking_error_deg = np.degrees(
+                        np.abs(self._shortest_angular_delta(q, feedback))
+                    )
+                    max_error = float(np.max(tracking_error_deg))
+                    if max_error > float(max_tracking_error_deg):
+                        raise RuntimeError(
+                            "reset tracking error exceeded limit at frame "
+                            f"{frame_idx}/{len(trajectory)}: "
+                            f"{max_error:.2f}° > {max_tracking_error_deg:.2f}°"
+                        )
+                next_deadline += dt
+                time.sleep(max(0.0, next_deadline - time.perf_counter()))
+
+            target_deg = (effective_target * _RAD2DEG).tolist()
+            for hold_idx in range(final_hold_frames):
+                if not self._robot.servo_joints(target_deg):
+                    raise RuntimeError(
+                        f"reset final hold ServoJ rejected at frame {hold_idx + 1}/"
+                        f"{final_hold_frames}"
+                    )
+                next_deadline += dt
+                time.sleep(max(0.0, next_deadline - time.perf_counter()))
+
+            self.assert_ready()
+            final_feedback = np.asarray(self.get_joint_status(), dtype=float)
+            final_error_deg = np.degrees(
+                np.abs(self._shortest_angular_delta(effective_target, final_feedback))
+            )
+            max_final_error = float(np.max(final_error_deg))
+            if max_final_error > float(final_tolerance_deg):
+                raise RuntimeError(
+                    "reset did not converge: final joint error "
+                    f"{max_final_error:.2f}° > {final_tolerance_deg:.2f}°"
+                )
+            self._logger.info(
+                "Dobot ServoJ reset completed: %.2fs, %d trajectory frames, "
+                "%d hold frames, final error %.3f°",
+                duration_s,
+                len(trajectory),
+                final_hold_frames,
+                max_final_error,
+            )
+        finally:
+            self._follower_engaged = False
+
+    @staticmethod
+    def _shortest_angular_delta(
+        target_rad: np.ndarray, reference_rad: np.ndarray
+    ) -> np.ndarray:
+        """Return ``target-reference`` wrapped elementwise to ``[-π, π]``."""
+        delta = np.asarray(target_rad, dtype=float) - np.asarray(
+            reference_rad, dtype=float
+        )
+        return (delta + np.pi) % (2 * np.pi) - np.pi
+
+    @classmethod
+    def _plan_reset_trajectory(
+        cls,
+        start_rad: np.ndarray,
+        target_rad: np.ndarray,
+        *,
+        reset_fps: float,
+        min_duration_s: float,
+        max_duration_s: float,
+        max_velocity_deg_s: float | np.ndarray,
+        max_acceleration_deg_s2: float | np.ndarray,
+        max_step_deg: float,
+    ) -> tuple[np.ndarray, np.ndarray, float]:
+        """Generate an adaptive synchronized minimum-jerk ServoJ trajectory."""
+        start = np.asarray(start_rad, dtype=float).reshape(6)
+        target = np.asarray(target_rad, dtype=float).reshape(6)
+        if not np.isfinite(start).all() or not np.isfinite(target).all():
+            raise ValueError("reset start and target joints must be finite")
+        if reset_fps <= 0:
+            raise ValueError("reset_fps must be positive")
+        if min_duration_s <= 0 or max_duration_s < min_duration_s:
+            raise ValueError(
+                "reset durations must satisfy 0 < min_duration_s <= max_duration_s"
+            )
+        if max_step_deg <= 0:
+            raise ValueError("max_step_deg must be positive")
+
+        velocity = np.broadcast_to(
+            np.asarray(max_velocity_deg_s, dtype=float), (6,)
+        ).copy()
+        acceleration = np.broadcast_to(
+            np.asarray(max_acceleration_deg_s2, dtype=float), (6,)
+        ).copy()
+        if (
+            not np.isfinite(velocity).all()
+            or not np.isfinite(acceleration).all()
+            or np.any(velocity <= 0)
+            or np.any(acceleration <= 0)
+        ):
+            raise ValueError("reset velocity and acceleration limits must be finite and positive")
+
+        delta = cls._shortest_angular_delta(target, start)
+        effective_target = start + delta
+        distance_deg = np.degrees(np.abs(delta))
+
+        # For s(u)=10u^3-15u^4+6u^5:
+        # max(ds/du)=1.875, max(abs(d2s/du2))=10/sqrt(3).
+        t_velocity = np.max(1.875 * distance_deg / velocity)
+        t_acceleration = np.max(
+            np.sqrt((10.0 / np.sqrt(3.0)) * distance_deg / acceleration)
+        )
+        t_step = np.max(1.875 * distance_deg / (max_step_deg * reset_fps))
+        required_duration = float(
+            max(min_duration_s, t_velocity, t_acceleration, t_step)
+        )
+        if required_duration > max_duration_s + 1e-9:
+            raise ValueError(
+                "reset trajectory requires "
+                f"{required_duration:.2f}s, exceeding max_duration_s="
+                f"{max_duration_s:.2f}s; increase the configured maximum or "
+                "inspect the reset distance"
+            )
+
+        steps = max(1, int(np.ceil(required_duration * reset_fps)))
+        duration_s = steps / float(reset_fps)
+        u = np.arange(1, steps + 1, dtype=float) / float(steps)
+        scale = 10.0 * u**3 - 15.0 * u**4 + 6.0 * u**5
+        trajectory = start[None, :] + scale[:, None] * delta[None, :]
+
+        points = np.vstack([start, trajectory])
+        max_planned_step_deg = float(
+            np.max(np.degrees(np.abs(np.diff(points, axis=0))))
+        )
+        if max_planned_step_deg > max_step_deg + 1e-9:
+            raise RuntimeError(
+                "minimum-jerk planner violated max_step_deg: "
+                f"{max_planned_step_deg:.6f}° > {max_step_deg:.6f}°"
+            )
+        return trajectory, effective_target, duration_s
 
     def reset_pose_tracker(self) -> None:
         """Clear the pose-mode ``prev_state`` tracker (call on env reset)."""

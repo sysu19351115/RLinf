@@ -15,7 +15,7 @@
 """LeRobot dataset writer for saving rollout data."""
 
 import gc
-import shutil
+from pathlib import Path
 from typing import Any
 
 from rlinf.utils.logging import get_logger
@@ -161,20 +161,22 @@ class LeRobotDatasetWriter:
             if custom_features:
                 features.update(custom_features)
 
-        # LeRobot places datasets under ~/.cache/huggingface/lerobot/{repo_id} by
-        # default. If a previous run left that directory behind, create() raises
-        # FileExistsError. Remove the stale cache directory before creating.
-        try:
+        # Never delete an existing dataset implicitly. Absolute repo IDs are
+        # used by the real-world collectors; relative IDs live under the
+        # standard LeRobot cache root.
+        repo_path = Path(repo_id).expanduser()
+        if repo_path.is_absolute():
+            dataset_root = repo_path
+        else:
             from lerobot.common.constants import HF_LEROBOT_HOME
 
-            cache_root = HF_LEROBOT_HOME / repo_id
-            if cache_root.exists():
-                shutil.rmtree(cache_root)
-                self.logger.warning(
-                    f"Removed stale LeRobot cache directory: {cache_root}"
-                )
-        except Exception:
-            pass
+            dataset_root = HF_LEROBOT_HOME / repo_path
+        if dataset_root.exists():
+            raise FileExistsError(
+                f"Refusing to overwrite existing LeRobot dataset: {dataset_root}. "
+                "Use a new save directory, or explicitly resume into the "
+                "existing collection session."
+            )
 
         self.logger.info(
             f"Creating LeRobot dataset: repo_id={repo_id}, robot_type={robot_type}, fps={fps}"

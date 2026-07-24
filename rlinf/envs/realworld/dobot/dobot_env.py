@@ -40,6 +40,7 @@ from scipy.spatial.transform import Rotation as R
 
 from rlinf.envs.realworld.common.camera import BaseCamera, CameraInfo, create_camera
 from rlinf.envs.realworld.common.video_player import VideoPlayer
+from rlinf.envs.realworld.dobot.dobot_action_split import RelativeGripperBinarizer
 from rlinf.scheduler import WorkerInfo
 from rlinf.utils.logging import get_logger
 
@@ -85,6 +86,14 @@ class DobotRobotConfig:
 
     gripper_open_deg: float = -320.0
     """Gripper open calibration (motor degrees, negative)."""
+
+    gripper_relative_threshold: Optional[float] = None
+    """Optional normalized deadband for stateful binary gripper execution.
+
+    When enabled, the model/human gripper target remains continuous until its
+    distance from the measured gripper position exceeds this threshold. The
+    executed command then latches to fully closed (0.0) or fully open (1.0).
+    """
 
     enable_ft_sensor: bool = True
     """Enable the six-axis force/torque sensor (required for ForceVLA)."""
@@ -143,6 +152,39 @@ class DobotRobotConfig:
     )
     """Reset joint pose ``[j1..j6 rad, gripper norm]`` (7-dim). Joint space
     is always used for reset, even in cartesian mode."""
+
+    reset_fps: float = 30.0
+    """ServoJ frequency used by the reset trajectory."""
+
+    reset_min_duration_s: float = 3.0
+    """Minimum duration of the adaptive minimum-jerk reset trajectory."""
+
+    reset_max_duration_s: float = 20.0
+    """Maximum permitted reset duration; longer required trajectories fail closed."""
+
+    reset_max_velocity_deg_s: float = 20.0
+    """Per-joint reset velocity limit in degrees/second."""
+
+    reset_max_acceleration_deg_s2: float = 30.0
+    """Per-joint reset acceleration limit in degrees/second²."""
+
+    reset_max_step_deg: float = 1.0
+    """Maximum planned per-frame joint increment, below the SDK 2° slew guard."""
+
+    reset_feedback_interval_frames: int = 3
+    """Read feedback and check RobotMode every N reset frames."""
+
+    reset_max_tracking_error_deg: float = 8.0
+    """Maximum ServoJ command-to-feedback error during reset."""
+
+    reset_final_tolerance_deg: float = 1.0
+    """Maximum joint error after reset is complete."""
+
+    reset_final_hold_frames: int = 10
+    """Number of low-speed target hold frames before final convergence check."""
+
+    reset_gripper_release_settle_s: float = 0.5
+    """Wait after physically opening the gripper before moving the arm."""
 
     joint_limit_low: np.ndarray = field(
         default_factory=lambda: _DEFAULT_JOINT_LIMIT_LOW.copy()
@@ -229,6 +271,46 @@ class DobotRobotConfig:
                 f"reward_mode must be one of {self._VALID_REWARD_MODES}, "
                 f"got {self.reward_mode!r}"
             )
+        if self.gripper_relative_threshold is not None and not (
+            0.0 < float(self.gripper_relative_threshold) < 1.0
+        ):
+            raise ValueError(
+                "gripper_relative_threshold must be in (0, 1), "
+                f"got {self.gripper_relative_threshold!r}"
+            )
+        self._validate_reset_config()
+
+    def _validate_reset_config(self) -> None:
+        if self.reset_fps <= 0:
+            raise ValueError("reset_fps must be positive")
+        if (
+            self.reset_min_duration_s <= 0
+            or self.reset_max_duration_s < self.reset_min_duration_s
+        ):
+            raise ValueError(
+                "reset durations must satisfy "
+                "0 < reset_min_duration_s <= reset_max_duration_s"
+            )
+        if (
+            self.reset_max_velocity_deg_s <= 0
+            or self.reset_max_acceleration_deg_s2 <= 0
+            or self.reset_max_step_deg <= 0
+        ):
+            raise ValueError(
+                "reset velocity, acceleration, and per-frame step limits "
+                "must be positive"
+            )
+        if self.reset_feedback_interval_frames <= 0:
+            raise ValueError("reset_feedback_interval_frames must be positive")
+        if (
+            self.reset_max_tracking_error_deg <= 0
+            or self.reset_final_tolerance_deg <= 0
+        ):
+            raise ValueError("reset tracking and final tolerances must be positive")
+        if self.reset_final_hold_frames < 0:
+            raise ValueError("reset_final_hold_frames must be non-negative")
+        if self.reset_gripper_release_settle_s < 0:
+            raise ValueError("reset_gripper_release_settle_s must be non-negative")
 
 
 class DobotEnv(gym.Env):
@@ -283,6 +365,7 @@ class DobotEnv(gym.Env):
         self._gripper_is_open = True
         self._reward_worker = None
         self._servo_rejected_count = 0
+        self._state = None
         self._prev_state: Optional[np.ndarray] = None
         self._terminal_reward_computed = False
 
@@ -293,6 +376,11 @@ class DobotEnv(gym.Env):
         # Re-validate after all overrides (env_cfg.init_params, override_cfg,
         # hardware_info) have been applied — __post_init__ ran before them.
         self._validate_config()
+        self._gripper_binarizer = (
+            RelativeGripperBinarizer(self.config.gripper_relative_threshold)
+            if self.config.gripper_relative_threshold is not None
+            else None
+        )
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -321,11 +409,10 @@ class DobotEnv(gym.Env):
                 )
                 break
 
-        # Reset to initial joint pose (always joint space).
-        self._controller.reset_to_pose(
-            self._initial_joints_rad(), init_steps=60, init_fps=30
-        ).wait()
-        time.sleep(1.0)
+        # Use the same guarded ServoJ-only reset path at startup and between
+        # episodes. Keeping a single entry point prevents the constructor from
+        # drifting back to legacy fixed-step reset arguments.
+        self.go_to_rest()
 
         # Read initial state (and prev_state for pose mode).
         self._state, self._prev_state = self._read_state_and_prev()
@@ -396,6 +483,14 @@ class DobotEnv(gym.Env):
                 f"{DobotRobotConfig._VALID_REWARD_MODES}, "
                 f"got {c.reward_mode!r}"
             )
+        if c.gripper_relative_threshold is not None and not (
+            0.0 < float(c.gripper_relative_threshold) < 1.0
+        ):
+            raise ValueError(
+                "gripper_relative_threshold must be in (0, 1), "
+                f"got {c.gripper_relative_threshold!r}"
+            )
+        c._validate_reset_config()
         resolution = tuple(int(v) for v in c.camera_resolution)
         if len(resolution) != 2 or any(v <= 0 for v in resolution):
             raise ValueError(
@@ -538,6 +633,31 @@ class DobotEnv(gym.Env):
             jp = jp + [0.0] * (6 - len(jp))
         return np.asarray(jp[:6], dtype=np.float64)
 
+    def _prepare_executed_action(self, action: np.ndarray) -> np.ndarray:
+        """Return the clipped command that will be sent to the controller.
+
+        The input action is never mutated. When relative gripper binarization is
+        enabled, only the final gripper component is changed; arm components
+        remain continuous.
+        """
+        executed_action = np.clip(
+            np.asarray(action, dtype=np.float32).reshape(-1),
+            self.action_space.low,
+            self.action_space.high,
+        ).copy()
+        if self._gripper_binarizer is None:
+            return executed_action
+
+        if self._state is None:
+            current_gripper = float(self.config.initial_joint_pos[-1])
+        else:
+            current_gripper = float(self._state.gripper_position)
+        executed_action[-1] = self._gripper_binarizer.map(
+            output_norm=float(executed_action[-1]),
+            current_norm=current_gripper,
+        )
+        return executed_action
+
     # ── Core gym API ─────────────────────────────────────────────────────────
 
     def step(self, action: np.ndarray):
@@ -575,15 +695,16 @@ class DobotEnv(gym.Env):
             truncated = self._num_steps >= self.config.max_num_steps
             return observation, reward, terminated, truncated, {}
 
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        executed_action = self._prepare_executed_action(action)
 
         is_gripper_effective = False
+        accepted = True
         if not self.config.is_dummy:
             # Periodic RobotMode health check (throttled to ~1 Hz).
             self._check_robot_health()
 
             accepted = self._controller.send_action(
-                action, action_mode=self.config.action_mode
+                executed_action, action_mode=self.config.action_mode
             ).wait()[0]
             if not accepted:
                 self._servo_rejected_count += 1
@@ -612,7 +733,11 @@ class DobotEnv(gym.Env):
             )
         truncated = self._num_steps >= self.config.max_num_steps
 
-        return observation, reward, terminated, truncated, {}
+        info = {
+            "executed_action": executed_action.copy(),
+            "action_command_accepted": bool(accepted),
+        }
+        return observation, reward, terminated, truncated, info
 
     @property
     def num_steps(self):
@@ -624,6 +749,8 @@ class DobotEnv(gym.Env):
         self._success_hold_counter = 0
         self._terminal_reward_computed = False
         if self.config.is_dummy:
+            if self._gripper_binarizer is not None:
+                self._gripper_binarizer.reset()
             return self._get_observation(), {}
 
         self._success_hold_counter = 0
@@ -633,13 +760,28 @@ class DobotEnv(gym.Env):
         # Clear pose tracker so first frame's prev_state = itself.
         self._controller.reset_pose_tracker().wait()
         self._state, self._prev_state = self._read_state_and_prev()
-        self._gripper_is_open = True
+        if self._gripper_binarizer is not None:
+            self._gripper_binarizer.reset()
         return self._get_observation(), {}
 
     def go_to_rest(self):
-        """Move to the rest configuration (joint space, always)."""
+        """Release the gripper, then reset with a guarded ServoJ trajectory."""
+        self._controller.assert_ready().wait()
+        self._controller.open_gripper().wait()
+        self._gripper_is_open = True
+        time.sleep(float(self.config.reset_gripper_release_settle_s))
         self._controller.reset_to_pose(
-            self._initial_joints_rad(), init_steps=60, init_fps=30
+            self._initial_joints_rad(),
+            reset_fps=self.config.reset_fps,
+            min_duration_s=self.config.reset_min_duration_s,
+            max_duration_s=self.config.reset_max_duration_s,
+            max_velocity_deg_s=self.config.reset_max_velocity_deg_s,
+            max_acceleration_deg_s2=self.config.reset_max_acceleration_deg_s2,
+            max_step_deg=self.config.reset_max_step_deg,
+            feedback_interval_frames=self.config.reset_feedback_interval_frames,
+            max_tracking_error_deg=self.config.reset_max_tracking_error_deg,
+            final_tolerance_deg=self.config.reset_final_tolerance_deg,
+            final_hold_frames=self.config.reset_final_hold_frames,
         ).wait()
         time.sleep(0.5)
 
