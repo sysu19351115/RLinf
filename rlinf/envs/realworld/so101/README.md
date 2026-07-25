@@ -59,15 +59,9 @@ override_cfg:
 - 机械臂位于训练初始位姿附近。
 - 工作空间无障碍物。
 
-## 单节点训练
+## 训练
 
-```bash
-python examples/embodiment/train_async.py --config-name so101_single_node_ppo_pi05
-```
-
-## 多节点（云端 GPU + 本地机器人）
-
-参考 `docs/examples/rebot_pi05_ppo_async.md` 拉起 Ray 集群，然后在 head 节点执行：
+参考 `docs/examples/so101_pi05_ppo_async.md` 拉起 Ray 集群，然后在 head 节点执行：
 
 ```bash
 python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05

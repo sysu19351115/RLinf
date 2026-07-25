@@ -98,7 +98,7 @@ env:
   group_name: "EnvGroup"
 
   train:
-    rollout_epoch: 2                    # Reduced vs single-node
+    rollout_epoch: 2                    # Reduced for async cross-node overhead
     ignore_terminations: False
     total_num_envs: 1
     max_episode_steps: 500
@@ -166,7 +166,7 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 10                # Reduced vs single-node for cloud footprint
+  micro_batch_size: 10                # Reduced for cloud footprint
   global_batch_size: 100              # 100 % 10 == 0; rollout_per_rank=100
   seed: 0
   enable_offload: False

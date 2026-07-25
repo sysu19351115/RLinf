@@ -439,7 +439,7 @@ def _calc_step_reward(self, observation, is_gripper_action_effective=False):
 
 ### Phase 5：配置 ReBot RL 训练 YAML
 
-在 `examples/embodiment/config/rebot_single_node_ppo_pi05.yaml` 中：
+在 `examples/embodiment/config/rebot_async_ppo_pi05.yaml` 中：
 
 ```yaml
 env:

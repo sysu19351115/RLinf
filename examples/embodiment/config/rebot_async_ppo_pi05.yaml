@@ -7,7 +7,6 @@ defaults:
   - override hydra/job_logging: stdout
 
 # ReBot Arm B601 + pi0.5 + Async PPO — cloud GPU + local robot
-# Cloud training footprint is intentionally kept smaller than the single-node config.
 
 cluster:
   num_nodes: 2
@@ -147,7 +146,7 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 10      # Reduced to keep cloud actor memory/compute below single-node
+  micro_batch_size: 10      # Reduced to keep cloud actor memory/compute manageable
   global_batch_size: 120     # 120 % 10 == 0; rollout_per_rank=1200 % 120 == 0 ✓
   seed: 0
   enable_offload: False
@@ -156,7 +155,7 @@ actor:
     model_path: "checkpoints/pi05_rebot_insertion_pytorch"
     model_type: "openpi"
     add_value_head: True
-    num_action_chunks: 4     # Reduced vs single-node (5) to lower sequence/output cost
+    num_action_chunks: 4     # Reduced to lower sequence/output cost
     action_dim: 7
     num_steps: 4
     openpi:
@@ -164,7 +163,7 @@ actor:
       value_after_vlm: True
       num_images_in_input: 1
       noise_method: "flow_ode" #"flow_noise"
-      action_horizon: 6        # Reduced vs single-node (8) to lower rollout/actor cost
+      action_horizon: 6        # Reduced to lower rollout/actor cost
       #noise_params: [0.16, 0.12, 200]
       joint_logprob: True
       action_chunk: ${actor.model.num_action_chunks}

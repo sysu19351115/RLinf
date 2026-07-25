@@ -3,7 +3,7 @@ Real-World RL with SO101 Bimanual Arms
 
 This document describes how to run real-world reinforcement learning on the
 **SO101** bimanual robot platform with RLinf. The example uses **pi0.5** as
-the vision-language-action model and **PPO** (async or single-node) as the
+the vision-language-action model and **PPO** (async) as the
 RL algorithm.
 
 The SO101 integration is based on LeRobot's ``BiSOFollower`` robot class and
@@ -168,8 +168,8 @@ Real-world training uses a two-node Ray cluster: one GPU node
 Configuration File
 ------------------
 
-Use ``examples/embodiment/config/so101_async_ppo_pi05.yaml`` for multi-node
-async training, or ``so101_single_node_ppo_pi05.yaml`` for a single machine.
+Use ``examples/embodiment/config/so101_async_ppo_pi05.yaml`` for async
+training.
 
 Fields that you should update for your setup:
 
@@ -240,11 +240,8 @@ After verification, launch real-world training from the GPU node:
 
 .. code-block:: bash
 
-   # Multi-node async PPO
+   # Async PPO
    python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05
-
-   # Single-node PPO
-   python examples/embodiment/train_async.py --config-name so101_single_node_ppo_pi05
 
 Reward Model (Recommended)
 --------------------------

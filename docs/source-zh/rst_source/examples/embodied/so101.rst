@@ -2,7 +2,7 @@ SO101 双臂真机强化学习
 ======================
 
 本文介绍如何在 **SO101** 双臂机器人平台上使用 RLinf 进行真机强化学习。
-示例采用 **pi0.5** 作为视觉-语言-动作模型，RL 算法为 **PPO**（支持异步多节点与单节点两种模式）。
+示例采用 **pi0.5** 作为视觉-语言-动作模型，RL 算法为 **PPO**（异步模式）。
 
 SO101 集成基于 LeRobot 的 ``BiSOFollower`` 机器人类与 OpenPI SO101 数据变换，
 整体流程与 :doc:`rebot`、:doc:`franka` 的真机 RL 示例一致。
@@ -152,8 +152,7 @@ RLinf 中已注册 OpenPI dataconfig ``pi05_so101``，会从此路径加载归�
 配置文件
 --------
 
-多节点异步训练使用 ``examples/embodiment/config/so101_async_ppo_pi05.yaml``，
-单节点使用 ``so101_single_node_ppo_pi05.yaml``。
+异步训练使用 ``examples/embodiment/config/so101_async_ppo_pi05.yaml``。
 
 需要按实际硬件修改的字段：
 
@@ -221,11 +220,8 @@ Dummy 训练（无硬件）
 
 .. code-block:: bash
 
-   # 多节点异步 PPO
+   # 异步 PPO
    python examples/embodiment/train_async.py --config-name so101_async_ppo_pi05
-
-   # 单节点 PPO
-   python examples/embodiment/train_async.py --config-name so101_single_node_ppo_pi05
 
 Reward Model（推荐）
 --------------------

@@ -7,7 +7,6 @@ defaults:
   - override hydra/job_logging: stdout
 
 # SO101 bimanual + pi0.5 + Async PPO — cloud GPU + local robot
-# Cloud training footprint is intentionally kept smaller than the single-node config.
 
 cluster:
   num_nodes: 2
