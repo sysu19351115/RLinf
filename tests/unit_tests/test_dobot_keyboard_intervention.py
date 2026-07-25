@@ -374,6 +374,101 @@ class TestWorkspaceClamp:
         assert action[1] == pytest.approx(-0.1)
 
 
+class TestBaseFrameRotation:
+    """Verify base_frame_euler_deg rotates translation correctly."""
+
+    def test_euler_zero_no_rotation(self):
+        """Default [0,0,0]: w increases X, a increases Y (unchanged)."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 0])
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("w")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        assert action[0] == pytest.approx(_DUMMY_POSE[0] + 0.002)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1])
+        env.close()
+
+    def test_rz_90_w_increases_y(self):
+        """rz=90°: w (physical +X) → base +Y."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("w")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        # cos(90°)≈0 (float), sin(90°)=1 → w adds to Y, not X
+        assert action[0] == pytest.approx(_DUMMY_POSE[0], abs=1e-6)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1] + 0.002, abs=1e-6)
+        env.close()
+
+    def test_rz_90_a_decreases_x(self):
+        """rz=90°: a (physical +Y) → base -X."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("a")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        assert action[0] == pytest.approx(_DUMMY_POSE[0] - 0.002, abs=1e-6)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1], abs=1e-6)
+        env.close()
+
+    def test_rz_90_q_unchanged(self):
+        """rz=90°: q still increases Z (Z-yaw doesn't rotate Z)."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("q")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        assert action[2] == pytest.approx(_DUMMY_POSE[2] + 0.002, abs=1e-6)
+        env.close()
+
+    def test_rx_180_q_decreases_z(self):
+        """rx=180° (upside-down): q (physical +Z) → base -Z."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            listener=FakeListener(),
+            base_frame_euler_deg=[180, 0, 0],
+            workspace_low=np.array([-0.5, -0.5, -0.5]),   # allow negative Z
+        )
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("q")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        # Upside-down: physical up (+Z) → base -Z
+        assert action[2] == pytest.approx(_DUMMY_POSE[2] - 0.002, abs=1e-6)
+        env.close()
+
+    def test_rotation_keys_unaffected(self):
+        """Base rotation does not affect tool-frame rotation keys."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("i")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        action = info["intervene_action"]
+        assert np.isclose(np.linalg.norm(action[3:7]), 1.0)
+        expected = Rotation.from_euler("x", 0.02).as_quat()
+        expected_wxyz = np.array([expected[3], expected[0], expected[1], expected[2]])
+        np.testing.assert_allclose(action[3:7], expected_wxyz, atol=1e-10)
+        env.close()
+
+
 class TestEpisodeEvents:
     def test_enter_saves_episode(self):
         env = _dummy_pose_env()

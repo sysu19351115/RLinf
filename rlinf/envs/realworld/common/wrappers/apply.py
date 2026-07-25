@@ -222,6 +222,7 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             gripper_delta=float(kcfg.get("gripper_delta", 0.05)),
             workspace_low=kcfg.get("workspace_low"),
             workspace_high=kcfg.get("workspace_high"),
+            base_frame_euler_deg=kcfg.get("base_frame_euler_deg", [0.0, 0.0, 0.0]),
             toggle_key=kcfg.get("toggle_key", "h"),
             model_key=kcfg.get("model_key", "m"),
             done_key=kcfg.get("done_key", "Key.enter"),

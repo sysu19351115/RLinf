@@ -27,9 +27,9 @@ Dobot 已使用 8 维绝对 Cartesian action：
 
 | 按键 | 行为 |
 |------|------|
-| `w` / `s` | 基坐标 X ± |
-| `a` / `d` | 基坐标 Y ± |
-| `q` / `e` | 基坐标 Z ± |
+| `w` / `s` | 物理前方 ±（经 `base_frame_yaw_deg` 旋转到基坐标系） |
+| `a` / `d` | 物理左方 ± |
+| `q` / `e` | 物理上方 ±（Z 轴不受旋转影响） |
 | `i` / `k` | 工具坐标 roll ± |
 | `j` / `l` | 工具坐标 pitch ± |
 | `u` / `o` | 工具坐标 yaw ± |
@@ -39,6 +39,16 @@ Dobot 已使用 8 维绝对 Cartesian action：
 | `Enter` | 成功结束并保存 episode |
 | `Backspace` | 丢弃当前 episode 并复位 |
 | `ESC` | 丢弃当前 episode、回到初始位姿并退出 |
+
+### 基坐标系旋转适配
+
+机械臂非标准正装时，操作者的物理方向直觉（前后左右上下）与基坐标系方向不一致。通过 `base_frame_euler_deg` 参数设置欧拉角（xyz 内旋顺序，单位度，`[rx, ry, rz]`），wrapper 自动把平移增量从物理坐标系转到基坐标系：
+
+- 标准正装：`base_frame_euler_deg: [0, 0, 0]`（默认，无需设置）
+- 侧装使物理"前方"对齐基坐标系 +Y：`base_frame_euler_deg: [0, 0, 90]`
+- 倒挂安装（物理"上方"对齐基坐标系 -Z）：`base_frame_euler_deg: [180, 0, 0]`
+
+旋转键（`i/k/j/l/u/o`）使用工具坐标系，不受此参数影响。
 
 推荐增量：`position_delta=0.002` (2mm)、`rotation_delta=0.02` (约1.15°)、`gripper_delta=0.05`。
 

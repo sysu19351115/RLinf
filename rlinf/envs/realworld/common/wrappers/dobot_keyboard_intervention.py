@@ -27,6 +27,7 @@ the keyboard. The wrapper returns the 8-dim absolute pose action directly.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
 import gymnasium as gym
 import numpy as np
@@ -106,6 +107,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         gripper_delta: float = 0.05,
         workspace_low: np.ndarray | None = None,
         workspace_high: np.ndarray | None = None,
+        base_frame_euler_deg: Sequence[float] | np.ndarray = (0.0, 0.0, 0.0),
         toggle_key: str = "h",
         model_key: str = "m",
         done_key: str = "Key.enter",
@@ -175,6 +177,19 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self.abort_key = abort_key
         self.quit_keys = tuple(quit_keys)
         self._start_in_engage = bool(start_in_engage)
+
+        # ── Base-frame rotation (physical → base frame) ──────────────────────
+        # Adapts keyboard translation for non-standard robot mounting.
+        # Rotates keyboard XYZ increments by the configured Euler angles
+        # (xyz intrinsic order, degrees: [rx, ry, rz]) so that operator-intuitive
+        # directions map to the correct base-frame axes. Tool-frame rotations
+        # (i/k/j/l/u/o) are unaffected (they use right-multiply in the tool
+        # frame, independent of the base frame).
+        euler = np.asarray(base_frame_euler_deg, dtype=np.float64).reshape(3)
+        self._base_frame_euler_deg = euler
+        self._base_rotation = Rotation.from_euler(
+            "xyz", euler, degrees=True
+        ).as_matrix()
 
         # ── Keyboard listener ────────────────────────────────────────────────
         if listener is not None:
@@ -299,23 +314,35 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._target_gripper = float(np.clip(pose[7], 0.0, 1.0))
 
     def _update_target(self) -> None:
-        """Apply continuous-key deltas to the target pose/gripper."""
+        """Apply continuous-key deltas to the target pose/gripper.
+
+        Translation keys (w/s/a/d/q/e) are rotated from the operator's physical
+        frame to the base frame via ``_base_rotation`` (3×3). Tool-frame
+        rotations (i/k/j/l/u/o) are unaffected (they use right-multiply in the
+        tool frame, independent of the base frame).
+        """
         key = self._current_held_key()
         if key is None:
             return
 
+        # ── Translation: rotate through _base_rotation (3×3) ──────────────────
+        phys_xyz: np.ndarray | None = None
         if key == "w":
-            self._target_position[0] += self.position_delta
+            phys_xyz = np.array([self.position_delta, 0.0, 0.0])
         elif key == "s":
-            self._target_position[0] -= self.position_delta
+            phys_xyz = np.array([-self.position_delta, 0.0, 0.0])
         elif key == "a":
-            self._target_position[1] += self.position_delta
+            phys_xyz = np.array([0.0, self.position_delta, 0.0])
         elif key == "d":
-            self._target_position[1] -= self.position_delta
+            phys_xyz = np.array([0.0, -self.position_delta, 0.0])
         elif key == "q":
-            self._target_position[2] += self.position_delta
+            phys_xyz = np.array([0.0, 0.0, self.position_delta])
         elif key == "e":
-            self._target_position[2] -= self.position_delta
+            phys_xyz = np.array([0.0, 0.0, -self.position_delta])
+
+        if phys_xyz is not None:
+            base_xyz = self._base_rotation @ phys_xyz
+            self._target_position += base_xyz
         elif key == "i":
             self._rotate_target("x", self.rotation_delta)
         elif key == "k":

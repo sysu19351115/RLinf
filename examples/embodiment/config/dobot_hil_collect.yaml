@@ -119,6 +119,11 @@ env:
       position_delta: 0.002        # 2 mm per control frame
       rotation_delta: 0.02         # ~1.15° per control frame
       gripper_delta: 0.05          # normalized [0, 1] per control frame
+      # Base-frame rotation: robot mounting Euler angles (ZYX intrinsic, degrees).
+      # [rx, ry, rz]. Standard upright = [0, 0, 0].
+      # Example: side-mounted with physical "forward" = base +Y → rz=90.
+      #          upside-down mounted → rx=180.
+      base_frame_euler_deg: [0, 0, 90]
       # Optional software workspace clamp. Leave both unset to rely on the
       # Dobot controller's hardware safety (max-jump guard + slew limiter).
       # Set both bounds to add an absolute workspace limit, e.g.:
