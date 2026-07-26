@@ -273,6 +273,7 @@ class TestStateMachine:
 
 class TestTranslation:
     def test_w_increases_x(self):
+        """w = forward = +X in standard Dobot base frame."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
         w.reset()
@@ -282,6 +283,21 @@ class TestTranslation:
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())  # w held
         action = info["intervene_action"]
         assert action[0] == pytest.approx(_DUMMY_POSE[0] + 0.002)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1])
+        env.close()
+
+    def test_a_increases_y(self):
+        """a = left = +Y in standard Dobot base frame."""
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())  # enter engage
+        w.listener.set_held("a")
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())  # a held
+        action = info["intervene_action"]
+        assert action[1] == pytest.approx(_DUMMY_POSE[1] + 0.002)
+        assert action[0] == pytest.approx(_DUMMY_POSE[0])
         env.close()
 
 
@@ -319,39 +335,27 @@ class TestRotation:
 class TestGripper:
     def test_comma_closes_gripper(self):
         env = _dummy_pose_env()
-        w = _make_wrapper(env, listener=FakeListener(), gripper_delta=0.05)
+        w = _make_wrapper(env, listener=FakeListener())
         w.reset()
         w.listener.press("h")
         w.step(_DUMMY_POSE.copy())  # enter engage
         w.listener.set_held(",")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        assert action[7] == pytest.approx(_DUMMY_POSE[7] - 0.05)
+        # Comma sets gripper to fully closed (0.0), absolute not incremental.
+        assert action[7] == pytest.approx(0.0)
 
     def test_period_opens_gripper(self):
         env = _dummy_pose_env()
-        w = _make_wrapper(env, listener=FakeListener(), gripper_delta=0.05)
+        w = _make_wrapper(env, listener=FakeListener())
         w.reset()
         w.listener.press("h")
         w.step(_DUMMY_POSE.copy())  # enter engage
         w.listener.set_held(".")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        assert action[7] == pytest.approx(_DUMMY_POSE[7] + 0.05)
-
-    def test_gripper_clamped_0_1(self):
-        env = _dummy_pose_env()
-        w = _make_wrapper(env, listener=FakeListener(), gripper_delta=0.5)
-        w.reset()
-        w.listener.press("h")
-        w.step(_DUMMY_POSE.copy())  # enter engage
-        w._target_gripper = 0.0
-        w.listener.set_held(",")
-        _, _, _, _, info = w.step(
-            np.array([0, 0, 0, 1, 0, 0, 0, 0], dtype=np.float64)
-        )
-        action = info["intervene_action"]
-        assert action[7] == 0.0
+        # Period sets gripper to fully open (1.0), absolute not incremental.
+        assert action[7] == pytest.approx(1.0)
 
 
 class TestWorkspaceClamp:
@@ -370,7 +374,7 @@ class TestWorkspaceClamp:
         w.listener.set_held("d")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        # 'd' decreases Y; 0 - 10.0 clamped to workspace_low Y = -0.1
+        # 'd' = right = -Y; 0 - 10.0 clamped to workspace_low Y = -0.1
         assert action[1] == pytest.approx(-0.1)
 
 
@@ -378,7 +382,7 @@ class TestBaseFrameRotation:
     """Verify base_frame_euler_deg rotates translation correctly."""
 
     def test_euler_zero_no_rotation(self):
-        """Default [0,0,0]: w increases X, a increases Y (unchanged)."""
+        """Default [0,0,0]: w increases X (forward), a increases Y (left)."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 0])
         w.reset()
@@ -392,7 +396,7 @@ class TestBaseFrameRotation:
         env.close()
 
     def test_rz_90_w_increases_y(self):
-        """rz=90°: w (physical +X) → base +Y."""
+        """rz=90°: w (physical +X=[1,0,0]) → base +Y."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
         w.reset()
@@ -401,13 +405,13 @@ class TestBaseFrameRotation:
         w.listener.set_held("w")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        # cos(90°)≈0 (float), sin(90°)=1 → w adds to Y, not X
+        # [1,0,0] rotated 90° around Z → [0,1,0]
         assert action[0] == pytest.approx(_DUMMY_POSE[0], abs=1e-6)
         assert action[1] == pytest.approx(_DUMMY_POSE[1] + 0.002, abs=1e-6)
         env.close()
 
     def test_rz_90_a_decreases_x(self):
-        """rz=90°: a (physical +Y) → base -X."""
+        """rz=90°: a (physical +Y=[0,1,0]) → base -X."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
         w.reset()
@@ -416,6 +420,7 @@ class TestBaseFrameRotation:
         w.listener.set_held("a")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
+        # [0,1,0] rotated 90° around Z → [-1,0,0]
         assert action[0] == pytest.approx(_DUMMY_POSE[0] - 0.002, abs=1e-6)
         assert action[1] == pytest.approx(_DUMMY_POSE[1], abs=1e-6)
         env.close()

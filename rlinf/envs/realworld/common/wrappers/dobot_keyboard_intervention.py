@@ -326,6 +326,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             return
 
         # ── Translation: rotate through _base_rotation (3×3) ──────────────────
+        # Keyboard mapping (physical frame): w/s = front/back (+/-X),
+        # a/d = left/right (+/-Y), q/e = up/down (+/-Z). These map directly to
+        # the standard Dobot base frame where +X is "forward" and +Y is "left".
         phys_xyz: np.ndarray | None = None
         if key == "w":
             phys_xyz = np.array([self.position_delta, 0.0, 0.0])
@@ -347,18 +350,18 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             self._rotate_target("x", self.rotation_delta)
         elif key == "k":
             self._rotate_target("x", -self.rotation_delta)
-        elif key == "j":
-            self._rotate_target("y", self.rotation_delta)
         elif key == "l":
+            self._rotate_target("y", self.rotation_delta)
+        elif key == "j":
             self._rotate_target("y", -self.rotation_delta)
-        elif key == "u":
-            self._rotate_target("z", self.rotation_delta)
         elif key == "o":
+            self._rotate_target("z", self.rotation_delta)
+        elif key == "u":
             self._rotate_target("z", -self.rotation_delta)
         elif key in (",", "Key.comma"):
-            self._target_gripper = max(0.0, self._target_gripper - self.gripper_delta)
+            self._target_gripper = 0.0
         elif key in (".", "Key.dot"):
-            self._target_gripper = min(1.0, self._target_gripper + self.gripper_delta)
+            self._target_gripper = 1.0
         else:
             return
 
@@ -472,6 +475,10 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._model_action_valid = False  # consume
 
         new_action, replaced = self.action(model_action)
+        if replaced:
+            # ENGAGE frame: skip RelativeGripperBinarizer so keyboard's
+            # absolute 0/1 gripper commands pass through directly.
+            self.get_wrapper_attr("set_gripper_bypass")(True)
         obs, rew, done, truncated, info = self.env.step(new_action)
 
         info["model_action"] = model_action

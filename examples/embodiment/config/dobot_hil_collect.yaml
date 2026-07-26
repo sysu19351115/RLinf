@@ -94,8 +94,8 @@ env:
       max_num_steps: 100000
       step_frequency: 30.0
       initial_joint_pos: [-5.87, -0.799, -2.175, 1.89, 1.424, 0.621, 0.9]
-      # Stateful relative gripper control: executed/recorded gripper actions
-      # latch to 0 (closed) or 1 (open), suppressing small policy fluctuations.
+      # MODEL frames use RelativeGripperBinarizer to latch gripper to 0/1.
+      # ENGAGE frames (keyboard comma/period) bypass it via set_gripper_bypass.
       gripper_relative_threshold: 0.2
       # ServoJ-only reset. The adaptive minimum-jerk planner fails closed when
       # these limits cannot be satisfied and never falls back to MovJ.
@@ -119,11 +119,11 @@ env:
       position_delta: 0.002        # 2 mm per control frame
       rotation_delta: 0.02         # ~1.15° per control frame
       gripper_delta: 0.05          # normalized [0, 1] per control frame
-      # Base-frame rotation: robot mounting Euler angles (ZYX intrinsic, degrees).
-      # [rx, ry, rz]. Standard upright = [0, 0, 0].
-      # Example: side-mounted with physical "forward" = base +Y → rz=90.
-      #          upside-down mounted → rx=180.
-      base_frame_euler_deg: [0, 0, 90]
+      # Base-frame rotation: robot mounting Euler angles (xyz intrinsic, degrees).
+      # [rx, ry, rz]. Standard upright = [0, 0, 0] (no rotation needed:
+      # w=+X forward, a=+Y left, q=+Z up).
+      # Example: upside-down mounted → rx=180.
+      base_frame_euler_deg: [0, 0, 0]
       # Optional software workspace clamp. Leave both unset to rely on the
       # Dobot controller's hardware safety (max-jump guard + slew limiter).
       # Set both bounds to add an absolute workspace limit, e.g.:
@@ -155,7 +155,7 @@ env:
 
 actor:
   model:
-    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch}
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_1200_torch}
     model_type: "openpi"
     precision: bfloat16
     add_value_head: false
@@ -174,4 +174,4 @@ actor:
       num_steps: ${actor.model.num_steps}
     openpi_data:
       repo_id: ""
-      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265_pose/norm_stats.json}
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_train_1200_torch/assets/dobot_cf5af_t265_pose/norm_stats.json}

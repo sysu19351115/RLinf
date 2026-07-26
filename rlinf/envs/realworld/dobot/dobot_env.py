@@ -381,6 +381,7 @@ class DobotEnv(gym.Env):
             if self.config.gripper_relative_threshold is not None
             else None
         )
+        self._skip_gripper_binarizer = False
 
         if not self.config.is_dummy:
             self._setup_hardware()
@@ -638,14 +639,21 @@ class DobotEnv(gym.Env):
 
         The input action is never mutated. When relative gripper binarization is
         enabled, only the final gripper component is changed; arm components
-        remain continuous.
+        remain continuous. Set ``skip_gripper_binarizer=True`` (via
+        :meth:`set_gripper_bypass`) to pass the gripper value through directly —
+        used by the HIL keyboard wrapper to issue absolute open/close commands.
         """
         executed_action = np.clip(
             np.asarray(action, dtype=np.float32).reshape(-1),
             self.action_space.low,
             self.action_space.high,
         ).copy()
-        if self._gripper_binarizer is None:
+        if self._gripper_binarizer is None or self._skip_gripper_binarizer:
+            self._skip_gripper_binarizer = False
+            # Sync binarizer state so MODEL→ENGAGE→MODEL transitions don't
+            # produce stale latch decisions.
+            if self._gripper_binarizer is not None:
+                self._gripper_binarizer._state = float(executed_action[-1])
             return executed_action
 
         if self._state is None:
@@ -845,6 +853,15 @@ class DobotEnv(gym.Env):
         """
         if not self.config.is_dummy:
             self._controller.engage().wait()
+
+    def set_gripper_bypass(self, skip: bool) -> None:
+        """Skip the RelativeGripperBinarizer for the next step.
+
+        Used by the HIL keyboard wrapper to issue absolute gripper commands
+        (0/1) that should not be re-latched by the relative binarizer. The flag
+        is auto-consumed after one step.
+        """
+        self._skip_gripper_binarizer = bool(skip)
 
     def _read_state_and_prev(self) -> tuple:
         """Read (state, prev_state) from the controller.
