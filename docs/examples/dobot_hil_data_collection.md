@@ -27,15 +27,16 @@ Dobot 已使用 8 维绝对 Cartesian action：
 
 | 按键 | 行为 |
 |------|------|
-| `w` / `s` | 前方 / 后方（基坐标 ±X，经 `base_frame_euler_deg` 旋转） |
-| `a` / `d` | 左方 / 右方（基坐标 ±Y） |
+| `w` / `s` | 后方 / 前方（镜像模式，面对机械臂操作） |
+| `a` / `d` | 右方 / 左方（镜像模式） |
 | `q` / `e` | 上方 / 下方（基坐标 ±Z） |
 | `i` / `k` | 工具坐标 roll ± |
-| `l` / `j` | 工具坐标 pitch ± |
-| `o` / `u` | 工具坐标 yaw ± |
+| `j` / `l` | 工具坐标 pitch ± |
+| `u` / `o` | 工具坐标 yaw ± |
 | `,` / `.` | 夹爪闭 / 开 |
 | `h` | MODEL ↔ ENGAGE |
 | `m` | 返回 MODEL |
+| `y` | 开始录制（按此键后执行 reset 并开始本条 episode） |
 | `Enter` | 成功结束并保存 episode |
 | `Backspace` | 丢弃当前 episode 并复位 |
 | `ESC` | 丢弃当前 episode、回到初始位姿并退出 |
@@ -202,6 +203,27 @@ python examples/embodiment/inspect_dobot_hil_dataset.py \
 - prev_state 连续性
 - 每条 episode 最后一帧 `done=True`
 - 至少一帧 `intervene_flag=True`
+
+## 合并数据集
+
+采集会跨会话产生多个 shard（`rank_0/id_0`、`rank_0/id_1`、…），每个 shard 是独立的 LeRobot 数据集。训练前需要合并为一个目录：
+
+```bash
+python toolkits/lerobot/merge_lerobot_datasets.py \
+    --source-dir logs/dobot_hil_collect/collected_data/<session>/rank_0 \
+    --output-dir logs/dobot_hil_collect/merged_data
+```
+
+合并后的 `merged_data/` 包含全局重新编号的 episode，可直接用于训练。支持多个会话目录一起合并：
+
+```bash
+python toolkits/lerobot/merge_lerobot_datasets.py \
+    --source-dir logs/dobot_hil_collect/collected_data/<session_1>/rank_0 \
+                   logs/dobot_hil_collect/collected_data/<session_2>/rank_0 \
+    --output-dir logs/dobot_hil_collect/merged_data
+```
+
+加 `--dry-run` 可预览将合并哪些 shard 而不实际写文件。
 
 ## 数据恢复
 

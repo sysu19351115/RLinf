@@ -69,6 +69,10 @@ runner:
   num_data_episodes: 10000       # large cap; operator stops via ESC
   record_task_description: False
 
+  # After each reset, pause and wait for 'y' key before starting the episode.
+  # Set to false to start immediately after reset.
+  wait_for_start_key: true
+
 env:
   group_name: "EnvGroup"
 

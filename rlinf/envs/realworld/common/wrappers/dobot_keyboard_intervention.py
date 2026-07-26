@@ -242,6 +242,30 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         """
         self._model_action_valid = bool(valid)
 
+    def wait_for_start_key(self, key: str = "y") -> None:
+        """Block until the operator presses *key* to start the episode.
+
+        Polls the keyboard listener at ~20 Hz. In dummy mode (where the
+        listener is a ``_DummyKeyboardListener``), returns immediately so
+        automated tests are not blocked.
+
+        Call this *before* ``env.reset()`` so the reset obs is fresh.
+        """
+        if isinstance(self.listener, _DummyKeyboardListener):
+            return
+        get_logger().info(
+            "[DobotKeyboardIntervention] Press '%s' to start the next episode.", key
+        )
+        while True:
+            pressed = self.listener.pop_pressed_keys()
+            if key in pressed:
+                break
+            time.sleep(0.05)
+        get_logger().info(
+            "[DobotKeyboardIntervention] Start key '%s' pressed. Recording begins.",
+            key,
+        )
+
     # ── Reset / lifecycle ────────────────────────────────────────────────────
 
     def reset(self, **kwargs):
@@ -326,18 +350,18 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             return
 
         # ── Translation: rotate through _base_rotation (3×3) ──────────────────
-        # Keyboard mapping (physical frame): w/s = front/back (+/-X),
-        # a/d = left/right (+/-Y), q/e = up/down (+/-Z). These map directly to
-        # the standard Dobot base frame where +X is "forward" and +Y is "left".
+        # Mirror-mode keyboard mapping for face-to-face operation:
+        # w/s = back/front (operator's perspective is mirrored),
+        # a/d = right/left, q/e = up/down (up is unchanged).
         phys_xyz: np.ndarray | None = None
         if key == "w":
-            phys_xyz = np.array([self.position_delta, 0.0, 0.0])
-        elif key == "s":
             phys_xyz = np.array([-self.position_delta, 0.0, 0.0])
+        elif key == "s":
+            phys_xyz = np.array([self.position_delta, 0.0, 0.0])
         elif key == "a":
-            phys_xyz = np.array([0.0, self.position_delta, 0.0])
-        elif key == "d":
             phys_xyz = np.array([0.0, -self.position_delta, 0.0])
+        elif key == "d":
+            phys_xyz = np.array([0.0, self.position_delta, 0.0])
         elif key == "q":
             phys_xyz = np.array([0.0, 0.0, self.position_delta])
         elif key == "e":
@@ -350,13 +374,13 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             self._rotate_target("x", self.rotation_delta)
         elif key == "k":
             self._rotate_target("x", -self.rotation_delta)
-        elif key == "l":
-            self._rotate_target("y", self.rotation_delta)
         elif key == "j":
+            self._rotate_target("y", self.rotation_delta)
+        elif key == "l":
             self._rotate_target("y", -self.rotation_delta)
-        elif key == "o":
-            self._rotate_target("z", self.rotation_delta)
         elif key == "u":
+            self._rotate_target("z", self.rotation_delta)
+        elif key == "o":
             self._rotate_target("z", -self.rotation_delta)
         elif key in (",", "Key.comma"):
             self._target_gripper = 0.0

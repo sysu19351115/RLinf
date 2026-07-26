@@ -272,8 +272,8 @@ class TestStateMachine:
 
 
 class TestTranslation:
-    def test_w_increases_x(self):
-        """w = forward = +X in standard Dobot base frame."""
+    def test_w_decreases_x(self):
+        """Mirror mode: w = operator's forward = robot's back = -X."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
         w.reset()
@@ -282,12 +282,12 @@ class TestTranslation:
         w.listener.set_held("w")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())  # w held
         action = info["intervene_action"]
-        assert action[0] == pytest.approx(_DUMMY_POSE[0] + 0.002)
+        assert action[0] == pytest.approx(_DUMMY_POSE[0] - 0.002)
         assert action[1] == pytest.approx(_DUMMY_POSE[1])
         env.close()
 
-    def test_a_increases_y(self):
-        """a = left = +Y in standard Dobot base frame."""
+    def test_a_decreases_y(self):
+        """Mirror mode: a = operator's left = robot's right = -Y."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
         w.reset()
@@ -296,7 +296,7 @@ class TestTranslation:
         w.listener.set_held("a")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())  # a held
         action = info["intervene_action"]
-        assert action[1] == pytest.approx(_DUMMY_POSE[1] + 0.002)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1] - 0.002)
         assert action[0] == pytest.approx(_DUMMY_POSE[0])
         env.close()
 
@@ -374,15 +374,15 @@ class TestWorkspaceClamp:
         w.listener.set_held("d")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        # 'd' = right = -Y; 0 - 10.0 clamped to workspace_low Y = -0.1
-        assert action[1] == pytest.approx(-0.1)
+        # Mirror mode: d = operator's right = robot's left = +Y; 0 + 10.0 clamped to workspace_high Y = 0.1
+        assert action[1] == pytest.approx(0.1)
 
 
 class TestBaseFrameRotation:
     """Verify base_frame_euler_deg rotates translation correctly."""
 
     def test_euler_zero_no_rotation(self):
-        """Default [0,0,0]: w increases X (forward), a increases Y (left)."""
+        """Mirror mode, [0,0,0]: w decreases X (back), a decreases Y (right)."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 0])
         w.reset()
@@ -391,12 +391,12 @@ class TestBaseFrameRotation:
         w.listener.set_held("w")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        assert action[0] == pytest.approx(_DUMMY_POSE[0] + 0.002)
+        assert action[0] == pytest.approx(_DUMMY_POSE[0] - 0.002)
         assert action[1] == pytest.approx(_DUMMY_POSE[1])
         env.close()
 
-    def test_rz_90_w_increases_y(self):
-        """rz=90°: w (physical +X=[1,0,0]) → base +Y."""
+    def test_rz_90_w_decreases_y(self):
+        """rz=90°: w (mirror -X=[-1,0,0]) → base -Y."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
         w.reset()
@@ -405,13 +405,13 @@ class TestBaseFrameRotation:
         w.listener.set_held("w")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        # [1,0,0] rotated 90° around Z → [0,1,0]
+        # [-1,0,0] rotated 90° around Z → [0,-1,0]
         assert action[0] == pytest.approx(_DUMMY_POSE[0], abs=1e-6)
-        assert action[1] == pytest.approx(_DUMMY_POSE[1] + 0.002, abs=1e-6)
+        assert action[1] == pytest.approx(_DUMMY_POSE[1] - 0.002, abs=1e-6)
         env.close()
 
-    def test_rz_90_a_decreases_x(self):
-        """rz=90°: a (physical +Y=[0,1,0]) → base -X."""
+    def test_rz_90_a_increases_x(self):
+        """rz=90°: a (mirror -Y=[0,-1,0]) → base +X."""
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener(), base_frame_euler_deg=[0, 0, 90])
         w.reset()
@@ -420,8 +420,8 @@ class TestBaseFrameRotation:
         w.listener.set_held("a")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
         action = info["intervene_action"]
-        # [0,1,0] rotated 90° around Z → [-1,0,0]
-        assert action[0] == pytest.approx(_DUMMY_POSE[0] - 0.002, abs=1e-6)
+        # [0,-1,0] rotated 90° around Z → [1,0,0]
+        assert action[0] == pytest.approx(_DUMMY_POSE[0] + 0.002, abs=1e-6)
         assert action[1] == pytest.approx(_DUMMY_POSE[1], abs=1e-6)
         env.close()
 

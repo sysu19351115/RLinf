@@ -141,6 +141,10 @@ class DobotHILCollector(Worker):
         self._action_queue: np.ndarray | None = None
         # After ENGAGE -> MODEL, execute one hold step for a fresh observation.
         self._pending_model_hold_step = False
+        # Whether to wait for the operator's 'y' key after each reset.
+        self._wait_for_start_key = bool(
+            eval_cfg.get("wait_for_start_key", True)
+        )
 
     def _load_policy(self):
         model_cfg = self.cfg.actor.model
@@ -275,6 +279,7 @@ class DobotHILCollector(Worker):
             desc="Collecting Dobot HIL episodes",
         )
         try:
+            self._wait_for_episode_start()
             obs, _ = self.env.reset()
             self._action_queue = None
             self._pending_model_hold_step = False
@@ -344,6 +349,7 @@ class DobotHILCollector(Worker):
                         "Abort requested by operator (Backspace); resetting "
                         "without saving current episode."
                     )
+                    self._wait_for_episode_start()
                     obs, _ = self.env.reset()
                     self._action_queue = None
                     self._pending_model_hold_step = False
@@ -357,6 +363,7 @@ class DobotHILCollector(Worker):
                     progress.update(1)
                     if episodes_done < self.num_episodes:
                         self.log_info(f"Episode {episodes_done} saved; continuing.")
+                        self._wait_for_episode_start()
                         obs, _ = self.env.reset()
                         self._action_queue = None
                         self._pending_model_hold_step = False
@@ -399,6 +406,28 @@ class DobotHILCollector(Worker):
             "Could not find DobotKeyboardIntervention with set_model_action_valid "
             "in the env stack. Ensure the keyboard wrapper is applied."
         )
+
+    def _wait_for_episode_start(self) -> None:
+        """Block until the operator presses 'y' to start the next episode.
+
+        Skipped in dummy mode (the wrapper's listener is a no-op) or when
+        ``wait_for_start_key`` is disabled in config. Call this *before*
+        ``env.reset()`` so the returned obs is fresh.
+        """
+        if not self._wait_for_start_key:
+            return
+        env = self.env
+        while True:
+            if hasattr(env, "wait_for_start_key"):
+                env.wait_for_start_key()
+                return
+            if hasattr(env, "envs") and hasattr(env, "call"):
+                env.call("wait_for_start_key")
+                return
+            if hasattr(env, "env"):
+                env = env.env
+            else:
+                break
 
 
 @hydra.main(
