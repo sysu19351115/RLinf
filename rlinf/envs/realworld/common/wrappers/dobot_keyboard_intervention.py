@@ -49,6 +49,12 @@ class _DummyKeyboardListener:
     def get_keys(self) -> frozenset[str]:
         return frozenset()
 
+    def is_connected(self) -> bool:
+        return True
+
+    def fatal_error(self) -> str | None:
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Quaternion helpers (env/wrapper/dataset always use wxyz; scipy uses xyzw).
@@ -119,6 +125,10 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         abort_key: str = "Key.backspace",
         quit_keys: tuple[str, ...] = ("Key.esc",),
         start_in_engage: bool = False,
+        episode_control_mode: str = "collector",
+        wait_for_start_on_reset: bool = False,
+        start_key: str = "y",
+        start_gate_timeout_s: float | None = None,
         listener=None,
     ):
         super().__init__(env)
@@ -147,6 +157,16 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             raise ValueError(f"rotation_delta must be positive, got {rotation_delta}.")
         if gripper_delta <= 0:
             raise ValueError(f"gripper_delta must be positive, got {gripper_delta}.")
+        if episode_control_mode not in ("collector", "online"):
+            raise ValueError(
+                "episode_control_mode must be 'collector' or 'online', "
+                f"got {episode_control_mode!r}."
+            )
+        if start_gate_timeout_s is not None and start_gate_timeout_s <= 0:
+            raise ValueError(
+                "start_gate_timeout_s must be positive or None, "
+                f"got {start_gate_timeout_s}."
+            )
 
         # ── Validate workspace (optional software safety layer) ──────────────
         # The Dobot controller's SDK already enforces a hard max-jump guard
@@ -186,6 +206,10 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self.abort_key = abort_key
         self.quit_keys = tuple(quit_keys)
         self._start_in_engage = bool(start_in_engage)
+        self._episode_control_mode = episode_control_mode
+        self._wait_for_start_on_reset = bool(wait_for_start_on_reset)
+        self._start_key = start_key
+        self._start_gate_timeout_s = start_gate_timeout_s
 
         # ── Base-frame rotation (physical → base frame) ──────────────────────
         # Adapts keyboard translation for non-standard robot mounting.
@@ -236,6 +260,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._episode_save = False
         self._episode_abort = False
         self._quit_program = False
+        self._episode_closed = False
 
         # model_action_valid: set by the collector before each step to indicate
         # whether the incoming action came from a real model inference.
@@ -251,7 +276,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         """
         self._model_action_valid = bool(valid)
 
-    def wait_for_start_key(self, key: str = "y") -> None:
+    def wait_for_start_key(self, key: str | None = None) -> None:
         """Block until the operator presses *key* to start the episode.
 
         Polls the keyboard listener at ~20 Hz. In dummy mode (where the
@@ -260,15 +285,43 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
 
         Call this *before* ``env.reset()`` so the reset obs is fresh.
         """
+        if key is None:
+            key = self._start_key
         if isinstance(self.listener, _DummyKeyboardListener):
             return
         get_logger().info(
             "[DobotKeyboardIntervention] Press '%s' to start the next episode.", key
         )
+        deadline = (
+            None
+            if self._start_gate_timeout_s is None
+            else time.monotonic() + self._start_gate_timeout_s
+        )
         while True:
             pressed = self.listener.pop_pressed_keys()
+            if any(pressed_key in self.quit_keys for pressed_key in pressed):
+                raise RuntimeError("Operator cancelled the start gate.")
             if key in pressed:
                 break
+            fatal_error = (
+                self.listener.fatal_error()
+                if hasattr(self.listener, "fatal_error")
+                else None
+            )
+            if fatal_error is not None:
+                raise RuntimeError(
+                    f"Keyboard listener failed while waiting to start: {fatal_error}"
+                )
+            if deadline is not None and time.monotonic() >= deadline:
+                connected = (
+                    self.listener.is_connected()
+                    if hasattr(self.listener, "is_connected")
+                    else None
+                )
+                raise TimeoutError(
+                    "Timed out waiting for the operator start key "
+                    f"{key!r}; keyboard_connected={connected}."
+                )
             time.sleep(0.05)
         get_logger().info(
             "[DobotKeyboardIntervention] Start key '%s' pressed. Recording begins.",
@@ -278,6 +331,8 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
     # ── Reset / lifecycle ────────────────────────────────────────────────────
 
     def reset(self, **kwargs):
+        if self._wait_for_start_on_reset:
+            self.wait_for_start_key()
         # Start in a safe MODEL state until the env has been reset and we can
         # read the real TCP pose.
         self._state = "model"
@@ -286,11 +341,14 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._target_position = np.zeros(3, dtype=np.float64)
         self._target_quaternion_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._target_gripper = 0.5
+        self._model_action_valid = False
+        obs, info = self.env.reset(**kwargs)
+        # Clear the episode latch only after the underlying reset succeeds.
+        # A failed reset must leave all future actions blocked.
         self._episode_save = False
         self._episode_abort = False
         self._quit_program = False
-        self._model_action_valid = False
-        obs, info = self.env.reset(**kwargs)
+        self._episode_closed = False
         # Only now (after env.reset) can we safely read the real TCP pose.
         if self._start_in_engage:
             self._initialize_target_from_current_pose()
@@ -337,6 +395,19 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         if keys:
             get_logger().info("[DobotKeyboardIntervention] held keys: %s", sorted(keys))
         return keys
+
+    def _listener_failure_reason(self) -> str | None:
+        """Return a fail-closed reason when keyboard intervention is unavailable."""
+        fatal_error = (
+            self.listener.fatal_error()
+            if hasattr(self.listener, "fatal_error")
+            else None
+        )
+        if fatal_error is not None:
+            return "keyboard_listener_error"
+        if hasattr(self.listener, "is_connected") and not self.listener.is_connected():
+            return "keyboard_disconnected"
+        return None
 
     # ── Target updates ──────────────────────────────────────────────────────
 
@@ -479,12 +550,16 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         if event == "quit":
             next_state = "model"
             self._quit_program = True
+            self._episode_closed = True
         elif event == "abort":
             next_state = "model"
             self._episode_abort = True
+            if self._episode_control_mode == "online":
+                self._episode_closed = True
         elif event == "done":
             next_state = "model"
             self._episode_save = True
+            self._episode_closed = True
         elif event == "model":
             next_state = "model"
         elif event == "toggle":
@@ -511,7 +586,38 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         return action_out, True
 
     def step(self, action):
+        if self._episode_closed:
+            raise RuntimeError(
+                "The operator has ended this episode; reset() is required "
+                "before another action can be executed."
+            )
         model_action = np.asarray(action, dtype=np.float64)
+        listener_failure = self._listener_failure_reason()
+        if listener_failure is not None:
+            # Do not execute an unmonitored model action. Sending the measured
+            # pose back as the absolute target produces a local hold while the
+            # episode is failed closed.
+            hold_action = np.asarray(
+                self.get_wrapper_attr("get_pose_state")(), dtype=np.float64
+            ).reshape(8)
+            self.get_wrapper_attr("set_gripper_bypass")(True)
+            obs, rew, done, truncated, info = self.env.step(hold_action)
+            self._state = "model"
+            self._model_action_valid = False
+            info["model_action"] = model_action
+            info["model_action_valid"] = np.array([False], dtype=bool)
+            info["hil_event"] = "abort"
+            info["termination_reason"] = listener_failure
+            info["keyboard_connected"] = False
+            info["success_once"] = np.array([False], dtype=bool)
+            if self._episode_control_mode == "online":
+                self._episode_closed = True
+                info["operator_episode_end"] = True
+                info["operator_success"] = False
+                truncated = True
+            info["hil_state"] = self._state
+            return obs, rew, done, truncated, info
+
         # Snapshot the valid flag before the step consumes it.
         model_action_valid = self._model_action_valid
         self._model_action_valid = False  # consume
@@ -540,11 +646,32 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             rew = 1.0
             done = True
             info["hil_event"] = "save"
+            info["termination_reason"] = "operator_success"
+            info["operator_episode_end"] = True
+            info["operator_success"] = True
             info["success_once"] = np.array([True], dtype=bool)
         elif self._episode_abort:
             info["hil_event"] = "abort"
+            info["termination_reason"] = "operator_abort"
+            info["success_once"] = np.array([False], dtype=bool)
+            if self._episode_control_mode == "online":
+                info["operator_episode_end"] = True
+                info["operator_success"] = False
+                truncated = True
         if self._quit_program:
             info["quit_program"] = True
+            info["operator_shutdown_requested"] = True
+            info["termination_reason"] = "operator_quit"
+            info["success_once"] = np.array([False], dtype=bool)
+            if self._episode_control_mode == "online":
+                info["operator_episode_end"] = True
+                info["operator_success"] = False
+                truncated = True
 
         info["hil_state"] = self._state
+        # Edge events are reported once. _episode_closed remains latched for
+        # terminal events so missing a consumer can never resume motion.
+        self._episode_save = False
+        self._episode_abort = False
+        self._quit_program = False
         return obs, rew, done, truncated, info

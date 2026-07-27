@@ -207,6 +207,7 @@ def _make_collector(policy_mode="dummy", num_episodes=3, **overrides):
     collector._action_queue = None
     collector._pending_model_hold_step = False
     collector._preexisting = 0
+    collector._wait_for_start_key = False
 
     # Inject fake env.
     fake_kb = FakeKeyboardWrapper()

@@ -62,6 +62,8 @@ class FakeListener:
         self._presses: deque[str] = deque(press_sequence or [])
         self._held_keys = {held} if held is not None else set()
         self._latest_held = held
+        self._connected = True
+        self._fatal_error = None
 
     def pop_pressed_keys(self) -> list[str]:
         if self._presses:
@@ -88,6 +90,12 @@ class FakeListener:
         self._held_keys = set(keys)
         self._latest_held = keys[-1] if keys else None
 
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def fatal_error(self) -> str | None:
+        return self._fatal_error
+
 
 def _bare_keyboard_listener() -> KeyboardListener:
     """Construct KeyboardListener state without opening an evdev device."""
@@ -96,6 +104,9 @@ def _bare_keyboard_listener() -> KeyboardListener:
     listener.latest_data = {"key": None}
     listener._held_keys = {}
     listener._press_events = deque()
+    listener._connected = threading.Event()
+    listener._connected.set()
+    listener._fatal_error = None
     return listener
 
 
@@ -158,6 +169,276 @@ class TestKeyboardListenerHeldKeys:
 
         assert listener.get_keys() == frozenset()
         assert listener.get_key() is None
+
+    def test_listener_health_state_is_observable(self):
+        listener = _bare_keyboard_listener()
+
+        assert listener.is_connected()
+        assert listener.fatal_error() is None
+
+        listener._connected.clear()
+        listener._fatal_error = "device read failed"
+
+        assert not listener.is_connected()
+        assert listener.fatal_error() == "device read failed"
+
+    def test_unexpected_listener_thread_error_is_fail_closed(self):
+        class FailingDevice:
+            path = "/dev/input/fake-keyboard"
+
+            @staticmethod
+            def read_loop():
+                raise RuntimeError("unexpected read failure")
+                yield
+
+        listener = _bare_keyboard_listener()
+        listener.device = FailingDevice()
+        listener._update_key_state("w", 1)
+
+        listener._listen_loop()
+
+        assert not listener.is_connected()
+        assert "unexpected read failure" in listener.fatal_error()
+        assert listener.get_keys() == frozenset()
+
+
+class TestEpisodeControlMode:
+    def test_rejects_unknown_mode(self):
+        env = _dummy_pose_env()
+        with pytest.raises(ValueError, match="episode_control_mode"):
+            _make_wrapper(env, episode_control_mode="unsafe")
+        env.close()
+
+    def test_collector_abort_keeps_episode_open(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="collector")
+        w.reset()
+        w.listener.press("Key.backspace")
+
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert not truncated
+        assert info["hil_event"] == "abort"
+        assert info["termination_reason"] == "operator_abort"
+        assert "operator_episode_end" not in info
+        env.close()
+
+    def test_online_abort_truncates_as_failure(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="online")
+        w.reset()
+        w.listener.press("Key.backspace")
+
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert truncated
+        assert info["termination_reason"] == "operator_abort"
+        assert not bool(np.asarray(info["success_once"]).any())
+        assert info["operator_episode_end"] is True
+        assert info["operator_success"] is False
+        assert info["hil_state"] == "model"
+        env.close()
+
+    def test_online_done_terminates_as_success(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="online")
+        w.reset()
+        w.listener.press("Key.enter")
+
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 1.0
+        assert terminated
+        assert not truncated
+        assert info["termination_reason"] == "operator_success"
+        assert bool(np.asarray(info["success_once"]).all())
+        assert info["operator_episode_end"] is True
+        assert info["operator_success"] is True
+        assert info["hil_state"] == "model"
+        env.close()
+
+    def test_online_quit_truncates_and_requests_shutdown(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="online")
+        w.reset()
+        w.listener.press("Key.esc")
+
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert truncated
+        assert info["termination_reason"] == "operator_quit"
+        assert info["quit_program"] is True
+        assert info["operator_episode_end"] is True
+        assert info["operator_success"] is False
+        env.close()
+
+    def test_online_reset_can_wait_for_start_key(self):
+        env = _dummy_pose_env()
+        listener = FakeListener(press_sequence=["y"])
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            episode_control_mode="online",
+            wait_for_start_on_reset=True,
+        )
+
+        obs, _ = w.reset()
+
+        assert obs is not None
+        assert listener.pop_pressed_keys() == []
+        env.close()
+
+    def test_start_gate_can_be_cancelled_with_quit_key(self):
+        env = _dummy_pose_env()
+        listener = FakeListener(press_sequence=["Key.esc"])
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            wait_for_start_on_reset=True,
+        )
+
+        with pytest.raises(RuntimeError, match="cancelled"):
+            w.reset()
+
+        env.close()
+
+    def test_start_gate_times_out_while_keyboard_is_disconnected(self):
+        env = _dummy_pose_env()
+        listener = FakeListener()
+        listener._connected = False
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            wait_for_start_on_reset=True,
+            start_gate_timeout_s=0.01,
+        )
+
+        with pytest.raises(TimeoutError, match="keyboard_connected=False"):
+            w.reset()
+
+        env.close()
+
+    def test_start_gate_fails_on_permanent_listener_error(self):
+        env = _dummy_pose_env()
+        listener = FakeListener()
+        listener._fatal_error = "read failed"
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            wait_for_start_on_reset=True,
+        )
+
+        with pytest.raises(RuntimeError, match="read failed"):
+            w.reset()
+
+        env.close()
+
+    def test_online_episode_latch_blocks_action_until_reset(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="online")
+        w.reset()
+        w.listener.press("Key.backspace")
+        w.step(_DUMMY_POSE.copy())
+
+        with pytest.raises(RuntimeError, match="episode"):
+            w.step(_DUMMY_POSE.copy())
+
+        assert env.num_steps == 1
+        w.reset()
+        w.step(_DUMMY_POSE.copy())
+        assert env.num_steps == 1
+        env.close()
+
+    def test_collector_abort_event_is_one_shot(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="collector")
+        w.reset()
+        w.listener.press("Key.backspace")
+        _, _, _, _, first_info = w.step(_DUMMY_POSE.copy())
+
+        _, _, _, _, second_info = w.step(_DUMMY_POSE.copy())
+
+        assert first_info["hil_event"] == "abort"
+        assert "hil_event" not in second_info
+        env.close()
+
+    def test_failed_reset_keeps_episode_latched(self, monkeypatch):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, episode_control_mode="online")
+        w.reset()
+        w.listener.press("Key.enter")
+        w.step(_DUMMY_POSE.copy())
+
+        def fail_reset(**kwargs):
+            raise RuntimeError("reset failed")
+
+        monkeypatch.setattr(w.env, "reset", fail_reset)
+        with pytest.raises(RuntimeError, match="reset failed"):
+            w.reset()
+        with pytest.raises(RuntimeError, match="episode"):
+            w.step(_DUMMY_POSE.copy())
+        env.close()
+
+    @pytest.mark.parametrize(
+        ("fatal_error", "expected_reason"),
+        [
+            (None, "keyboard_disconnected"),
+            ("read failed", "keyboard_listener_error"),
+        ],
+    )
+    def test_online_keyboard_failure_executes_hold_and_ends_episode(
+        self, fatal_error, expected_reason
+    ):
+        env = _dummy_pose_env()
+        listener = FakeListener()
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            episode_control_mode="online",
+        )
+        w.reset()
+        listener._connected = False
+        listener._fatal_error = fatal_error
+        unsafe_model_action = _DUMMY_POSE.copy()
+        unsafe_model_action[:3] = [0.4, 0.4, 0.4]
+
+        _, reward, terminated, truncated, info = w.step(unsafe_model_action)
+
+        assert reward == 0.0
+        assert not terminated
+        assert truncated
+        assert info["termination_reason"] == expected_reason
+        assert info["keyboard_connected"] is False
+        np.testing.assert_allclose(info["executed_action"], _DUMMY_POSE)
+        with pytest.raises(RuntimeError, match="episode"):
+            w.step(unsafe_model_action)
+        env.close()
+
+    def test_collector_keyboard_failure_aborts_without_flushing_as_done(self):
+        env = _dummy_pose_env()
+        listener = FakeListener()
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            episode_control_mode="collector",
+        )
+        w.reset()
+        listener._connected = False
+
+        _, _, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert not terminated
+        assert not truncated
+        assert info["hil_event"] == "abort"
+        assert info["termination_reason"] == "keyboard_disconnected"
+        assert "operator_episode_end" not in info
+        env.close()
 
 
 class TestGetPoseState:

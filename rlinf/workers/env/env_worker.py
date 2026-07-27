@@ -492,6 +492,13 @@ class EnvWorker(Worker):
                 final_info = infos["final_info"]
                 for key in final_info["episode"]:
                     env_info[key] = final_info["episode"][key][chunk_dones[:, -1]].cpu()
+        control_infos = (
+            infos["final_info"]
+            if isinstance(infos, dict) and "final_info" in infos
+            else infos
+        )
+        if isinstance(control_infos, dict):
+            env_info.update(self._extract_operator_metrics(control_infos))
 
         intervene_actions = (
             infos["intervene_action"] if "intervene_action" in infos else None
@@ -500,7 +507,11 @@ class EnvWorker(Worker):
         rlt_switch_flags = (
             infos["rlt_switch_flags"] if "rlt_switch_flags" in infos else None
         )
-        if self.cfg.env.train.auto_reset and chunk_dones.any():
+        if (
+            self.cfg.env.train.auto_reset
+            and chunk_dones.any()
+            and "final_info" in infos
+        ):
             if "intervene_action" in infos["final_info"]:
                 intervene_actions = infos["final_info"]["intervene_action"]
                 intervene_flags = infos["final_info"]["intervene_flag"]
@@ -525,6 +536,39 @@ class EnvWorker(Worker):
             "infos_list": infos_list,
         }
         return env_output, env_info, chunk_step_payload
+
+    @staticmethod
+    def _extract_operator_metrics(infos: dict[str, Any]) -> dict[str, torch.Tensor]:
+        """Convert operator-control diagnostics into numeric logger metrics."""
+        metrics: dict[str, torch.Tensor] = {}
+        reasons = infos.get("termination_reason")
+        if reasons is not None:
+            reason_values = np.asarray(reasons).reshape(-1)
+            for reason in (
+                "operator_success",
+                "operator_abort",
+                "operator_quit",
+                "keyboard_disconnected",
+                "keyboard_listener_error",
+            ):
+                reason_mask = reason_values == reason
+                if reason_mask.any():
+                    metrics[f"episode_end/{reason}"] = torch.as_tensor(
+                        reason_mask, dtype=torch.float32
+                    )
+
+        if "skipped_action_steps" in infos:
+            metrics["episode_end/skipped_action_steps"] = torch.as_tensor(
+                infos["skipped_action_steps"], dtype=torch.float32
+            ).reshape(-1)
+        if "executed_action_mask" in infos:
+            executed_mask = torch.as_tensor(
+                infos["executed_action_mask"], dtype=torch.float32
+            )
+            if executed_mask.ndim == 1:
+                executed_mask = executed_mask.unsqueeze(0)
+            metrics["episode_end/executed_action_fraction"] = executed_mask.mean(dim=-1)
+        return metrics
 
     def env_evaluate_step(
         self, raw_actions: torch.Tensor, stage_id: int

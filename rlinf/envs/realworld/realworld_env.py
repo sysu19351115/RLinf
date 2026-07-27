@@ -63,6 +63,7 @@ class RealWorldEnv(gym.Env):
         self._is_start = True
         self._init_metrics()
         self._elapsed_steps = np.zeros(self.num_envs, dtype=np.int32)
+        self._episode_needs_reset = False
         self._init_reset_state_ids()
 
     def _create_env(self, env_idx: int):
@@ -203,7 +204,20 @@ class RealWorldEnv(gym.Env):
             self._reset_metrics(env_idx)
         else:
             self._reset_metrics()
+        self._episode_needs_reset = False
         return extracted_obs, infos
+
+    def _info_bool_array(self, infos, key):
+        """Return a vectorized boolean info value for every real-world env."""
+        values = np.asarray(infos.get(key, False), dtype=bool)
+        if values.ndim == 0:
+            values = np.full(self.num_envs, bool(values), dtype=bool)
+        values = values.reshape(-1)
+        if values.shape != (self.num_envs,):
+            raise ValueError(
+                f"info[{key!r}] must have shape ({self.num_envs},), got {values.shape}."
+            )
+        return values
 
     def _wrap_obs(self, raw_obs):
         """
@@ -237,18 +251,34 @@ class RealWorldEnv(gym.Env):
         return obs
 
     def step(self, actions=None, auto_reset=True):
+        if self._episode_needs_reset:
+            raise RuntimeError(
+                "The real-world episode has ended; reset() is required before "
+                "another action can be executed."
+            )
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().numpy()
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        terminations = np.asarray(terminations, dtype=bool).copy()
+        truncations = np.asarray(truncations, dtype=bool).copy()
+        operator_episode_end = self._info_bool_array(infos, "operator_episode_end")
+        operator_success = self._info_bool_array(infos, "operator_success")
         # max_episode_steps: null → external wrapper owns episode end.
         if self.cfg.max_episode_steps is None:
             timeout_truncations = np.zeros_like(truncations, dtype=bool)
         else:
             timeout_truncations = self.elapsed_steps >= self.cfg.max_episode_steps
         if not self.manual_episode_control_only:
-            truncations = timeout_truncations
+            # Preserve lower-level safety/timeout truncations. The outer horizon
+            # is an additional stop condition, never a replacement.
+            truncations = np.logical_or(truncations, timeout_truncations)
+
+        # Operator control-plane events take precedence over environment task
+        # semantics and must survive ignore_terminations.
+        terminations[operator_episode_end] = operator_success[operator_episode_end]
+        truncations[operator_episode_end] = ~operator_success[operator_episode_end]
 
         obs = self._wrap_obs(raw_obs)
         step_reward = self._calc_step_reward(_reward)
@@ -268,7 +298,7 @@ class RealWorldEnv(gym.Env):
         )
         if self.ignore_terminations:
             infos["episode"]["success_at_end"] = to_tensor(terminations)
-            terminations[:] = False
+            terminations = np.logical_and(terminations, operator_episode_end)
 
         intervene_action = np.zeros_like(actions)
         if "intervene_action" in infos:
@@ -284,6 +314,8 @@ class RealWorldEnv(gym.Env):
             )
 
         dones = terminations | truncations
+        if dones.any():
+            self._episode_needs_reset = True
         _auto_reset = auto_reset and self.auto_reset
         if dones.any() and _auto_reset:
             obs, infos = self._handle_auto_reset(dones, obs, infos)
@@ -309,6 +341,8 @@ class RealWorldEnv(gym.Env):
         raw_chunk_intervene_actions = []
         raw_chunk_intervene_flag = []
         raw_chunk_rlt_switch_flags = []
+        stopped_early = False
+        shutdown_requested = False
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
@@ -316,6 +350,9 @@ class RealWorldEnv(gym.Env):
             )
             obs_list.append(extracted_obs)
             infos_list.append(infos)
+            shutdown_requested = shutdown_requested or bool(
+                self._info_bool_array(infos, "operator_shutdown_requested").any()
+            )
             if "intervene_action" in infos:
                 raw_chunk_intervene_actions.append(infos["intervene_action"])
                 raw_chunk_intervene_flag.append(infos["intervene_flag"])
@@ -325,6 +362,40 @@ class RealWorldEnv(gym.Env):
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
+            if torch.logical_or(terminations, truncations).all():
+                # RealWorldEnv currently permits exactly one env per worker.
+                # Never execute stale actions after an operator/fault/timeout
+                # has ended that episode. Pad tensors below so the rollout
+                # contract retains its configured action-chunk shape.
+                stopped_early = i + 1 < chunk_size
+                break
+
+        executed_steps = len(chunk_rewards)
+        if stopped_early:
+            skipped_steps = chunk_size - executed_steps
+            terminal_obs = obs_list[-1]
+            terminal_info = infos_list[-1]
+            zero_reward = torch.zeros_like(chunk_rewards[-1])
+            zero_done = torch.zeros_like(raw_chunk_terminations[-1])
+            zero_intervene_action = (
+                torch.zeros_like(raw_chunk_intervene_actions[-1])
+                if raw_chunk_intervene_actions
+                else None
+            )
+            zero_intervene_flag = (
+                torch.zeros_like(raw_chunk_intervene_flag[-1])
+                if raw_chunk_intervene_flag
+                else None
+            )
+            for _ in range(skipped_steps):
+                obs_list.append(copy.deepcopy(terminal_obs))
+                infos_list.append(copy.deepcopy(terminal_info))
+                chunk_rewards.append(zero_reward.clone())
+                raw_chunk_terminations.append(zero_done.clone())
+                raw_chunk_truncations.append(zero_done.clone())
+                if raw_chunk_intervene_actions:
+                    raw_chunk_intervene_actions.append(zero_intervene_action.clone())
+                    raw_chunk_intervene_flag.append(zero_intervene_flag.clone())
 
         chunk_rewards = torch.stack(chunk_rewards, dim=1)  # [num_envs, chunk_steps]
         raw_chunk_terminations = torch.stack(
@@ -350,8 +421,15 @@ class RealWorldEnv(gym.Env):
                 raw_chunk_rlt_switch_flags, dim=1
             )
             infos_list[-1] = infos_last
+        executed_action_mask = torch.zeros(
+            (self.num_envs, chunk_size), dtype=torch.bool
+        )
+        executed_action_mask[:, :executed_steps] = True
+        infos_last["executed_action_mask"] = executed_action_mask
+        infos_last["skipped_action_steps"] = chunk_size - executed_steps
+        infos_list[-1] = infos_last
 
-        if past_dones.any() and self.auto_reset:
+        if past_dones.any() and self.auto_reset and not shutdown_requested:
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones.cpu().numpy(), obs_list[-1], infos_list[-1]
             )

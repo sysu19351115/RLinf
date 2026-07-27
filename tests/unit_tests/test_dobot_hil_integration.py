@@ -37,6 +37,7 @@ from rlinf.envs.realworld.common.wrappers.dobot_keyboard_intervention import (
     DobotKeyboardIntervention,
 )
 from rlinf.envs.realworld.dobot.dobot_env import DobotEnv, DobotRobotConfig
+from rlinf.envs.realworld.realworld_env import RealWorldEnv
 from rlinf.envs.realworld.venv import NoAutoResetSyncVectorEnv
 from rlinf.envs.wrappers.collect_episode import resolve_collection_save_dir
 
@@ -94,6 +95,48 @@ def _make_env_stack(gripper_relative_threshold: float | None = None):
     return venv, kb_wrapper
 
 
+def _make_realworld_stack(
+    episode_control_mode: str = "collector",
+    *,
+    manual_episode_control_only: bool = True,
+    ignore_terminations: bool = False,
+    auto_reset: bool = False,
+):
+    venv, kb = _make_env_stack()
+    kb._episode_control_mode = episode_control_mode
+    cfg = OmegaConf.create(
+        {
+            "total_num_envs": 1,
+            "main_image_key": "cam_left_wrist",
+            "max_episode_steps": 100,
+            "auto_reset": auto_reset,
+            "ignore_terminations": ignore_terminations,
+            "manual_episode_control_only": manual_episode_control_only,
+        }
+    )
+    env = RealWorldEnv.__new__(RealWorldEnv)
+    env.env = venv
+    env.cfg = cfg
+    env.num_envs = 1
+    env.main_image_key = "cam_left_wrist"
+    env.manual_episode_control_only = manual_episode_control_only
+    env.auto_reset = auto_reset
+    env.ignore_terminations = ignore_terminations
+    env._episode_needs_reset = False
+    env._elapsed_steps = np.zeros(1, dtype=np.int64)
+    env.prev_step_reward = np.zeros(1, dtype=np.float32)
+    env.returns = np.zeros(1, dtype=np.float32)
+    env.success_once = np.zeros(1, dtype=bool)
+    env.fail_once = np.zeros(1, dtype=bool)
+    env.intervened_once = np.zeros(1, dtype=bool)
+    env.intervened_steps = np.zeros(1, dtype=np.int64)
+    env._is_start = True
+    env.task_descriptions = ["Pick up an object with the hole and hang it on a hook."]
+    env.use_fixed_reset_state_ids = False
+    env.reset_state_ids = None
+    return env, venv, kb
+
+
 class TestModelActionValidPropagation:
     """Verify model_action_valid propagates through the real wrapper stack."""
 
@@ -145,6 +188,172 @@ class TestModelActionValidPropagation:
         intervene = np.asarray(info["intervene_action"])[0]
         assert executed[-1] == 0.0
         np.testing.assert_array_equal(intervene, executed)
+        venv.close()
+
+
+class TestHGDAggerRealWorldPropagation:
+    def test_full_intervention_chunk_exposes_flags_actions_and_prev_state(self):
+        env, venv, kb = _make_realworld_stack()
+        env.reset()
+        kb.listener.press("h")
+        kb.listener.set_held("w")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        obs_list, _, _, _, infos_list = env.chunk_step(chunk)
+
+        assert len(obs_list) == 4
+        assert "prev_states" in obs_list[-1]
+        assert infos_list[-1]["intervene_flag"].shape == (1, 4)
+        assert bool(infos_list[-1]["intervene_flag"].all())
+        assert infos_list[-1]["intervene_action"].shape == (1, 4 * 8)
+        venv.close()
+
+    def test_partial_intervention_chunk_keeps_exact_step_mask(self):
+        env, venv, kb = _make_realworld_stack()
+        env.reset()
+        kb.listener.press("h")
+        kb.listener.press("m")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, _, _, _, infos_list = env.chunk_step(chunk)
+
+        np.testing.assert_array_equal(
+            infos_list[-1]["intervene_flag"].numpy(),
+            np.array([[True, True, False, False]]),
+        )
+        venv.close()
+
+    def test_online_termination_skips_remaining_chunk_actions(self):
+        env, venv, kb = _make_realworld_stack(episode_control_mode="online")
+        env.reset()
+        kb.listener.press("Key.enter")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, rewards, terminations, truncations, infos_list = env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 1
+        assert rewards.shape == (1, 4)
+        assert terminations.shape == (1, 4)
+        assert truncations.shape == (1, 4)
+        np.testing.assert_array_equal(
+            terminations.numpy(), np.array([[True, False, False, False]])
+        )
+        assert infos_list[-1]["skipped_action_steps"] == 3
+        np.testing.assert_array_equal(
+            infos_list[-1]["executed_action_mask"].numpy(),
+            np.array([[True, False, False, False]]),
+        )
+        venv.close()
+
+    @pytest.mark.parametrize(
+        ("key", "expected_termination", "expected_truncation"),
+        [
+            ("Key.enter", True, False),
+            ("Key.backspace", False, True),
+            ("Key.esc", False, True),
+        ],
+    )
+    @pytest.mark.parametrize("manual_episode_control_only", [False, True])
+    @pytest.mark.parametrize("ignore_terminations", [False, True])
+    def test_online_operator_end_survives_realworld_filters(
+        self,
+        key,
+        expected_termination,
+        expected_truncation,
+        manual_episode_control_only,
+        ignore_terminations,
+    ):
+        env, venv, kb = _make_realworld_stack(
+            episode_control_mode="online",
+            manual_episode_control_only=manual_episode_control_only,
+            ignore_terminations=ignore_terminations,
+        )
+        env.reset()
+        kb.listener.press(key)
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, _, terminations, truncations, infos_list = env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 1
+        assert bool(terminations.any()) is expected_termination
+        assert bool(truncations.any()) is expected_truncation
+        assert bool(np.asarray(infos_list[-1]["operator_episode_end"]).any())
+        venv.close()
+
+    def test_collector_abort_does_not_end_chunk(self):
+        env, venv, kb = _make_realworld_stack(episode_control_mode="collector")
+        env.reset()
+        kb.listener.press("Key.backspace")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, _, terminations, truncations, _ = env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 4
+        assert not bool(terminations.any())
+        assert not bool(truncations.any())
+        venv.close()
+
+    def test_terminal_episode_rejects_next_chunk_until_reset(self):
+        env, venv, kb = _make_realworld_stack(episode_control_mode="online")
+        env.reset()
+        kb.listener.press("Key.backspace")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        env.chunk_step(chunk)
+
+        with pytest.raises(RuntimeError, match="reset"):
+            env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 1
+        env.reset()
+        env.chunk_step(chunk[:, :1])
+        assert kb.unwrapped.num_steps == 1
+        venv.close()
+
+    def test_padding_entries_do_not_alias(self):
+        env, venv, kb = _make_realworld_stack(episode_control_mode="online")
+        env.reset()
+        kb.listener.press("Key.enter")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        obs_list, _, _, _, infos_list = env.chunk_step(chunk)
+
+        assert len({id(obs) for obs in obs_list}) == 4
+        assert len({id(info) for info in infos_list}) == 4
+        infos_list[1]["padding_probe"] = True
+        assert "padding_probe" not in infos_list[2]
+        venv.close()
+
+    def test_auto_reset_success_allows_a_fresh_next_chunk(self):
+        env, venv, kb = _make_realworld_stack(
+            episode_control_mode="online",
+            auto_reset=True,
+        )
+        env.reset()
+        kb.listener.press("Key.enter")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        env.chunk_step(chunk)
+        env.chunk_step(chunk[:, :1])
+
+        assert kb.unwrapped.num_steps == 1
+        venv.close()
+
+    def test_online_quit_never_auto_resets_into_another_chunk(self):
+        env, venv, kb = _make_realworld_stack(
+            episode_control_mode="online",
+            auto_reset=True,
+        )
+        env.reset()
+        kb.listener.press("Key.esc")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, _, _, truncations, infos_list = env.chunk_step(chunk)
+
+        assert bool(truncations.any())
+        assert bool(np.asarray(infos_list[-1]["operator_shutdown_requested"]).any())
+        with pytest.raises(RuntimeError, match="reset"):
+            env.chunk_step(chunk)
+        assert kb.unwrapped.num_steps == 1
         venv.close()
 
 

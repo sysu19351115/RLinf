@@ -48,7 +48,10 @@ class KeyboardListener:
         self._held_keys: dict[str, None] = {}
         # Edge-press queue so a sub-period tap isn't missed.
         self._press_events: deque[str] = deque()
+        self._connected = threading.Event()
+        self._fatal_error: str | None = None
         self.device = self._open_keyboard_device()
+        self._connected.set()
 
         self.listener = threading.Thread(
             target=self._listen_loop,
@@ -167,18 +170,17 @@ class KeyboardListener:
                     self._update_key_state(key, event.value)
             except OSError as exc:
                 if exc.errno != errno.ENODEV:
-                    _logger.error(
-                        "Keyboard device %s read failed (errno=%s): %s",
-                        device_path,
-                        exc.errno,
-                        exc,
+                    self._mark_fatal_error(
+                        f"Keyboard device {device_path} read failed "
+                        f"(errno={exc.errno}): {exc}"
                     )
-                    raise
+                    return
                 _logger.warning(
                     "Keyboard device %s disconnected (errno=ENODEV); "
                     "reopening until it returns.",
                     device_path,
                 )
+                self._connected.clear()
                 self._clear_held_keys()
                 try:
                     self.device.close()
@@ -192,7 +194,20 @@ class KeyboardListener:
                         break
                     except (FileNotFoundError, OSError):
                         continue
+                self._connected.set()
                 _logger.info("Keyboard device %s reopened.", device_path)
+            except Exception as exc:
+                self._mark_fatal_error(
+                    f"Keyboard listener for {device_path} stopped unexpectedly: {exc}"
+                )
+                return
+
+    def _mark_fatal_error(self, message: str) -> None:
+        """Latch a permanent listener failure and clear stale motion keys."""
+        self._connected.clear()
+        self._clear_held_keys()
+        self._fatal_error = message
+        _logger.error("%s", message)
 
     def _update_key_state(self, key: str, event_value: int) -> None:
         """Apply one evdev key event to the thread-safe held-key state."""
@@ -257,3 +272,11 @@ class KeyboardListener:
             pressed = list(self._press_events)
             self._press_events.clear()
             return pressed
+
+    def is_connected(self) -> bool:
+        """Return whether the evdev device is currently readable."""
+        return self._connected.is_set()
+
+    def fatal_error(self) -> str | None:
+        """Return a permanent listener error, if the listener thread stopped."""
+        return self._fatal_error

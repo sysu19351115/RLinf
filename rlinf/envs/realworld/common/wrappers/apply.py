@@ -169,9 +169,7 @@ def apply_so101_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
     """
     config = env.get_wrapper_attr("config")
     use_keyboard = cfg.get("use_keyboard_intervention", False)
-    active_in_dummy = not config.is_dummy or cfg.get(
-        "use_intervention_in_dummy", False
-    )
+    active_in_dummy = not config.is_dummy or cfg.get("use_intervention_in_dummy", False)
 
     if use_keyboard and active_in_dummy:
         kcfg = cfg.get("keyboard_intervention", {})
@@ -203,9 +201,7 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
     """
     config = env.get_wrapper_attr("config")
     use_keyboard = cfg.get("use_keyboard_intervention", False)
-    active_in_dummy = not config.is_dummy or cfg.get(
-        "use_intervention_in_dummy", False
-    )
+    active_in_dummy = not config.is_dummy or cfg.get("use_intervention_in_dummy", False)
 
     if use_keyboard and active_in_dummy:
         if config.action_mode != "cartesian" or config.state_mode != "pose":
@@ -229,6 +225,10 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             abort_key=kcfg.get("abort_key", "Key.backspace"),
             quit_keys=tuple(kcfg.get("quit_keys", ("Key.esc",))),
             start_in_engage=bool(kcfg.get("start_in_engage", False)),
+            episode_control_mode=kcfg.get("episode_control_mode", "collector"),
+            wait_for_start_on_reset=bool(kcfg.get("wait_for_start_on_reset", False)),
+            start_key=kcfg.get("start_key", "y"),
+            start_gate_timeout_s=kcfg.get("start_gate_timeout_s", None),
         )
 
     env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))
