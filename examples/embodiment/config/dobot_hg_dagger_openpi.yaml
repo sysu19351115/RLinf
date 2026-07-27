@@ -1,0 +1,243 @@
+defaults:
+  - env/realworld_dobot@env.train
+  - env/realworld_dobot@env.eval
+  - model/pi0_5@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+  - _self_
+
+# Safe-by-default single-node Dobot HG-DAgger configuration.
+# This file starts in dummy mode and requires explicit model/norm/LR overrides.
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor:
+      node_group: dobot
+      placement: 0
+    rollout:
+      node_group: dobot
+      placement: 0
+    env:
+      node_group: dobot
+      placement: 0
+  node_groups:
+    - label: dobot
+      node_ranks: 0
+      hardware:
+        type: Dobot
+        configs:
+          - node_rank: 0
+            ip: "192.168.5.2"
+            speed: 5
+            user_index: 0
+            tool_index: 2
+            action_mode: "cartesian"
+            state_mode: "pose"
+            gripper_port: "/dev/ttyACM0"
+            gripper_closed_deg: 0.0
+            gripper_open_deg: -300.0
+            camera_serials:
+              - "/dev/video0"
+            camera_type: "opencv"
+            camera_resolution: [1920, 1080]
+            camera_fps: 30
+            camera_fourcc: "MJPG"
+
+runner:
+  task_type: embodied
+  stop_on_operator_quit: True
+  logger:
+    log_path: ${project_path:logs/dobot_hg_dagger}
+    project_name: rlinf
+    experiment_name: "dobot-hg-dagger-openpi-single-node"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 8000
+  max_steps: -1
+  only_eval: False
+  # Physical training and evaluation must be separate processes.
+  val_check_interval: -1
+  save_interval: 20
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  dagger:
+    init_beta: 1.0
+    beta_schedule: "constant"
+    beta_decay: 1.0
+    only_save_expert: True
+    # Dobot pose training is unsafe without the pre-action robot state.
+    required_forward_input_keys: ["observation/prev_state"]
+
+  gamma: 0.99
+  update_epoch: 1
+  adv_type: gae
+  loss_type: embodied_dagger
+
+  replay_buffer:
+    enable_cache: True
+    cache_size: 200
+    min_buffer_size: 4
+    sample_window_size: 200
+    auto_save: True
+    trajectory_format: "pt"
+
+env:
+  group_name: "EnvGroup"
+  enable_offload: False
+
+  train:
+    rollout_epoch: 1
+    total_num_envs: 1
+    auto_reset: True
+    ignore_terminations: False
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    main_image_key: cam_left_wrist
+
+    override_cfg:
+      # Deliberately safe default. Hardware runs must explicitly set false.
+      is_dummy: True
+      action_mode: "cartesian"
+      state_mode: "pose"
+      use_dense_reward: False
+      use_reward_model: False
+      manual_episode_control_only: True
+      max_num_steps: 500
+      step_frequency: 30.0
+      initial_joint_pos: [-5.87, -0.799, -2.175, 1.89, 1.424, 0.621, 0.9]
+      gripper_relative_threshold: 0.2
+      reset_fps: 30.0
+      reset_min_duration_s: 3.0
+      reset_max_duration_s: 20.0
+      reset_max_velocity_deg_s: 20.0
+      reset_max_acceleration_deg_s2: 30.0
+      reset_max_step_deg: 1.0
+      reset_feedback_interval_frames: 3
+      reset_max_tracking_error_deg: 8.0
+      reset_final_tolerance_deg: 1.0
+      reset_final_hold_frames: 10
+      reset_gripper_release_settle_s: 0.5
+      task_description: "Pick up an object with the hole from the tray and hang it on an empty hook."
+
+    use_keyboard_intervention: True
+    use_intervention_in_dummy: True
+    keyboard_intervention:
+      position_delta: 0.002
+      rotation_delta: 0.02
+      gripper_delta: 0.05
+      base_frame_euler_deg: [0, 0, 0]
+      toggle_key: "h"
+      model_key: "m"
+      done_key: "Key.enter"
+      abort_key: "Key.backspace"
+      quit_keys: ["Key.esc"]
+      start_in_engage: False
+      episode_control_mode: "online"
+      wait_for_start_on_reset: True
+      start_key: "y"
+      start_gate_timeout_s: 600.0
+
+    data_collection:
+      enabled: False
+
+  # Kept resolvable for standalone evaluation configuration reuse, but never
+  # initialized during training because val_check_interval is disabled.
+  eval:
+    total_num_envs: 1
+    auto_reset: True
+    ignore_terminations: False
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    main_image_key: cam_left_wrist
+    override_cfg:
+      is_dummy: True
+      action_mode: "cartesian"
+      state_mode: "pose"
+      use_dense_reward: False
+      use_reward_model: False
+      manual_episode_control_only: True
+      max_num_steps: 500
+    use_keyboard_intervention: False
+    data_collection:
+      enabled: False
+
+rollout:
+  group_name: "RolloutGroup"
+  backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+  collect_transitions: False
+  collect_prev_infos: False
+  sync_weight_nccl_max_ctas: 32
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 1
+  global_batch_size: 1
+  seed: 1234
+  enable_offload: False
+
+  model:
+    model_path: ${oc.env:DOBOT_HG_DAGGER_MODEL_PATH}
+    model_type: "openpi"
+    precision: null
+    num_action_chunks: 10
+    action_dim: 8
+    num_steps: 4
+    add_value_head: False
+    openpi:
+      config_name: "pi05_dobot_pose"
+      train_expert_only: True
+      value_after_vlm: False
+      num_images_in_input: 2
+      noise_method: "flow_ode"
+      action_horizon: 50
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+    openpi_data:
+      repo_id: ""
+      norm_stats_path: ${oc.env:DOBOT_HG_DAGGER_NORM_STATS_PATH}
+
+  optim:
+    # Must be chosen explicitly for the post-training run.
+    lr: ${oc.decode:${oc.env:DOBOT_HG_DAGGER_LR}}
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    weight_decay: 1.0e-10
+    clip_grad: 1.0
+    warmup_style: "cosine"
+    lr_warmup_steps: 20
+    total_training_steps: 1000
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: False
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+  reward_mode: terminal
+
+critic:
+  use_critic_model: False

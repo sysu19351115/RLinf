@@ -31,6 +31,16 @@ from rlinf.utils.nested_dict_process import (
     stack_list_of_dict_tensor,
 )
 
+TERMINATION_REASON_CODES = {
+    "none": 0,
+    "operator_success": 1,
+    "operator_abort": 2,
+    "operator_quit": 3,
+    "keyboard_disconnected": 4,
+    "keyboard_listener_error": 5,
+}
+UNKNOWN_TERMINATION_REASON_CODE = -1
+
 
 def get_model_weights_id(versions: torch.Tensor) -> str:
     """
@@ -366,6 +376,7 @@ class ChunkStepResult:
     terminations: torch.Tensor = None  # [B, 1]
     rewards: torch.Tensor = None  # [B, 1]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
+    audit_info: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
 
     def __post_init__(self):
@@ -385,6 +396,8 @@ class ChunkStepResult:
             self.rewards = self.rewards.cpu().contiguous()
         if self.forward_inputs:
             self.forward_inputs = put_tensor_device(self.forward_inputs, "cpu")
+        if self.audit_info:
+            self.audit_info = put_tensor_device(self.audit_info, "cpu")
         if self.versions is not None:
             self.versions = self.versions.cpu().contiguous()
 
@@ -407,9 +420,99 @@ class Trajectory:
     prev_values: torch.Tensor = None
     versions: torch.Tensor = None
     forward_inputs: dict[str, Any] = field(default_factory=dict)
+    audit_info: dict[str, Any] = field(default_factory=dict)
 
     curr_obs: dict[str, Any] = field(default_factory=dict)
     next_obs: dict[str, Any] = field(default_factory=dict)
+
+    def validate_expert_replay_contract(
+        self, required_forward_input_keys: Optional[list[str]] = None
+    ) -> None:
+        """Fail closed when an extracted expert trajectory is unsafe to train on."""
+        required_forward_input_keys = required_forward_input_keys or []
+        if self.actions is None or self.actions.dim() < 3:
+            raise ValueError("Expert trajectory actions must have shape [T, B, ...].")
+        trajectory_batch_shape = self.actions.shape[:2]
+
+        if self.intervene_flags is None:
+            raise ValueError("Expert trajectory is missing intervene_flags.")
+        if self.intervene_flags.shape[:2] != trajectory_batch_shape:
+            raise ValueError(
+                "intervene_flags do not match action trajectory dimensions."
+            )
+        if not self.intervene_flags.to(torch.bool).all():
+            raise ValueError("Expert trajectory contains non-intervention actions.")
+
+        required_audit_keys = {
+            "executed_action_mask",
+            "termination_reason_code",
+            "episode_id",
+            "episode_step_ids",
+        }
+        missing_audit_keys = required_audit_keys.difference(self.audit_info)
+        if missing_audit_keys:
+            raise ValueError(
+                f"Expert trajectory is missing audit keys: {sorted(missing_audit_keys)}"
+            )
+
+        executed_action_mask = self.audit_info["executed_action_mask"]
+        episode_step_ids = self.audit_info["episode_step_ids"]
+        termination_reason_code = self.audit_info["termination_reason_code"]
+        episode_id = self.audit_info["episode_id"]
+        if executed_action_mask.dim() != 3:
+            raise ValueError("executed_action_mask must have shape [T, B, chunk].")
+        if executed_action_mask.shape[:2] != trajectory_batch_shape:
+            raise ValueError(
+                "executed_action_mask does not match action trajectory dimensions."
+            )
+        if episode_step_ids.shape != executed_action_mask.shape:
+            raise ValueError(
+                "episode_step_ids must have the same shape as executed_action_mask."
+            )
+        if termination_reason_code.shape != trajectory_batch_shape:
+            raise ValueError("termination_reason_code must have shape [T, B].")
+        if episode_id.shape != trajectory_batch_shape:
+            raise ValueError("episode_id must have shape [T, B].")
+        if not executed_action_mask.to(torch.bool).all():
+            raise ValueError("Expert trajectory contains unexecuted padded actions.")
+        if (episode_id < 0).any() or (episode_step_ids < 0).any():
+            raise ValueError("Expert trajectory contains unknown episode provenance.")
+        if episode_step_ids.shape[-1] > 1:
+            step_deltas = episode_step_ids[..., 1:] - episode_step_ids[..., :-1]
+            if not torch.equal(step_deltas, torch.ones_like(step_deltas)):
+                raise ValueError("episode_step_ids are not contiguous within a chunk.")
+        valid_reason_codes = torch.tensor(
+            list(TERMINATION_REASON_CODES.values()),
+            device=termination_reason_code.device,
+            dtype=termination_reason_code.dtype,
+        )
+        if not torch.isin(termination_reason_code, valid_reason_codes).all():
+            raise ValueError(
+                "Expert trajectory contains an unknown termination reason."
+            )
+
+        missing_forward_keys = [
+            key for key in required_forward_input_keys if key not in self.forward_inputs
+        ]
+        if missing_forward_keys:
+            raise ValueError(
+                "Expert trajectory is missing required forward inputs: "
+                f"{missing_forward_keys}"
+            )
+        for key, value in self.forward_inputs.items():
+            if isinstance(value, torch.Tensor):
+                if value.shape[:2] != trajectory_batch_shape:
+                    raise ValueError(
+                        f"Forward input '{key}' does not match action trajectory "
+                        "dimensions."
+                    )
+                if torch.is_floating_point(value) and not torch.isfinite(value).all():
+                    raise ValueError(f"Forward input '{key}' contains NaN or Inf.")
+        if (
+            torch.is_floating_point(self.actions)
+            and not torch.isfinite(self.actions).all()
+        ):
+            raise ValueError("Expert actions contain NaN or Inf.")
 
     @staticmethod
     def _generate_field_mask(
@@ -461,6 +564,17 @@ class Trajectory:
             mask = self.intervene_flags.any(dim=-1)
         elif mode == "all":
             mask = self.intervene_flags.all(dim=-1)
+            executed_action_mask = self.audit_info.get("executed_action_mask")
+            if executed_action_mask is not None:
+                if executed_action_mask.shape[:2] != mask.shape:
+                    raise ValueError(
+                        "executed_action_mask must start with trajectory and batch "
+                        f"dimensions {tuple(mask.shape)}, got "
+                        f"{tuple(executed_action_mask.shape)}."
+                    )
+                mask = torch.logical_and(
+                    mask, executed_action_mask.to(torch.bool).all(dim=-1)
+                )
         else:
             raise NotImplementedError(
                 f"Unsupported extract_intervene_traj mode: {mode}"
@@ -488,8 +602,10 @@ class Trajectory:
             prev_logprobs = apply_mask(self.prev_logprobs, i)
             prev_values = apply_mask(self.prev_values, i)
             intervene_flags = apply_mask(self.intervene_flags, i)
+            versions = apply_mask(self.versions, i)
 
             forward_inputs = apply_mask_to_dict(self.forward_inputs, i)
+            audit_info = apply_mask_to_dict(self.audit_info, i)
             curr_obs = apply_mask_to_dict(self.curr_obs, i)
             next_obs = apply_mask_to_dict(self.next_obs, i)
 
@@ -514,7 +630,9 @@ class Trajectory:
                     dones=dones,
                     prev_logprobs=prev_logprobs,
                     prev_values=prev_values,
+                    versions=versions,
                     forward_inputs=forward_inputs,
+                    audit_info=audit_info,
                     curr_obs=curr_obs,
                     next_obs=next_obs,
                 )
@@ -554,6 +672,7 @@ class EmbodiedRolloutResult:
     forward_inputs: list[dict[str, Any]] = field(
         default_factory=list
     )  # trajectory_length
+    audit_info: list[dict[str, Any]] = field(default_factory=list)
 
     curr_obs: list[dict[str, Any]] = field(default_factory=list)  # trajectory_length
     next_obs: list[dict[str, Any]] = field(default_factory=list)  # trajectory_length
@@ -564,6 +683,27 @@ class EmbodiedRolloutResult:
             self.intervene_flags.append(
                 torch.zeros_like(result.actions, dtype=torch.bool)
             )
+            if result.audit_info:
+                self.audit_info.append(result.audit_info)
+            else:
+                batch_size = result.actions.shape[0]
+                chunk_size = (
+                    result.dones.shape[-1]
+                    if result.dones is not None and result.dones.dim() >= 2
+                    else 1
+                )
+                self.audit_info.append(
+                    {
+                        "executed_action_mask": torch.ones(
+                            (batch_size, chunk_size), dtype=torch.bool
+                        ),
+                        "termination_reason_code": torch.full(
+                            (batch_size,), TERMINATION_REASON_CODES["none"]
+                        ),
+                        "episode_id": torch.full((batch_size,), -1),
+                        "episode_step_ids": torch.full((batch_size, chunk_size), -1),
+                    }
+                )
         if result.rewards is not None:
             self.rewards.append(result.rewards)
         if result.terminations is not None:
@@ -641,6 +781,49 @@ class EmbodiedRolloutResult:
                     )
                 last_fi.pop("model_action", None)
 
+    def update_last_audit_info(self, audit_info: dict[str, torch.Tensor]) -> None:
+        """Attach env execution metadata to the most recently issued action chunk."""
+        if not self.actions:
+            return
+        required_keys = {
+            "executed_action_mask",
+            "termination_reason_code",
+            "episode_id",
+            "episode_step_ids",
+        }
+        missing_keys = required_keys.difference(audit_info)
+        if missing_keys:
+            raise ValueError(f"Missing audit_info keys: {sorted(missing_keys)}")
+
+        batch_size = self.actions[-1].shape[0]
+        executed_action_mask = audit_info["executed_action_mask"]
+        episode_step_ids = audit_info["episode_step_ids"]
+        if executed_action_mask.dim() != 2:
+            raise ValueError(
+                "executed_action_mask must be [batch, chunk], got "
+                f"{tuple(executed_action_mask.shape)}."
+            )
+        if episode_step_ids.shape != executed_action_mask.shape:
+            raise ValueError(
+                "episode_step_ids must match executed_action_mask, got "
+                f"{tuple(episode_step_ids.shape)} and "
+                f"{tuple(executed_action_mask.shape)}."
+            )
+        if executed_action_mask.shape[0] != batch_size:
+            raise ValueError(
+                f"audit_info batch size {executed_action_mask.shape[0]} does not "
+                f"match action batch size {batch_size}."
+            )
+        for key in ("termination_reason_code", "episode_id"):
+            if audit_info[key].shape != (batch_size,):
+                raise ValueError(
+                    f"{key} must have shape ({batch_size},), got "
+                    f"{tuple(audit_info[key].shape)}."
+                )
+        self.audit_info[-1] = {
+            key: value.detach().cpu().contiguous() for key, value in audit_info.items()
+        }
+
     def append_transitions(self, curr_obs=None, next_obs=None):
         assert curr_obs is not None and next_obs is not None
         if "task_descriptions" in curr_obs:
@@ -661,6 +844,7 @@ class EmbodiedRolloutResult:
         self.prev_values.clear()
         self.versions.clear()
         self.forward_inputs.clear()
+        self.audit_info.clear()
         self.curr_obs.clear()
         self.next_obs.clear()
 
@@ -702,6 +886,12 @@ class EmbodiedRolloutResult:
             for key in trajectory.forward_inputs.keys():
                 trajectory.forward_inputs[key] = (
                     trajectory.forward_inputs[key].cpu().contiguous()
+                )
+        if len(self.audit_info) > 0:
+            trajectory.audit_info = stack_list_of_dict_tensor(self.audit_info)
+            for key in trajectory.audit_info:
+                trajectory.audit_info[key] = (
+                    trajectory.audit_info[key].cpu().contiguous()
                 )
 
         if len(self.curr_obs) > 0:
@@ -749,6 +939,12 @@ class EmbodiedRolloutResult:
             )
             for i in range(split_size):
                 splited_trajectories[i].forward_inputs = splited_forward_inputs[i]
+        if all_trajectory.audit_info:
+            splited_audit_info = split_dict_to_chunk(
+                all_trajectory.audit_info, split_size, dim=1
+            )
+            for i in range(split_size):
+                splited_trajectories[i].audit_info = splited_audit_info[i]
 
         for field_name in all_trajectory.__dataclass_fields__.keys():
             value = getattr(all_trajectory, field_name)

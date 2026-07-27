@@ -24,6 +24,8 @@ from omegaconf import DictConfig, OmegaConf
 from rlinf.algorithms.registry import calculate_adv_and_returns
 from rlinf.algorithms.rlt.transition import update_rlt_transitions
 from rlinf.data.embodied_io_struct import (
+    TERMINATION_REASON_CODES,
+    UNKNOWN_TERMINATION_REASON_CODE,
     ChunkStepResult,
     EmbodiedLerobotRolloutResult,
     EmbodiedRolloutResult,
@@ -570,6 +572,62 @@ class EnvWorker(Worker):
             metrics["episode_end/executed_action_fraction"] = executed_mask.mean(dim=-1)
         return metrics
 
+    @staticmethod
+    def _extract_trajectory_audit_info(
+        infos: dict[str, Any] | None,
+    ) -> dict[str, torch.Tensor]:
+        """Extract replay audit tensors without adding them to model inputs."""
+        if not isinstance(infos, dict):
+            return {}
+        control_infos = infos["final_info"] if "final_info" in infos else infos
+        required_keys = {
+            "executed_action_mask",
+            "episode_id",
+            "episode_step_ids",
+        }
+        if not required_keys.issubset(control_infos):
+            return {}
+
+        executed_action_mask = torch.as_tensor(
+            control_infos["executed_action_mask"], dtype=torch.bool
+        ).cpu()
+        if executed_action_mask.dim() == 1:
+            executed_action_mask = executed_action_mask.unsqueeze(0)
+        episode_step_ids = torch.as_tensor(
+            control_infos["episode_step_ids"], dtype=torch.int64
+        ).cpu()
+        if episode_step_ids.dim() == 1:
+            episode_step_ids = episode_step_ids.unsqueeze(0)
+        episode_id = torch.as_tensor(
+            control_infos["episode_id"], dtype=torch.int64
+        ).reshape(-1)
+
+        reason_values = np.asarray(
+            control_infos.get("termination_reason", ["none"])
+        ).reshape(-1)
+        if reason_values.size == 1 and executed_action_mask.shape[0] > 1:
+            reason_values = np.repeat(reason_values, executed_action_mask.shape[0])
+        reason_codes = torch.as_tensor(
+            [
+                TERMINATION_REASON_CODES.get(
+                    str(reason), UNKNOWN_TERMINATION_REASON_CODE
+                )
+                for reason in reason_values
+            ],
+            dtype=torch.int64,
+        )
+        return {
+            "executed_action_mask": executed_action_mask.contiguous(),
+            "termination_reason_code": reason_codes.contiguous(),
+            "episode_id": episode_id.contiguous(),
+            "episode_step_ids": episode_step_ids.contiguous(),
+        }
+
+    def _update_last_rollout_audit(self, stage_id: int, env_output: EnvOutput) -> None:
+        audit_info = self._extract_trajectory_audit_info(env_output.env_infos)
+        if audit_info:
+            self.rollout_results[stage_id].update_last_audit_info(audit_info)
+
     def env_evaluate_step(
         self, raw_actions: torch.Tensor, stage_id: int
     ) -> tuple[EnvOutput, dict[str, Any]]:
@@ -1087,6 +1145,7 @@ class EnvWorker(Worker):
 
                     env_output = env_outputs[stage_id]
                     curr_obs = env_output.obs
+                    self._update_last_rollout_audit(stage_id, env_output)
                     if env_output.intervene_actions is not None:
                         self.rollout_results[stage_id].update_last_actions(
                             env_output.intervene_actions,
@@ -1201,6 +1260,7 @@ class EnvWorker(Worker):
 
             for stage_id in range(self.stage_num):
                 env_output = env_outputs[stage_id]
+                self._update_last_rollout_audit(stage_id, env_output)
                 if env_output.intervene_actions is not None:
                     self.rollout_results[stage_id].update_last_actions(
                         env_output.intervene_actions,

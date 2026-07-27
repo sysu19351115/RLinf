@@ -62,3 +62,27 @@ def test_extracts_keyboard_failure_reason():
     torch.testing.assert_close(
         metrics["episode_end/keyboard_disconnected"], torch.tensor([1.0])
     )
+
+
+def test_extracts_trajectory_audit_info_from_final_info():
+    audit_info = EnvWorker._extract_trajectory_audit_info(
+        {
+            "final_info": {
+                "executed_action_mask": torch.tensor([[True, True, False, False]]),
+                "termination_reason": np.array(["operator_abort"]),
+                "episode_id": torch.tensor([9]),
+                "episode_step_ids": torch.tensor([[20, 21, -1, -1]]),
+            }
+        }
+    )
+
+    assert audit_info["executed_action_mask"].dtype == torch.bool
+    torch.testing.assert_close(audit_info["termination_reason_code"], torch.tensor([2]))
+    torch.testing.assert_close(audit_info["episode_id"], torch.tensor([9]))
+    torch.testing.assert_close(
+        audit_info["episode_step_ids"], torch.tensor([[20, 21, -1, -1]])
+    )
+
+
+def test_missing_execution_metadata_does_not_create_audit_record():
+    assert EnvWorker._extract_trajectory_audit_info({}) == {}

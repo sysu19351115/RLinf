@@ -99,6 +99,11 @@ class AsyncEmbodiedDAGGERFSDPPolicy(EmbodiedDAGGERFSDPPolicy):
         for traj in recv_list:
             intervene_trajs = traj.extract_intervene_traj(mode="all")
             if intervene_trajs is not None:
+                required_keys = self.cfg.algorithm.dagger.get(
+                    "required_forward_input_keys", []
+                )
+                for intervene_traj in intervene_trajs:
+                    intervene_traj.validate_expert_replay_contract(required_keys)
                 intervene_traj_list.extend(intervene_trajs)
         if intervene_traj_list:
             self.replay_buffer.add_trajectories(intervene_traj_list)

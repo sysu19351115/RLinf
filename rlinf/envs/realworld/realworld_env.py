@@ -63,6 +63,7 @@ class RealWorldEnv(gym.Env):
         self._is_start = True
         self._init_metrics()
         self._elapsed_steps = np.zeros(self.num_envs, dtype=np.int32)
+        self._episode_id = -1
         self._episode_needs_reset = False
         self._init_reset_state_ids()
 
@@ -200,6 +201,7 @@ class RealWorldEnv(gym.Env):
         raw_obs, infos = self.env.reset(seed=seed, options=options)
 
         extracted_obs = self._wrap_obs(raw_obs)
+        self._episode_id += 1
         if env_idx is not None:
             self._reset_metrics(env_idx)
         else:
@@ -261,6 +263,8 @@ class RealWorldEnv(gym.Env):
 
         self._elapsed_steps += 1
         raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        infos["episode_id"] = np.full(self.num_envs, self._episode_id, dtype=np.int64)
+        infos["episode_step_id"] = self.elapsed_steps.astype(np.int64) - 1
         terminations = np.asarray(terminations, dtype=bool).copy()
         truncations = np.asarray(truncations, dtype=bool).copy()
         operator_episode_end = self._info_bool_array(infos, "operator_episode_end")
@@ -341,6 +345,8 @@ class RealWorldEnv(gym.Env):
         raw_chunk_intervene_actions = []
         raw_chunk_intervene_flag = []
         raw_chunk_rlt_switch_flags = []
+        raw_chunk_episode_step_ids = []
+        chunk_episode_id = None
         stopped_early = False
         shutdown_requested = False
         for i in range(chunk_size):
@@ -350,6 +356,13 @@ class RealWorldEnv(gym.Env):
             )
             obs_list.append(extracted_obs)
             infos_list.append(infos)
+            if chunk_episode_id is None:
+                chunk_episode_id = torch.as_tensor(
+                    infos["episode_id"], dtype=torch.int64
+                )
+            raw_chunk_episode_step_ids.append(
+                torch.as_tensor(infos["episode_step_id"], dtype=torch.int64)
+            )
             shutdown_requested = shutdown_requested or bool(
                 self._info_bool_array(infos, "operator_shutdown_requested").any()
             )
@@ -393,6 +406,9 @@ class RealWorldEnv(gym.Env):
                 chunk_rewards.append(zero_reward.clone())
                 raw_chunk_terminations.append(zero_done.clone())
                 raw_chunk_truncations.append(zero_done.clone())
+                raw_chunk_episode_step_ids.append(
+                    torch.full((self.num_envs,), -1, dtype=torch.int64)
+                )
                 if raw_chunk_intervene_actions:
                     raw_chunk_intervene_actions.append(zero_intervene_action.clone())
                     raw_chunk_intervene_flag.append(zero_intervene_flag.clone())
@@ -427,6 +443,8 @@ class RealWorldEnv(gym.Env):
         executed_action_mask[:, :executed_steps] = True
         infos_last["executed_action_mask"] = executed_action_mask
         infos_last["skipped_action_steps"] = chunk_size - executed_steps
+        infos_last["episode_id"] = chunk_episode_id
+        infos_last["episode_step_ids"] = torch.stack(raw_chunk_episode_step_ids, dim=1)
         infos_list[-1] = infos_last
 
         if past_dones.any() and self.auto_reset and not shutdown_requested:

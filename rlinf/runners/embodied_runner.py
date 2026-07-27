@@ -33,6 +33,23 @@ from rlinf.utils.timers import Timer
 
 logger = logging.getLogger(__name__)
 
+
+def operator_quit_requested(env_results: list[dict] | None) -> bool:
+    """Return whether any env worker reported an operator quit event."""
+    if not env_results:
+        return False
+    for result in env_results:
+        if not isinstance(result, dict):
+            continue
+        value = result.get("episode_end/operator_quit")
+        if value is None:
+            continue
+        any_value = value.any() if hasattr(value, "any") else any(value)
+        if bool(any_value):
+            return True
+    return False
+
+
 if TYPE_CHECKING:
     from rlinf.workers.actor.async_fsdp_sac_policy_worker import (
         AsyncEmbodiedSACFSDPPolicy,
@@ -334,6 +351,7 @@ class EmbodiedRunner:
         start_time: float,
         start_step: int,
         env_handle: Handle,
+        env_results: list[dict],
         rollout_handle: Handle,
         actor_training_handle: Handle,
         reward_handle: Handle | None,
@@ -368,7 +386,6 @@ class EmbodiedRunner:
                 {f"time/reward/{k}": v for k, v in reward_time_metrics.items()}
             )
 
-        env_results = env_handle.wait()
         env_results_list = [results for results in env_results if results is not None]
         env_metrics = compute_evaluate_metrics(env_results_list)
         env_metrics = {f"env/{k}": v for k, v in env_metrics.items()}
@@ -521,6 +538,16 @@ class EmbodiedRunner:
                     rollout_handle.wait()
                     if self.reward is not None:
                         reward_handle.wait()
+                    env_results = env_handle.wait()
+                    if self.cfg.runner.get(
+                        "stop_on_operator_quit", False
+                    ) and operator_quit_requested(env_results):
+                        self.logger.warning(
+                            "Operator quit requested; stopping before actor update."
+                        )
+                        if profiled_step is not None:
+                            self._close_profiling_window(profiled_step)
+                        break
 
                 # compute advantages and returns.
                 with self.timer("cal_adv_and_returns"):
@@ -551,6 +578,7 @@ class EmbodiedRunner:
                 start_time=start_time,
                 start_step=start_step,
                 env_handle=env_handle,
+                env_results=env_results,
                 rollout_handle=rollout_handle,
                 actor_training_handle=actor_training_handle,
                 reward_handle=reward_handle,
@@ -619,6 +647,7 @@ class EmbodiedRunner:
                 if env_bootstrap_handle is not None:
                     env_bootstrap_handle.wait()
 
+                env_results = env_handle.wait()
                 self.global_step += 1
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
 
@@ -630,6 +659,7 @@ class EmbodiedRunner:
                 start_time=start_time,
                 start_step=start_step,
                 env_handle=env_handle,
+                env_results=env_results,
                 rollout_handle=rollout_handle,
                 actor_training_handle=actor_training_handle,
                 reward_handle=reward_handle,

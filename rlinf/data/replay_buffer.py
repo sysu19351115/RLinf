@@ -748,6 +748,12 @@ class TrajectoryReplayBuffer:
                 if isinstance(tensor, torch.Tensor) and tensor.dim() >= 2:
                     flat["forward_inputs"][key] = tensor.reshape(-1, *tensor.shape[2:])
 
+        if trajectory.audit_info:
+            flat["audit_info"] = {}
+            for key, tensor in trajectory.audit_info.items():
+                if isinstance(tensor, torch.Tensor) and tensor.dim() >= 2:
+                    flat["audit_info"][key] = tensor.reshape(-1, *tensor.shape[2:])
+
         return flat
 
     def _extract_chunk_from_flat_trajectory(

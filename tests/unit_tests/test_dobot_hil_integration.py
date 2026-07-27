@@ -130,6 +130,7 @@ def _make_realworld_stack(
     env.fail_once = np.zeros(1, dtype=bool)
     env.intervened_once = np.zeros(1, dtype=bool)
     env.intervened_steps = np.zeros(1, dtype=np.int64)
+    env._episode_id = -1
     env._is_start = True
     env.task_descriptions = ["Pick up an object with the hole and hang it on a hook."]
     env.use_fixed_reset_state_ids = False
@@ -206,6 +207,11 @@ class TestHGDAggerRealWorldPropagation:
         assert infos_list[-1]["intervene_flag"].shape == (1, 4)
         assert bool(infos_list[-1]["intervene_flag"].all())
         assert infos_list[-1]["intervene_action"].shape == (1, 4 * 8)
+        assert int(infos_list[-1]["episode_id"][0]) == 0
+        np.testing.assert_array_equal(
+            infos_list[-1]["episode_step_ids"].numpy(),
+            np.array([[0, 1, 2, 3]]),
+        )
         venv.close()
 
     def test_partial_intervention_chunk_keeps_exact_step_mask(self):
@@ -242,6 +248,10 @@ class TestHGDAggerRealWorldPropagation:
         np.testing.assert_array_equal(
             infos_list[-1]["executed_action_mask"].numpy(),
             np.array([[True, False, False, False]]),
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["episode_step_ids"].numpy(),
+            np.array([[0, -1, -1, -1]]),
         )
         venv.close()
 
