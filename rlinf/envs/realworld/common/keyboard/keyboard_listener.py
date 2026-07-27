@@ -43,7 +43,10 @@ class KeyboardListener:
 
         self.state_lock = threading.Lock()
         self.latest_data = {"key": None}
-        # Edge-press queue so a sub-period tap isn't missed (get_key() only reports the held key).
+        # Dict insertion order tracks the most recently pressed held key while
+        # also retaining every other held key for multi-key controls.
+        self._held_keys: dict[str, None] = {}
+        # Edge-press queue so a sub-period tap isn't missed.
         self._press_events: deque[str] = deque()
         self.device = self._open_keyboard_device()
 
@@ -161,18 +164,7 @@ class KeyboardListener:
                     if key is None:
                         continue
 
-                    if event.value == 1:
-                        # Initial press only; autorepeat (value==2) does not re-enqueue.
-                        with self.state_lock:
-                            self.latest_data["key"] = key
-                            self._press_events.append(key)
-                    elif event.value == 2:
-                        with self.state_lock:
-                            self.latest_data["key"] = key
-                    elif event.value == 0:
-                        with self.state_lock:
-                            if self.latest_data["key"] == key:
-                                self.latest_data["key"] = None
+                    self._update_key_state(key, event.value)
             except OSError as exc:
                 if exc.errno != errno.ENODEV:
                     _logger.error(
@@ -187,8 +179,7 @@ class KeyboardListener:
                     "reopening until it returns.",
                     device_path,
                 )
-                with self.state_lock:
-                    self.latest_data["key"] = None
+                self._clear_held_keys()
                 try:
                     self.device.close()
                 except Exception:
@@ -202,6 +193,29 @@ class KeyboardListener:
                     except (FileNotFoundError, OSError):
                         continue
                 _logger.info("Keyboard device %s reopened.", device_path)
+
+    def _update_key_state(self, key: str, event_value: int) -> None:
+        """Apply one evdev key event to the thread-safe held-key state."""
+        with self.state_lock:
+            if event_value in (1, 2):
+                # Keep the newest active key last for backward-compatible
+                # get_key() behavior. Autorepeat never adds another press edge.
+                self._held_keys.pop(key, None)
+                self._held_keys[key] = None
+                self.latest_data["key"] = key
+                if event_value == 1:
+                    self._press_events.append(key)
+            elif event_value == 0:
+                self._held_keys.pop(key, None)
+                self.latest_data["key"] = (
+                    next(reversed(self._held_keys)) if self._held_keys else None
+                )
+
+    def _clear_held_keys(self) -> None:
+        """Clear all held keys after a device disconnect or input reset."""
+        with self.state_lock:
+            self._held_keys.clear()
+            self.latest_data["key"] = None
 
     def _event_to_key(self, key_code: int) -> str | None:
         key_name = self._ecodes.bytype[self._ecodes.EV_KEY].get(key_code)
@@ -218,13 +232,19 @@ class KeyboardListener:
         return key_name.lower()
 
     def get_key(self) -> str | None:
-        """Return the currently-held key, or None.
+        """Return the most recently active held key, or None.
 
-        Only reflects held state; fast taps may be missed between polls.
+        This compatibility API exposes one key. Multi-key consumers should use
+        :meth:`get_keys`. Fast taps may be missed between polls.
         Use :meth:`pop_pressed_keys` when you need lossless press detection.
         """
         with self.state_lock:
             return self.latest_data["key"]
+
+    def get_keys(self) -> frozenset[str]:
+        """Return an immutable snapshot of all currently held keys."""
+        with self.state_lock:
+            return frozenset(self._held_keys)
 
     def pop_pressed_keys(self) -> list[str]:
         """Drain and return every key that has seen an initial press since the

@@ -46,6 +46,9 @@ class _DummyKeyboardListener:
     def get_key(self) -> str | None:
         return None
 
+    def get_keys(self) -> frozenset[str]:
+        return frozenset()
+
 
 # ---------------------------------------------------------------------------
 # Quaternion helpers (env/wrapper/dataset always use wxyz; scipy uses xyzw).
@@ -60,7 +63,9 @@ def _xyzw_to_wxyz(q: np.ndarray) -> np.ndarray:
     return np.asarray([q[3], q[0], q[1], q[2]], dtype=np.float64)
 
 
-def _normalize_same_hemisphere(new_q: np.ndarray, reference_q: np.ndarray) -> np.ndarray:
+def _normalize_same_hemisphere(
+    new_q: np.ndarray, reference_q: np.ndarray
+) -> np.ndarray:
     """Normalize *new_q* and flip sign to stay on the same hemisphere as *reference_q*."""
     new_q = np.asarray(new_q, dtype=np.float64)
     norm = np.linalg.norm(new_q)
@@ -121,7 +126,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         # ── Validate env mode ────────────────────────────────────────────────
         config = getattr(self.unwrapped, "config", None)
         if config is None:
-            raise ValueError("DobotKeyboardIntervention requires a DobotEnv with a config.")
+            raise ValueError(
+                "DobotKeyboardIntervention requires a DobotEnv with a config."
+            )
         if getattr(config, "action_mode", None) != "cartesian":
             raise ValueError(
                 "DobotKeyboardIntervention requires action_mode='cartesian', "
@@ -156,7 +163,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             )
         if workspace_low is not None:
             self._workspace_low = np.asarray(workspace_low, dtype=np.float64).reshape(3)
-            self._workspace_high = np.asarray(workspace_high, dtype=np.float64).reshape(3)
+            self._workspace_high = np.asarray(workspace_high, dtype=np.float64).reshape(
+                3
+            )
             if self._workspace_low.shape != (3,) or self._workspace_high.shape != (3,):
                 raise ValueError("workspace_low and workspace_high must be 3-dim.")
             if np.any(self._workspace_low >= self._workspace_high):
@@ -318,11 +327,16 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
                 return "toggle"
         return None
 
-    def _current_held_key(self) -> str | None:
-        key = self.listener.get_key()
-        if key is not None:
-            get_logger().info("[DobotKeyboardIntervention] held key: %s", key)
-        return key
+    def _current_held_keys(self) -> frozenset[str]:
+        """Return all held keys, with fallback for legacy injected listeners."""
+        if hasattr(self.listener, "get_keys"):
+            keys = frozenset(self.listener.get_keys())
+        else:
+            key = self.listener.get_key()
+            keys = frozenset((key,)) if key is not None else frozenset()
+        if keys:
+            get_logger().info("[DobotKeyboardIntervention] held keys: %s", sorted(keys))
+        return keys
 
     # ── Target updates ──────────────────────────────────────────────────────
 
@@ -345,49 +359,53 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         rotations (i/k/j/l/u/o) are unaffected (they use right-multiply in the
         tool frame, independent of the base frame).
         """
-        key = self._current_held_key()
-        if key is None:
+        keys = self._current_held_keys()
+        if not keys:
             return
 
         # ── Translation: rotate through _base_rotation (3×3) ──────────────────
         # Mirror-mode keyboard mapping for face-to-face operation:
         # w/s = back/front (operator's perspective is mirrored),
         # a/d = right/left, q/e = up/down (up is unchanged).
-        phys_xyz: np.ndarray | None = None
-        if key == "w":
-            phys_xyz = np.array([-self.position_delta, 0.0, 0.0])
-        elif key == "s":
-            phys_xyz = np.array([self.position_delta, 0.0, 0.0])
-        elif key == "a":
-            phys_xyz = np.array([0.0, -self.position_delta, 0.0])
-        elif key == "d":
-            phys_xyz = np.array([0.0, self.position_delta, 0.0])
-        elif key == "q":
-            phys_xyz = np.array([0.0, 0.0, self.position_delta])
-        elif key == "e":
-            phys_xyz = np.array([0.0, 0.0, -self.position_delta])
-
-        if phys_xyz is not None:
+        direction = np.array(
+            [
+                float("s" in keys) - float("w" in keys),
+                float("d" in keys) - float("a" in keys),
+                float("q" in keys) - float("e" in keys),
+            ],
+            dtype=np.float64,
+        )
+        direction_norm = np.linalg.norm(direction)
+        if direction_norm > 0.0:
+            # Keep diagonal/3-axis movement at the same total speed as a
+            # single-axis command instead of increasing it by sqrt(2)/sqrt(3).
+            phys_xyz = direction * (self.position_delta / direction_norm)
             base_xyz = self._base_rotation @ phys_xyz
             self._target_position += base_xyz
-        elif key == "i":
-            self._rotate_target("x", self.rotation_delta)
-        elif key == "k":
-            self._rotate_target("x", -self.rotation_delta)
-        elif key == "j":
-            self._rotate_target("y", self.rotation_delta)
-        elif key == "l":
-            self._rotate_target("y", -self.rotation_delta)
-        elif key == "u":
-            self._rotate_target("z", self.rotation_delta)
-        elif key == "o":
-            self._rotate_target("z", -self.rotation_delta)
-        elif key in (",", "Key.comma"):
-            self._target_gripper = 0.0
-        elif key in (".", "Key.dot"):
-            self._target_gripper = 1.0
         else:
-            return
+            # Rotation and gripper remain single-key controls. Translation has
+            # priority whenever a non-cancelled translation combination exists.
+            key = self.listener.get_key()
+            if key is None:
+                return
+            if key == "i":
+                self._rotate_target("x", self.rotation_delta)
+            elif key == "k":
+                self._rotate_target("x", -self.rotation_delta)
+            elif key == "j":
+                self._rotate_target("y", self.rotation_delta)
+            elif key == "l":
+                self._rotate_target("y", -self.rotation_delta)
+            elif key == "u":
+                self._rotate_target("z", self.rotation_delta)
+            elif key == "o":
+                self._rotate_target("z", -self.rotation_delta)
+            elif key in (",", "Key.comma"):
+                self._target_gripper = 0.0
+            elif key in (".", "Key.dot"):
+                self._target_gripper = 1.0
+            else:
+                return
 
         now = time.monotonic()
         if now - self._last_target_log_ts >= self._target_log_interval_s:
@@ -396,9 +414,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
                 _wxyz_to_xyzw(self._target_quaternion_wxyz)
             ).as_euler("xyz", degrees=True)
             get_logger().info(
-                "[DobotKeyboardIntervention] key=%s "
+                "[DobotKeyboardIntervention] keys=%s "
                 "target_pos=[%.4f, %.4f, %.4f] target_euler=[%.2f, %.2f, %.2f] gripper=%.2f",
-                key,
+                sorted(keys),
                 self._target_position[0],
                 self._target_position[1],
                 self._target_position[2],

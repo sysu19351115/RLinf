@@ -31,3 +31,4 @@ libero
 datasets/
 tmp/
 .zcode/
+huggingface/

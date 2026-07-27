@@ -22,6 +22,7 @@ are exercised via dummy config.
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from typing import Sequence
 
@@ -29,6 +30,7 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
+from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListener
 from rlinf.envs.realworld.common.wrappers.dobot_keyboard_intervention import (
     DobotKeyboardIntervention,
 )
@@ -52,9 +54,14 @@ class FakeListener:
     (consumed by ``get_key``).
     """
 
-    def __init__(self, press_sequence: Sequence[str] | None = None, held: str | None = None):
+    def __init__(
+        self,
+        press_sequence: Sequence[str] | None = None,
+        held: str | None = None,
+    ):
         self._presses: deque[str] = deque(press_sequence or [])
-        self._held = held
+        self._held_keys = {held} if held is not None else set()
+        self._latest_held = held
 
     def pop_pressed_keys(self) -> list[str]:
         if self._presses:
@@ -62,7 +69,10 @@ class FakeListener:
         return []
 
     def get_key(self) -> str | None:
-        return self._held
+        return self._latest_held
+
+    def get_keys(self) -> frozenset[str]:
+        return frozenset(self._held_keys)
 
     def press(self, key: str) -> None:
         """Helper to inject a key press after construction."""
@@ -70,7 +80,23 @@ class FakeListener:
 
     def set_held(self, key: str | None) -> None:
         """Helper to set the currently held key."""
-        self._held = key
+        self._held_keys = {key} if key is not None else set()
+        self._latest_held = key
+
+    def set_held_keys(self, *keys: str) -> None:
+        """Helper to set all currently held keys."""
+        self._held_keys = set(keys)
+        self._latest_held = keys[-1] if keys else None
+
+
+def _bare_keyboard_listener() -> KeyboardListener:
+    """Construct KeyboardListener state without opening an evdev device."""
+    listener = KeyboardListener.__new__(KeyboardListener)
+    listener.state_lock = threading.Lock()
+    listener.latest_data = {"key": None}
+    listener._held_keys = {}
+    listener._press_events = deque()
+    return listener
 
 
 def _dummy_pose_env(max_num_steps: int = 100) -> DobotEnv:
@@ -106,6 +132,32 @@ def _make_wrapper(
 # ===========================================================================
 # Task 1: DobotEnv.get_pose_state / reset_servo_smoothing
 # ===========================================================================
+
+
+class TestKeyboardListenerHeldKeys:
+    def test_pressing_two_keys_keeps_both_until_each_is_released(self):
+        listener = _bare_keyboard_listener()
+
+        listener._update_key_state("w", 1)
+        listener._update_key_state("a", 1)
+
+        assert listener.get_keys() == frozenset({"w", "a"})
+        assert listener.get_key() == "a"
+
+        listener._update_key_state("a", 0)
+
+        assert listener.get_keys() == frozenset({"w"})
+        assert listener.get_key() == "w"
+
+    def test_clear_held_keys_removes_stale_motion_after_disconnect(self):
+        listener = _bare_keyboard_listener()
+        listener._update_key_state("w", 1)
+        listener._update_key_state("a", 1)
+
+        listener._clear_held_keys()
+
+        assert listener.get_keys() == frozenset()
+        assert listener.get_key() is None
 
 
 class TestGetPoseState:
@@ -300,6 +352,61 @@ class TestTranslation:
         assert action[0] == pytest.approx(_DUMMY_POSE[0])
         env.close()
 
+    def test_w_and_a_move_diagonally_at_bounded_total_speed(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.set_held_keys("w", "a")
+
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+
+        delta = info["intervene_action"][:3] - _DUMMY_POSE[:3]
+        expected_axis_delta = -0.002 / np.sqrt(2.0)
+        np.testing.assert_allclose(
+            delta,
+            [expected_axis_delta, expected_axis_delta, 0.0],
+            atol=1e-9,
+        )
+        assert np.linalg.norm(delta) == pytest.approx(0.002)
+        env.close()
+
+    def test_opposite_translation_keys_cancel(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.set_held_keys("w", "s", "a", "d", "q", "e")
+
+        _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+
+        np.testing.assert_allclose(
+            info["intervene_action"][:3],
+            _DUMMY_POSE[:3],
+            atol=1e-12,
+        )
+        env.close()
+
+    def test_releasing_one_key_keeps_remaining_direction_active(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener(), position_delta=0.002)
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.set_held_keys("w", "a")
+        _, _, _, _, first_info = w.step(_DUMMY_POSE.copy())
+        w.listener.set_held_keys("w")
+
+        _, _, _, _, second_info = w.step(first_info["intervene_action"].copy())
+
+        first = first_info["intervene_action"]
+        second = second_info["intervene_action"]
+        assert second[0] == pytest.approx(first[0] - 0.002)
+        assert second[1] == pytest.approx(first[1])
+        env.close()
+
 
 class TestRotation:
     def test_i_updates_roll_wxyz_output(self):
@@ -445,7 +552,7 @@ class TestBaseFrameRotation:
             env,
             listener=FakeListener(),
             base_frame_euler_deg=[180, 0, 0],
-            workspace_low=np.array([-0.5, -0.5, -0.5]),   # allow negative Z
+            workspace_low=np.array([-0.5, -0.5, -0.5]),  # allow negative Z
         )
         w.reset()
         w.listener.press("h")
@@ -554,9 +661,7 @@ class TestStartInEngage:
 
     def test_start_in_engage_initializes_from_current_pose(self):
         env = _dummy_pose_env()
-        w = _make_wrapper(
-            env, listener=FakeListener(), start_in_engage=True
-        )
+        w = _make_wrapper(env, listener=FakeListener(), start_in_engage=True)
         w.reset()
         assert w._state == "engage"
         # Target must match the dummy pose, NOT zeros.
@@ -567,9 +672,7 @@ class TestStartInEngage:
     def test_start_in_engage_first_action_equals_pose(self):
         """The first ENGAGE action must equal the current TCP pose, not zeros."""
         env = _dummy_pose_env()
-        w = _make_wrapper(
-            env, listener=FakeListener(), start_in_engage=True
-        )
+        w = _make_wrapper(env, listener=FakeListener(), start_in_engage=True)
         w.reset()
         # No held key — action should be the current pose hold.
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
@@ -695,4 +798,3 @@ class TestFactory:
         assert isinstance(env, DKI)
         assert env._workspace_low is None
         env.close()
-
