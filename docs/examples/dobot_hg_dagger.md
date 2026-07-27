@@ -103,24 +103,27 @@ cd /home/zylab/project/RLinf
 
 双节点拓扑为：
 
-- node 0：actor + rollout，负责 GPU 推理、训练和权重同步；
-- node 1：env，连接 Dobot、夹爪、相机和键盘。
+- node 0（inference）：actor，负责模型训练和权重同步；
+- node 1（robot）：rollout + env，负责模型推理、连接 Dobot、夹爪、相机和键盘。
+
+> actor 和 rollout 分别部署在两个节点上，各自只加载一份模型，
+> 避免单卡显存不足（7.2 GB x 2 > 16 GB）。
 
 两台机器必须使用同一版本代码和 Python 环境。在启动 Ray 前分别设置：
 
-GPU 节点：
+GPU 节点（node 0，训练）：
 
 ```bash
 export RLINF_NODE_RANK=0
 ray start --head --port=6379 --node-ip-address=<GPU_NODE_IP>
 ```
 
-机器人节点：
+机器人节点（node 1，rollout+env）：
 
 ```bash
 export RLINF_NODE_RANK=1
 export RLINF_KEYBOARD_DEVICE=/dev/input/by-id/<keyboard-event-kbd>
-ray start --address='<GPU_NODE_IP>:6379'
+ray start --address=<GPU_NODE_IP>:6379
 ```
 
 在 node 0 启动：
@@ -157,3 +160,59 @@ logs/dobot_hg_dagger/replay_buffer/rank_<actor_rank>/
 
 不要把 replay 目录当作未经检查即可发布的数据集；训练前仍应核对 episode 数量、
 介入比例、动作分布、终止原因和相机质量。
+
+## 独立自主评估
+
+自主评估必须作为独立进程运行，不能与在线训练同时占用同一台 Dobot。评估保留
+`y` 开始门、`Enter` 成功、`Backspace` 失败和 `Esc` 退出，但
+`allow_motion_intervention: false` 会硬性禁止 `h` 进入 ENGAGE；即使按住
+`w/a/...`，模型动作也不会被替换。
+
+先设置基础模型、归一化统计、待评估权重及人工可读的 checkpoint 标识：
+
+```bash
+export DOBOT_HG_DAGGER_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_train_1200_torch
+export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_MODEL_PATH/assets/dobot_cf5af_t265_pose/norm_stats.json"
+export DOBOT_HG_DAGGER_EVAL_CHECKPOINT=/path/to/checkpoint.pt
+export DOBOT_HG_DAGGER_EVAL_CHECKPOINT_ID=hgdagger-step-0040
+```
+
+保持 dummy 的无硬件配置检查：
+
+```bash
+.venv/bin/python evaluations/eval_embodied_agent.py \
+  --config-path /home/zylab/project/RLinf/examples/embodiment/config \
+  --config-name dobot_hg_dagger_eval \
+  env.eval.keyboard_intervention.wait_for_start_on_reset=false
+```
+
+真机评估时只显式关闭 eval dummy：
+
+```bash
+.venv/bin/python evaluations/eval_embodied_agent.py \
+  --config-path /home/zylab/project/RLinf/examples/embodiment/config \
+  --config-name dobot_hg_dagger_eval \
+  env.eval.override_cfg.is_dummy=false \
+  env.eval.rollout_epoch=20
+```
+
+输出包含 `autonomous_success`、`episode_duration_s`、`success_once`、
+`success_no_intervened` 和 `episode_end/<termination_reason>`；启动日志同时打印
+checkpoint id 与路径。评估配置固定为一个物理环境。
+
+## 机器人独占所有权
+
+每个 Dobot controller IP 在机器人主机上对应一个进程锁。锁在 SDK 构造、
+连接和使能之前获取。因此，如果训练已经占用同一机械臂，评估会立即报
+`DobotOwnershipError`，不会向机械臂发送任何命令。正常 `close()` 会释放锁；
+进程崩溃或被终止时，操作系统也会自动释放底层文件锁，不需要人工删除 lock
+文件。锁仅限单机，所以双节点部署必须确保所有连接该机械臂的 controller 都在
+同一机器人节点上运行。
+
+硬件测试前运行新增的无硬件契约：
+
+```bash
+.venv/bin/pytest -q \
+  tests/unit_tests/test_dobot_hg_dagger_eval_config.py \
+  tests/unit_tests/test_dobot_exclusive_ownership.py
+```

@@ -77,6 +77,14 @@ class EmbodiedEvalRunner:
         return eval_metrics
 
     def run(self):
+        checkpoint_id = self.cfg.runner.get("eval_checkpoint_id", None)
+        checkpoint_path = self.cfg.runner.get("ckpt_path", None)
+        if checkpoint_id is not None:
+            self.logger.info(
+                "Standalone evaluation checkpoint: id=%s path=%s",
+                checkpoint_id,
+                checkpoint_path,
+            )
         eval_metrics = self.evaluate()
         eval_metrics = {f"eval/{k}": v for k, v in eval_metrics.items()}
         self.logger.info(eval_metrics)

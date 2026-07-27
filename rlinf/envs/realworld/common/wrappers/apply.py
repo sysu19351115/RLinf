@@ -225,6 +225,7 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             abort_key=kcfg.get("abort_key", "Key.backspace"),
             quit_keys=tuple(kcfg.get("quit_keys", ("Key.esc",))),
             start_in_engage=bool(kcfg.get("start_in_engage", False)),
+            allow_motion_intervention=bool(kcfg.get("allow_motion_intervention", True)),
             episode_control_mode=kcfg.get("episode_control_mode", "collector"),
             wait_for_start_on_reset=bool(kcfg.get("wait_for_start_on_reset", False)),
             start_key=kcfg.get("start_key", "y"),

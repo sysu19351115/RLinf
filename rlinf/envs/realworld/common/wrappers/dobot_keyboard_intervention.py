@@ -125,6 +125,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         abort_key: str = "Key.backspace",
         quit_keys: tuple[str, ...] = ("Key.esc",),
         start_in_engage: bool = False,
+        allow_motion_intervention: bool = True,
         episode_control_mode: str = "collector",
         wait_for_start_on_reset: bool = False,
         start_key: str = "y",
@@ -205,6 +206,12 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self.done_key = done_key
         self.abort_key = abort_key
         self.quit_keys = tuple(quit_keys)
+        self._allow_motion_intervention = bool(allow_motion_intervention)
+        if start_in_engage and not self._allow_motion_intervention:
+            raise ValueError(
+                "start_in_engage=True is incompatible with "
+                "allow_motion_intervention=False."
+            )
         self._start_in_engage = bool(start_in_engage)
         self._episode_control_mode = episode_control_mode
         self._wait_for_start_on_reset = bool(wait_for_start_on_reset)
@@ -563,7 +570,16 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         elif event == "model":
             next_state = "model"
         elif event == "toggle":
-            if self._state == "model":
+            if not self._allow_motion_intervention:
+                # Autonomous evaluation deliberately keeps the keyboard
+                # listener for start/success/failure/quit labels while making
+                # it impossible for an operator key to replace model actions.
+                next_state = "model"
+                get_logger().warning(
+                    "[DobotKeyboardIntervention] Ignoring motion-intervention "
+                    "toggle because allow_motion_intervention=False."
+                )
+            elif self._state == "model":
                 next_state = "engage"
                 self._initialize_target_from_current_pose()
                 self.get_wrapper_attr("reset_servo_smoothing")()

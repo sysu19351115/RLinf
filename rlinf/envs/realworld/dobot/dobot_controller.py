@@ -32,10 +32,14 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import time
+from hashlib import sha256
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from filelock import FileLock, Timeout
 
 from rlinf.scheduler import Cluster, NodePlacementStrategy, Worker
 from rlinf.utils.logging import get_logger
@@ -46,6 +50,42 @@ _DEG2RAD = np.pi / 180.0
 _RAD2DEG = 180.0 / np.pi
 # RobotMode 中允许继续伺服的状态：5=使能空闲、7=运动中、8=单步运动。
 _SERVO_READY_MODES = frozenset({5, 7, 8})
+
+
+class DobotOwnershipError(RuntimeError):
+    """Raised when another local process already owns a Dobot controller."""
+
+
+class DobotOwnershipLock:
+    """Host-local, process-death-safe ownership lock scoped by controller IP."""
+
+    def __init__(self, ip: str, lock_dir: str | os.PathLike | None = None):
+        if not ip or not str(ip).strip():
+            raise ValueError("Dobot controller IP must be non-empty.")
+        digest = sha256(str(ip).strip().encode("utf-8")).hexdigest()[:16]
+        root = Path(lock_dir or tempfile.gettempdir())
+        self.path = root / f"rlinf-dobot-{digest}.lock"
+        self.ip = str(ip).strip()
+        self._lock = FileLock(str(self.path))
+        self._acquired = False
+
+    def acquire(self) -> None:
+        if self._acquired:
+            return
+        try:
+            self._lock.acquire(timeout=0)
+        except Timeout as exc:
+            raise DobotOwnershipError(
+                f"Dobot controller {self.ip!r} is already owned by another "
+                f"local process (lock: {self.path}). Stop that process before "
+                "starting another hardware env."
+            ) from exc
+        self._acquired = True
+
+    def release(self) -> None:
+        if self._acquired:
+            self._lock.release()
+            self._acquired = False
 
 
 class DobotController(Worker):
@@ -117,66 +157,88 @@ class DobotController(Worker):
     ):
         super().__init__()
         self._logger = get_logger()
+        self._ownership_lock = DobotOwnershipLock(ip)
+        # This must happen before SDK construction/connect/enable. A competing
+        # evaluator therefore fails without sending any command to the robot.
+        self._ownership_lock.acquire()
 
-        # Inject the dobot_zhiyu SDK onto sys.path (it is a git submodule, not
-        # pip-installed). Path: rlinf/envs/realworld/dobot/dobot_controller.py
-        #   -> up 5 levels = repo root -> third_party/dobot_zhiyu/src
-        _repo_root = os.path.dirname(
-            os.path.dirname(
+        try:
+            # Inject the dobot_zhiyu SDK onto sys.path (it is a git submodule, not
+            # pip-installed). Path: rlinf/envs/realworld/dobot/dobot_controller.py
+            #   -> up 5 levels = repo root -> third_party/dobot_zhiyu/src
+            _repo_root = os.path.dirname(
                 os.path.dirname(
-                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    os.path.dirname(
+                        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    )
                 )
             )
-        )
-        _sdk_src = os.path.join(_repo_root, "third_party", "dobot_zhiyu", "src")
-        if _sdk_src not in sys.path:
-            sys.path.insert(0, _sdk_src)
+            _sdk_src = os.path.join(_repo_root, "third_party", "dobot_zhiyu", "src")
+            if _sdk_src not in sys.path:
+                sys.path.insert(0, _sdk_src)
 
-        # Deferred imports: GPU-only nodes must be able to import this module
-        # without the robot SDK / motorbridge installed.
-        from dobot_control import DobotRobot  # noqa: F401
+            # Deferred imports: GPU-only nodes must be able to import this module
+            # without the robot SDK / motorbridge installed.
+            from dobot_control import DobotRobot  # noqa: F401
 
-        from .dobot_action_split import split_follower_action
-        from .dobot_pose_obs import PoseStateTracker
+            from .dobot_action_split import split_follower_action
+            from .dobot_pose_obs import PoseStateTracker
 
-        self._split_follower_action = split_follower_action
-        self._PoseStateTracker = PoseStateTracker
+            self._split_follower_action = split_follower_action
+            self._PoseStateTracker = PoseStateTracker
 
-        self._robot = DobotRobot(
-            ip=ip, speed=speed, user=user_index, tool=tool_index, **dobot_kwargs
-        )
-        # Only import + construct the gripper when it's actually enabled, so
-        # nodes without motorbridge can still use the controller with
-        # enable_gripper=False.
-        if enable_gripper:
-            from .dobot_gripper import DamiaoGripper
-
-            self._gripper = DamiaoGripper(
-                port=gripper_port,
-                closed_deg=gripper_closed_deg,
-                open_deg=gripper_open_deg,
-                max_velocity_rad_s=gripper_max_velocity_rad_s,
-                force_ratio=gripper_force_ratio,
+            self._robot = DobotRobot(
+                ip=ip, speed=speed, user=user_index, tool=tool_index, **dobot_kwargs
             )
-        else:
-            self._gripper = None
-        self._action_mode = action_mode
-        self._state_mode = state_mode
-        self._gripper_norm = gripper_norm
-        self._enable_gripper = bool(enable_gripper)
-        self._gripper_required = bool(gripper_required)
-        self._gripper_home_on_start = bool(gripper_home_on_start)
-        self._payload = payload
-        self._enable_ft_sensor = enable_ft_sensor
-        self._enabled = False
-        self._follower_engaged = False
-        # PoseStateTracker for pose-mode prev_state (reset in reset_pose_tracker).
-        self._pose_tracker = PoseStateTracker()
+            # Only import + construct the gripper when it's actually enabled, so
+            # nodes without motorbridge can still use the controller with
+            # enable_gripper=False.
+            if enable_gripper:
+                from .dobot_gripper import DamiaoGripper
 
-        # Connect + enable immediately (matching rebot's connect-in-__init__ pattern).
-        # This runs on the remote Ray actor; by the time launch_controller returns,
-        # the arm is connected, enabled, and ready for servo.
-        self.enable()
+                self._gripper = DamiaoGripper(
+                    port=gripper_port,
+                    closed_deg=gripper_closed_deg,
+                    open_deg=gripper_open_deg,
+                    max_velocity_rad_s=gripper_max_velocity_rad_s,
+                    force_ratio=gripper_force_ratio,
+                )
+            else:
+                self._gripper = None
+            self._action_mode = action_mode
+            self._state_mode = state_mode
+            self._gripper_norm = gripper_norm
+            self._enable_gripper = bool(enable_gripper)
+            self._gripper_required = bool(gripper_required)
+            self._gripper_home_on_start = bool(gripper_home_on_start)
+            self._payload = payload
+            self._enable_ft_sensor = enable_ft_sensor
+            self._enabled = False
+            self._follower_engaged = False
+            # PoseStateTracker for pose-mode prev_state (reset in reset_pose_tracker).
+            self._pose_tracker = PoseStateTracker()
+
+            # Connect + enable immediately (matching rebot's
+            # connect-in-__init__ pattern). This runs on the remote Ray actor;
+            # by the time launch_controller returns, the arm is ready for servo.
+            self.enable()
+        except BaseException:
+            if hasattr(self, "_gripper") and self._gripper is not None:
+                try:
+                    self._gripper.close()
+                except Exception:
+                    pass
+            if hasattr(self, "_robot"):
+                try:
+                    self._robot.disable_robot()
+                except Exception:
+                    pass
+                try:
+                    self._robot.close()
+                except Exception:
+                    pass
+            self._ownership_lock.release()
+            raise
 
     # ------------------------------------------------------------------
     # Enable / disable / close
@@ -237,17 +299,20 @@ class DobotController(Worker):
 
     def close(self) -> None:
         """Safely shut down the arm + gripper (idempotent)."""
-        self._follower_engaged = False
-        if self._gripper is not None:
+        try:
+            self._follower_engaged = False
+            if self._gripper is not None:
+                try:
+                    self._gripper.close()
+                except Exception:
+                    pass
             try:
-                self._gripper.close()
+                self._robot.close()
             except Exception:
                 pass
-        try:
-            self._robot.close()
-        except Exception:
-            pass
-        self._enabled = False
+            self._enabled = False
+        finally:
+            self._ownership_lock.release()
 
     # ------------------------------------------------------------------
     # Health check
@@ -431,12 +496,10 @@ class DobotController(Worker):
                 accepted = self._robot.servo_joints((q * _RAD2DEG).tolist())
                 if not accepted:
                     raise RuntimeError(
-                        f"reset ServoJ rejected at frame {frame_idx}/"
-                        f"{len(trajectory)}"
+                        f"reset ServoJ rejected at frame {frame_idx}/{len(trajectory)}"
                     )
-                if (
-                    frame_idx % feedback_interval_frames == 0
-                    or frame_idx == len(trajectory)
+                if frame_idx % feedback_interval_frames == 0 or frame_idx == len(
+                    trajectory
                 ):
                     self.assert_ready()
                     feedback = np.asarray(self.get_joint_status(), dtype=float)
@@ -534,7 +597,9 @@ class DobotController(Worker):
             or np.any(velocity <= 0)
             or np.any(acceleration <= 0)
         ):
-            raise ValueError("reset velocity and acceleration limits must be finite and positive")
+            raise ValueError(
+                "reset velocity and acceleration limits must be finite and positive"
+            )
 
         delta = cls._shortest_angular_delta(target, start)
         effective_target = start + delta

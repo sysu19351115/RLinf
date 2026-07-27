@@ -672,13 +672,65 @@ class EnvWorker(Worker):
             self.eval_prev_done[stage_id] = prev | current_dones
 
         if newly_done.any():
+            current_terminations = chunk_terminations.any(dim=1)
+            current_truncations = chunk_truncations.any(dim=1)
             if "final_info" in infos:
                 final_info = infos["final_info"]
                 for key in final_info["episode"]:
                     env_info[key] = final_info["episode"][key][newly_done].cpu()
+                operator_metrics = self._extract_operator_metrics(final_info)
             elif "episode" in infos:
                 for key in infos["episode"]:
                     env_info[key] = infos["episode"][key][newly_done].cpu()
+                operator_metrics = self._extract_operator_metrics(infos)
+            else:
+                operator_metrics = {}
+
+            done_mask_cpu = newly_done.cpu()
+            for key, value in operator_metrics.items():
+                if value.ndim > 0 and value.shape[0] == done_mask_cpu.shape[0]:
+                    value = value[done_mask_cpu]
+                env_info[key] = value.cpu()
+
+            # Standalone real-world evaluation is autonomous by contract.
+            # Keep an explicit metric instead of asking downstream users to
+            # infer it from the absence of intervention.
+            if "success_no_intervened" in env_info:
+                env_info["autonomous_success"] = env_info["success_no_intervened"].to(
+                    dtype=torch.float32
+                )
+            if "episode_len" in env_info:
+                step_frequency = float(
+                    self.cfg.env.eval.override_cfg.get("step_frequency", 1.0)
+                )
+                if step_frequency <= 0:
+                    raise ValueError(
+                        "env.eval.override_cfg.step_frequency must be positive "
+                        "to report episode_duration_s."
+                    )
+                env_info["episode_duration_s"] = (
+                    env_info["episode_len"].to(dtype=torch.float32) / step_frequency
+                )
+
+            control_infos = infos.get("final_info", infos)
+            has_reason = (
+                isinstance(control_infos, dict)
+                and control_infos.get("termination_reason") is not None
+            )
+            if not has_reason:
+                # Gym time limits end through truncation. Other unlabeled
+                # terminations are reported separately instead of being
+                # silently mixed with operator-labelled outcomes.
+                timeout_mask = newly_done & current_truncations
+                environment_mask = newly_done & current_terminations
+                if timeout_mask.any():
+                    env_info["episode_end/timeout"] = timeout_mask[newly_done].to(
+                        dtype=torch.float32
+                    )
+                if environment_mask.any():
+                    env_info["episode_end/environment_termination"] = environment_mask[
+                        newly_done
+                    ].to(dtype=torch.float32)
 
         rlt_switch_flags = (
             infos["rlt_switch_flags"] if "rlt_switch_flags" in infos else None
