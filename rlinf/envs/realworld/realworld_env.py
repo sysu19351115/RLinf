@@ -346,9 +346,11 @@ class RealWorldEnv(gym.Env):
         raw_chunk_intervene_flag = []
         raw_chunk_rlt_switch_flags = []
         raw_chunk_episode_step_ids = []
+        raw_chunk_action_command_accepted = []
         chunk_episode_id = None
         stopped_early = False
         shutdown_requested = False
+        controller_rejection_detected = False
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
@@ -363,6 +365,46 @@ class RealWorldEnv(gym.Env):
             raw_chunk_episode_step_ids.append(
                 torch.as_tensor(infos["episode_step_id"], dtype=torch.int64)
             )
+            if "action_command_accepted" in infos:
+                command_accepted = self._info_bool_array(
+                    infos, "action_command_accepted"
+                )
+            else:
+                # Other real-world environments may not expose controller
+                # acknowledgement. A step that returned normally remains
+                # backward-compatible and is considered accepted.
+                command_accepted = np.ones(self.num_envs, dtype=bool)
+            raw_chunk_action_command_accepted.append(
+                torch.as_tensor(command_accepted, dtype=torch.bool)
+            )
+            command_rejected = np.logical_not(command_accepted)
+            if command_rejected.any():
+                reason_values = np.asarray(
+                    infos.get(
+                        "termination_reason",
+                        np.full(self.num_envs, "none", dtype=object),
+                    ),
+                    dtype=object,
+                )
+                if reason_values.ndim == 0:
+                    reason_values = np.full(
+                        self.num_envs, reason_values.item(), dtype=object
+                    )
+                reason_values = reason_values.reshape(-1)
+                if reason_values.shape != (self.num_envs,):
+                    raise ValueError(
+                        "info['termination_reason'] must have shape "
+                        f"({self.num_envs},), got {reason_values.shape}."
+                    )
+                reason_values[command_rejected] = "controller_rejection"
+                infos["termination_reason"] = reason_values
+                infos["controller_rejection"] = command_rejected.copy()
+                truncations = torch.logical_or(
+                    truncations,
+                    torch.as_tensor(command_rejected, dtype=torch.bool),
+                )
+                controller_rejection_detected = True
+                self._episode_needs_reset = True
             shutdown_requested = shutdown_requested or bool(
                 self._info_bool_array(infos, "operator_shutdown_requested").any()
             )
@@ -375,7 +417,10 @@ class RealWorldEnv(gym.Env):
             chunk_rewards.append(step_reward)
             raw_chunk_terminations.append(terminations)
             raw_chunk_truncations.append(truncations)
-            if torch.logical_or(terminations, truncations).all():
+            if (
+                command_rejected.any()
+                or torch.logical_or(terminations, truncations).all()
+            ):
                 # RealWorldEnv currently permits exactly one env per worker.
                 # Never execute stale actions after an operator/fault/timeout
                 # has ended that episode. Pad tensors below so the rollout
@@ -409,6 +454,9 @@ class RealWorldEnv(gym.Env):
                 raw_chunk_episode_step_ids.append(
                     torch.full((self.num_envs,), -1, dtype=torch.int64)
                 )
+                raw_chunk_action_command_accepted.append(
+                    torch.zeros(self.num_envs, dtype=torch.bool)
+                )
                 if raw_chunk_intervene_actions:
                     raw_chunk_intervene_actions.append(zero_intervene_action.clone())
                     raw_chunk_intervene_flag.append(zero_intervene_flag.clone())
@@ -437,17 +485,27 @@ class RealWorldEnv(gym.Env):
                 raw_chunk_rlt_switch_flags, dim=1
             )
             infos_list[-1] = infos_last
-        executed_action_mask = torch.zeros(
-            (self.num_envs, chunk_size), dtype=torch.bool
+        action_command_accepted_mask = torch.stack(
+            raw_chunk_action_command_accepted, dim=1
         )
-        executed_action_mask[:, :executed_steps] = True
+        step_reached_mask = torch.zeros((self.num_envs, chunk_size), dtype=torch.bool)
+        step_reached_mask[:, :executed_steps] = True
+        executed_action_mask = torch.logical_and(
+            step_reached_mask, action_command_accepted_mask
+        )
+        infos_last["action_command_accepted_mask"] = action_command_accepted_mask
         infos_last["executed_action_mask"] = executed_action_mask
         infos_last["skipped_action_steps"] = chunk_size - executed_steps
         infos_last["episode_id"] = chunk_episode_id
         infos_last["episode_step_ids"] = torch.stack(raw_chunk_episode_step_ids, dim=1)
         infos_list[-1] = infos_last
 
-        if past_dones.any() and self.auto_reset and not shutdown_requested:
+        if (
+            past_dones.any()
+            and self.auto_reset
+            and not shutdown_requested
+            and not controller_rejection_detected
+        ):
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones.cpu().numpy(), obs_list[-1], infos_list[-1]
             )

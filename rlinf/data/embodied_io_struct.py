@@ -38,6 +38,7 @@ TERMINATION_REASON_CODES = {
     "operator_quit": 3,
     "keyboard_disconnected": 4,
     "keyboard_listener_error": 5,
+    "controller_rejection": 6,
 }
 UNKNOWN_TERMINATION_REASON_CODE = -1
 
@@ -426,9 +427,20 @@ class Trajectory:
     next_obs: dict[str, Any] = field(default_factory=dict)
 
     def validate_expert_replay_contract(
-        self, required_forward_input_keys: Optional[list[str]] = None
+        self,
+        required_forward_input_keys: Optional[list[str]] = None,
+        min_human_steps: Optional[int] = None,
     ) -> None:
-        """Fail closed when an extracted expert trajectory is unsafe to train on."""
+        """Fail closed when an extracted expert trajectory is unsafe to train on.
+
+        When *min_human_steps* is ``None`` (default) every step must be
+        human-intervened — the original 10-step expert-chunk contract.
+
+        When *min_human_steps* is set, the trajectory is accepted as long as
+        at least that many steps are human-intervened.  This supports the
+        hybrid 50-step window where model suffix actions complete the
+        training horizon after a human prefix.
+        """
         required_forward_input_keys = required_forward_input_keys or []
         if self.actions is None or self.actions.dim() < 3:
             raise ValueError("Expert trajectory actions must have shape [T, B, ...].")
@@ -440,8 +452,25 @@ class Trajectory:
             raise ValueError(
                 "intervene_flags do not match action trajectory dimensions."
             )
-        if not self.intervene_flags.to(torch.bool).all():
-            raise ValueError("Expert trajectory contains non-intervention actions.")
+        if min_human_steps is None:
+            if not self.intervene_flags.to(torch.bool).all():
+                raise ValueError("Expert trajectory contains non-intervention actions.")
+        else:
+            if "human_action_mask" not in self.audit_info:
+                raise ValueError(
+                    "A hybrid expert trajectory is missing human_action_mask."
+                )
+            human_action_mask = self.audit_info["human_action_mask"].to(torch.bool)
+            if human_action_mask.shape[:2] != trajectory_batch_shape:
+                raise ValueError(
+                    "human_action_mask does not match action trajectory dimensions."
+                )
+            human_steps = int(human_action_mask.sum().item())
+            if human_steps < min_human_steps:
+                raise ValueError(
+                    f"Expert trajectory has only {human_steps} human steps, "
+                    f"but at least {min_human_steps} are required."
+                )
 
         required_audit_keys = {
             "executed_action_mask",
@@ -1683,3 +1712,409 @@ def convert_trajectories_to_batch(
             batch[field_name] = torch.cat(field_list, dim=1)
 
     return batch
+
+
+@dataclass
+class AuditedExecutionChunk:
+    """A single audited execution chunk extracted from a rollout trajectory.
+
+    Each chunk carries the per-step action, human-intervention mask, executed
+    mask, episode provenance, and the forward inputs that produced it. The
+    assembler consumes these chunks to build 50-step training windows anchored
+    on fully-human chunks.
+    """
+
+    episode_id: int
+    episode_step_ids: torch.Tensor
+    action: torch.Tensor
+    human_action_mask: torch.Tensor
+    executed_action_mask: torch.Tensor
+    forward_inputs: dict[str, torch.Tensor]
+    model_version: torch.Tensor | None
+    termination_reason_code: int
+
+
+def _normalize_model_version(version: Any) -> torch.Tensor | None:
+    """Return one scalar model version, rejecting ambiguous chunk metadata."""
+    if version is None:
+        return None
+    tensor = torch.as_tensor(version).detach()
+    if tensor.numel() == 0:
+        raise ValueError("model_version must not be empty.")
+    unique_versions = torch.unique(tensor.reshape(-1))
+    if unique_versions.numel() != 1:
+        raise ValueError(
+            "A rollout chunk contains multiple model versions: "
+            f"{unique_versions.tolist()}."
+        )
+    return unique_versions[0].cpu().clone()
+
+
+@dataclass
+class _PendingAnchor:
+    """Internal state for a partially-accumulated training window."""
+
+    episode_id: int
+    next_expected_step_id: int
+    forward_inputs: dict[str, torch.Tensor]
+    model_version: torch.Tensor | None
+    actions: list[torch.Tensor]
+    human_action_mask: list[torch.Tensor]
+    executed_action_mask: list[torch.Tensor]
+    episode_step_ids: list[torch.Tensor]
+    chunk_count: int
+
+
+class ExpertAnchoredWindowAssembler:
+    """Build 50-step training windows from 10-step audited execution chunks.
+
+    PI0.5 has ``action_horizon=50`` but the environment executes in 10-step
+    chunks. The DAgger path only saves 10-step expert chunks. This assembler
+    builds 50-step windows: when a fully-human 10-step chunk appears, it becomes
+    a window anchor, and subsequent re-planned and actually-executed model
+    chunks complete the 50-step training horizon.
+
+    The assembler is stateful: pending anchors survive across rollout batches
+    so that windows can be assembled from chunks arriving in different batches.
+    """
+
+    _DROP_REASONS = (
+        "termination",
+        "unexecuted_action",
+        "episode_change",
+        "model_version_change",
+        "step_discontinuity",
+        "below_min_human",
+        "manual_clear",
+    )
+
+    def __init__(
+        self,
+        execution_chunk_steps: int = 10,
+        training_window_steps: int = 50,
+        window_stride_steps: int = 10,
+        min_human_steps_per_window: int = 10,
+        action_dim: int = 8,
+    ) -> None:
+        positive_integer_args = {
+            "execution_chunk_steps": execution_chunk_steps,
+            "training_window_steps": training_window_steps,
+            "window_stride_steps": window_stride_steps,
+            "min_human_steps_per_window": min_human_steps_per_window,
+            "action_dim": action_dim,
+        }
+        for name, value in positive_integer_args.items():
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+        if training_window_steps % execution_chunk_steps != 0:
+            raise ValueError(
+                "training_window_steps must be a multiple of execution_chunk_steps."
+            )
+        if window_stride_steps % execution_chunk_steps != 0:
+            raise ValueError(
+                "window_stride_steps must be a multiple of execution_chunk_steps."
+            )
+        if min_human_steps_per_window > training_window_steps:
+            raise ValueError(
+                "min_human_steps_per_window must not exceed training_window_steps."
+            )
+
+        self.execution_chunk_steps = execution_chunk_steps
+        self.training_window_steps = training_window_steps
+        self.window_stride_steps = window_stride_steps
+        self.min_human_steps_per_window = min_human_steps_per_window
+        self.action_dim = action_dim
+        self.chunks_per_window = training_window_steps // execution_chunk_steps
+        self._anchors: dict[int, list[_PendingAnchor]] = {}
+        self._last_anchor_step: dict[int, int] = {}
+        self._episode_ids: dict[int, int] = {}
+        self._completed_windows: list[dict[str, Any]] = []
+        self._window_emitted = 0
+        self._window_dropped = 0
+        self._window_drop_reasons = dict.fromkeys(self._DROP_REASONS, 0)
+
+    @property
+    def pending_count(self) -> int:
+        """Total number of pending anchors across all environments."""
+        return sum(len(anchors) for anchors in self._anchors.values())
+
+    def _record_dropped(self, reason: str, count: int = 1) -> None:
+        if count <= 0:
+            return
+        self._window_dropped += count
+        self._window_drop_reasons[reason] = (
+            self._window_drop_reasons.get(reason, 0) + count
+        )
+
+    def get_metrics(self) -> dict[str, int]:
+        """Return cumulative window counters plus the current pending gauge."""
+        metrics = {
+            "window_emitted": self._window_emitted,
+            "window_dropped": self._window_dropped,
+            "pending_anchor": self.pending_count,
+        }
+        metrics.update(
+            {
+                f"window_drop_reason/{reason}": count
+                for reason, count in self._window_drop_reasons.items()
+            }
+        )
+        return metrics
+
+    def _validate_chunk(self, chunk: AuditedExecutionChunk) -> None:
+        cs = self.execution_chunk_steps
+        if chunk.action.shape != (cs, self.action_dim):
+            raise ValueError(
+                f"chunk.action must have shape ({cs}, {self.action_dim}), "
+                f"got {tuple(chunk.action.shape)}"
+            )
+        if chunk.episode_step_ids.shape != (cs,):
+            raise ValueError(
+                f"chunk.episode_step_ids must have shape ({cs},), "
+                f"got {tuple(chunk.episode_step_ids.shape)}"
+            )
+        if chunk.human_action_mask.shape != (cs,):
+            raise ValueError(
+                f"chunk.human_action_mask must have shape ({cs},), "
+                f"got {tuple(chunk.human_action_mask.shape)}"
+            )
+        if chunk.executed_action_mask.shape != (cs,):
+            raise ValueError(
+                f"chunk.executed_action_mask must have shape ({cs},), "
+                f"got {tuple(chunk.executed_action_mask.shape)}"
+            )
+        if chunk.human_action_mask.dtype != torch.bool:
+            raise ValueError(
+                f"chunk.human_action_mask must be bool dtype, "
+                f"got {chunk.human_action_mask.dtype}"
+            )
+        if chunk.executed_action_mask.dtype != torch.bool:
+            raise ValueError(
+                f"chunk.executed_action_mask must be bool dtype, "
+                f"got {chunk.executed_action_mask.dtype}"
+            )
+        if (
+            torch.is_floating_point(chunk.action)
+            and not torch.isfinite(chunk.action).all()
+        ):
+            raise ValueError("chunk.action contains NaN or Inf.")
+        if cs > 1:
+            diffs = chunk.episode_step_ids[1:].to(torch.long) - chunk.episode_step_ids[
+                :-1
+            ].to(torch.long)
+            if not torch.equal(diffs, torch.ones(cs - 1, dtype=torch.long)):
+                raise ValueError("chunk.episode_step_ids are not consecutive.")
+
+    def _create_anchor(self, chunk: AuditedExecutionChunk) -> _PendingAnchor:
+        chunk.model_version = _normalize_model_version(chunk.model_version)
+        next_step = int(chunk.episode_step_ids[-1].item()) + 1
+        return _PendingAnchor(
+            episode_id=chunk.episode_id,
+            next_expected_step_id=next_step,
+            forward_inputs=dict(chunk.forward_inputs),
+            model_version=chunk.model_version,
+            actions=[chunk.action],
+            human_action_mask=[chunk.human_action_mask],
+            executed_action_mask=[chunk.executed_action_mask],
+            episode_step_ids=[chunk.episode_step_ids],
+            chunk_count=1,
+        )
+
+    def _incompatibility_reason(
+        self, anchor: _PendingAnchor, chunk: AuditedExecutionChunk
+    ) -> str | None:
+        if chunk.episode_id != anchor.episode_id:
+            return "episode_change"
+        chunk_version = _normalize_model_version(chunk.model_version)
+        if (anchor.model_version is None) != (chunk_version is None):
+            return "model_version_change"
+        if anchor.model_version is not None and not torch.equal(
+            anchor.model_version, chunk_version
+        ):
+            return "model_version_change"
+        chunk_start = int(chunk.episode_step_ids[0].item())
+        if chunk_start != anchor.next_expected_step_id:
+            return "step_discontinuity"
+        return None
+
+    def _append_to_anchor(
+        self, anchor: _PendingAnchor, chunk: AuditedExecutionChunk
+    ) -> None:
+        anchor.actions.append(chunk.action)
+        anchor.human_action_mask.append(chunk.human_action_mask)
+        anchor.executed_action_mask.append(chunk.executed_action_mask)
+        anchor.episode_step_ids.append(chunk.episode_step_ids)
+        anchor.next_expected_step_id = int(chunk.episode_step_ids[-1].item()) + 1
+        anchor.chunk_count += 1
+
+    def _emit_window(self, anchor: _PendingAnchor) -> dict[str, Any]:
+        actions = torch.cat(anchor.actions, dim=0)
+        human_mask = torch.cat(anchor.human_action_mask, dim=0)
+        executed_mask = torch.cat(anchor.executed_action_mask, dim=0)
+        step_ids = torch.cat(anchor.episode_step_ids, dim=0)
+        human_steps = int(human_mask.sum().item())
+        model_steps = self.training_window_steps - human_steps
+        return {
+            "action": actions,
+            "human_action_mask": human_mask,
+            "executed_action_mask": executed_mask,
+            "episode_step_ids": step_ids,
+            "episode_id": anchor.episode_id,
+            "forward_inputs": anchor.forward_inputs,
+            "model_version": anchor.model_version,
+            "human_steps": human_steps,
+            "model_steps": model_steps,
+            "human_fraction": human_steps / self.training_window_steps,
+        }
+
+    def ingest_chunk(self, env_idx: int, chunk: AuditedExecutionChunk) -> None:
+        """Ingest a single execution chunk for the given environment.
+
+        Validates the chunk, then either opens a new anchor (fully-human chunk),
+        extends compatible pending anchors, or discards incompatible ones. When
+        an anchor reaches the full training window length it is emitted as a
+        completed window.
+        """
+        # Termination/padding chunk: discard all pending before strict
+        # validation, since such chunks carry sentinel step_ids.
+        if chunk.termination_reason_code != TERMINATION_REASON_CODES["none"]:
+            self.clear_env(env_idx, reason="termination")
+            return
+
+        # Unexecuted chunk: discard all pending before strict validation.
+        if not chunk.executed_action_mask.all():
+            self.clear_env(env_idx, reason="unexecuted_action")
+            return
+
+        previous_episode_id = self._episode_ids.get(env_idx)
+        if previous_episode_id is not None and previous_episode_id != chunk.episode_id:
+            self.clear_env(env_idx, reason="episode_change")
+        self._episode_ids[env_idx] = chunk.episode_id
+
+        self._validate_chunk(chunk)
+        chunk.model_version = _normalize_model_version(chunk.model_version)
+
+        # Snapshot existing anchors before potentially adding a new one so the
+        # new anchor is not subjected to the extend/discard loop below.
+        existing = self._anchors.get(env_idx, [])
+
+        # Open a new anchor when a fully-human chunk arrives (stride permitting).
+        new_anchor: _PendingAnchor | None = None
+        if chunk.human_action_mask.all():
+            step_start = int(chunk.episode_step_ids[0].item())
+            last = self._last_anchor_step.get(env_idx)
+            if last is None or step_start - last >= self.window_stride_steps:
+                new_anchor = self._create_anchor(chunk)
+                self._last_anchor_step[env_idx] = step_start
+
+        # Extend or discard existing anchors (not the new one).
+        survivors: list[_PendingAnchor] = []
+        for anchor in existing:
+            incompatibility_reason = self._incompatibility_reason(anchor, chunk)
+            if incompatibility_reason is None:
+                self._append_to_anchor(anchor, chunk)
+                survivors.append(anchor)
+            else:
+                self._record_dropped(incompatibility_reason)
+        self._anchors[env_idx] = survivors
+
+        # Add the new anchor after extending existing ones.
+        if new_anchor is not None:
+            self._anchors.setdefault(env_idx, []).append(new_anchor)
+
+        # Emit completed windows.
+        remaining: list[_PendingAnchor] = []
+        for anchor in self._anchors[env_idx]:
+            if anchor.chunk_count >= self.chunks_per_window:
+                window = self._emit_window(anchor)
+                if window["human_steps"] >= self.min_human_steps_per_window:
+                    self._completed_windows.append(window)
+                    self._window_emitted += 1
+                else:
+                    self._record_dropped("below_min_human")
+            else:
+                remaining.append(anchor)
+        self._anchors[env_idx] = remaining
+
+    def ingest_trajectory(self, traj: Trajectory, action_dim: int) -> None:
+        """Ingest all chunks from a Trajectory in chronological order.
+
+        Iterates over T timesteps and B batch entries, extracting per-env
+        chunks and feeding them to ingest_chunk in order.
+        """
+        if traj.actions is None or traj.actions.dim() < 2:
+            raise ValueError("Trajectory actions must have shape [T, B, ...].")
+        T, B = traj.actions.shape[:2]
+        chunk = self.execution_chunk_steps
+        actions = traj.actions.reshape(T, B, chunk, action_dim)
+
+        for t in range(T):
+            for b in range(B):
+                ep_id = int(traj.audit_info["episode_id"][t, b].item())
+                step_ids = traj.audit_info["episode_step_ids"][t, b]
+                term_code = int(traj.audit_info["termination_reason_code"][t, b].item())
+                raw_human_mask = traj.intervene_flags[t, b].to(torch.bool)
+                if raw_human_mask.numel() == chunk:
+                    human_mask = raw_human_mask.reshape(chunk)
+                elif raw_human_mask.numel() == chunk * action_dim:
+                    action_mask = raw_human_mask.reshape(chunk, action_dim)
+                    if not torch.equal(
+                        action_mask,
+                        action_mask[:, :1].expand_as(action_mask),
+                    ):
+                        raise ValueError(
+                            "Action-aligned intervene_flags disagree within an "
+                            "action step."
+                        )
+                    human_mask = action_mask[:, 0]
+                else:
+                    raise ValueError(
+                        "intervene_flags must contain one value per action step "
+                        "or per action element; "
+                        f"got {raw_human_mask.numel()} values."
+                    )
+                exec_mask = traj.audit_info["executed_action_mask"][t, b].to(torch.bool)
+                action = actions[t, b]
+                version = traj.versions[t, b] if traj.versions is not None else None
+
+                fwd_inputs: dict[str, torch.Tensor] = {}
+                for key, val in traj.forward_inputs.items():
+                    if isinstance(val, torch.Tensor):
+                        fwd_inputs[key] = val[t, b]
+                    else:
+                        fwd_inputs[key] = val
+
+                chunk_obj = AuditedExecutionChunk(
+                    episode_id=ep_id,
+                    episode_step_ids=step_ids,
+                    action=action,
+                    human_action_mask=human_mask,
+                    executed_action_mask=exec_mask,
+                    forward_inputs=fwd_inputs,
+                    model_version=version,
+                    termination_reason_code=term_code,
+                )
+                self.ingest_chunk(b, chunk_obj)
+
+    def emit_windows(self) -> list[dict[str, Any]]:
+        """Return and clear the list of completed windows."""
+        windows = self._completed_windows
+        self._completed_windows = []
+        return windows
+
+    def clear_env(self, env_idx: int, reason: str = "manual_clear") -> None:
+        """Discard all pending anchors for an environment.
+
+        Called on reset, episode change, discontinuity, padding, or fault.
+        """
+        self._record_dropped(reason, len(self._anchors.get(env_idx, [])))
+        self._anchors.pop(env_idx, None)
+        self._last_anchor_step.pop(env_idx, None)
+        self._episode_ids.pop(env_idx, None)
+
+    def clear_all(self) -> None:
+        """Discard all pending anchors for all environments."""
+        self._record_dropped("manual_clear", self.pending_count)
+        self._anchors = {}
+        self._last_anchor_step = {}
+        self._episode_ids = {}

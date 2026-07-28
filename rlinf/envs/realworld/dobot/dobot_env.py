@@ -701,7 +701,16 @@ class DobotEnv(gym.Env):
                     self._success_hold_counter >= self.config.success_hold_steps
                 )
             truncated = self._num_steps >= self.config.max_num_steps
-            return observation, reward, terminated, truncated, {}
+            return (
+                observation,
+                reward,
+                terminated,
+                truncated,
+                {
+                    "action_command_accepted": False,
+                    "action_rejection_reason": "non_finite_action",
+                },
+            )
 
         executed_action = self._prepare_executed_action(action)
 
@@ -745,6 +754,8 @@ class DobotEnv(gym.Env):
             "executed_action": executed_action.copy(),
             "action_command_accepted": bool(accepted),
         }
+        if not accepted:
+            info["action_rejection_reason"] = "safety_guard"
         return observation, reward, terminated, truncated, info
 
     @property

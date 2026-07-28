@@ -62,3 +62,108 @@ def test_replay_sample_preserves_audit_info(tmp_path):
     torch.testing.assert_close(
         loaded.audit_info["episode_step_ids"], torch.arange(4).reshape(1, 1, 4)
     )
+
+
+def test_schema_mismatch_fails_closed(tmp_path):
+    """A replay directory written with one schema must reject a different one."""
+    import json
+    import os
+
+    # Write a metadata.json with an old schema version
+    meta_path = os.path.join(str(tmp_path), "metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump({"schema_version": "dobot_hg_dagger_10step_v1"}, f)
+
+    import pytest
+
+    with pytest.raises(ValueError, match="schema mismatch"):
+        TrajectoryReplayBuffer(
+            seed=1,
+            auto_save=True,
+            auto_save_path=str(tmp_path),
+            schema_version="dobot_hg_dagger_hybrid_h50_v1",
+        )
+
+
+def test_corrupt_metadata_fails_closed(tmp_path):
+    """A replay directory with unreadable metadata must never be accepted."""
+    import os
+
+    meta_path = os.path.join(str(tmp_path), "metadata.json")
+    with open(meta_path, "w") as f:
+        f.write("{not-valid-json")
+
+    import pytest
+
+    with pytest.raises(ValueError, match="Cannot read replay metadata"):
+        TrajectoryReplayBuffer(
+            seed=1,
+            auto_save=True,
+            auto_save_path=str(tmp_path),
+            schema_version="dobot_hg_dagger_hybrid_h50_v1",
+        )
+
+
+def test_schema_match_succeeds(tmp_path):
+    """Same schema version should not raise."""
+    import json
+    import os
+
+    meta_path = os.path.join(str(tmp_path), "metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump({"schema_version": "dobot_hg_dagger_hybrid_h50_v1"}, f)
+
+    TrajectoryReplayBuffer(
+        seed=1,
+        auto_save=True,
+        auto_save_path=str(tmp_path),
+        schema_version="dobot_hg_dagger_hybrid_h50_v1",
+    )
+
+
+def test_unversioned_directory_does_not_block(tmp_path):
+    """A new empty directory without metadata.json should allow creation."""
+    TrajectoryReplayBuffer(
+        seed=1,
+        auto_save=True,
+        auto_save_path=str(tmp_path),
+        schema_version="dobot_hg_dagger_hybrid_h50_v1",
+    )
+
+
+def test_nonempty_directory_without_metadata_fails_closed(tmp_path):
+    """Existing replay payload without metadata must never be guessed."""
+    import pytest
+
+    (tmp_path / "trajectory_0_weights-7.pt").write_bytes(b"legacy replay")
+
+    with pytest.raises(ValueError, match="metadata.json is missing"):
+        TrajectoryReplayBuffer(
+            seed=1,
+            auto_save=True,
+            auto_save_path=str(tmp_path),
+            schema_version="dobot_hg_dagger_hybrid_h50_v2",
+        )
+
+
+def test_checkpoint_schema_mismatch_fails_closed(tmp_path):
+    """load_checkpoint must enforce the same schema check as construction."""
+    import json
+
+    import pytest
+
+    checkpoint_path = tmp_path / "checkpoint"
+    checkpoint_path.mkdir()
+    with (checkpoint_path / "metadata.json").open("w") as f:
+        json.dump({"schema_version": "dobot_hg_dagger_10step_v1"}, f)
+
+    replay = TrajectoryReplayBuffer(
+        seed=1,
+        auto_save=False,
+        schema_version="dobot_hg_dagger_hybrid_h50_v2",
+    )
+    try:
+        with pytest.raises(ValueError, match="schema mismatch"):
+            replay.load_checkpoint(str(checkpoint_path))
+    finally:
+        replay.close(wait=True)

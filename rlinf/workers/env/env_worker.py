@@ -552,6 +552,7 @@ class EnvWorker(Worker):
                 "operator_quit",
                 "keyboard_disconnected",
                 "keyboard_listener_error",
+                "controller_rejection",
             ):
                 reason_mask = reason_values == reason
                 if reason_mask.any():

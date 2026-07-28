@@ -240,6 +240,7 @@ class TrajectoryReplayBuffer:
         auto_save: bool = False,
         auto_save_path: str = "",
         trajectory_format: str = "pt",
+        schema_version: str = "unversioned",
     ):
         """
         Initialize trajectory-based replay buffer.
@@ -275,8 +276,10 @@ class TrajectoryReplayBuffer:
                 f"Created replay buffer with auto_save_path: {auto_save_path}"
             )
         self.auto_save_path = auto_save_path if self.auto_save else None
+        self.schema_version: str = schema_version
         if self.auto_save_path is not None:
             os.makedirs(self.auto_save_path, exist_ok=True)
+            self._check_schema_compatibility()
 
         # Trajectory index: dict mapping trajectory_id to trajectory metadata
         # Each entry: {
@@ -331,6 +334,38 @@ class TrajectoryReplayBuffer:
         self.random_generator = torch.Generator()
         self.random_generator.manual_seed(seed)
 
+    def _check_schema_compatibility(self) -> None:
+        """Fail closed if an existing replay directory has a different schema."""
+        meta_path = self._get_metadata_path()
+        if not os.path.exists(meta_path):
+            existing_entries = os.listdir(self.auto_save_path)
+            if existing_entries:
+                raise ValueError(
+                    f"Replay buffer metadata.json is missing from non-empty "
+                    f"directory {self.auto_save_path}. Refusing to mix or "
+                    f"overwrite unversioned replay data."
+                )
+            return
+        try:
+            with open(meta_path) as f:
+                metadata = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            raise ValueError(
+                f"Cannot read replay metadata at {meta_path}: {e}. "
+                f"Remove or fix the replay directory before training."
+            ) from e
+        self._validate_schema_metadata(metadata, meta_path)
+
+    def _validate_schema_metadata(self, metadata: dict, metadata_path: str) -> None:
+        """Validate replay schema before loading or mutating buffer state."""
+        stored = metadata.get("schema_version", "unversioned")
+        if stored != self.schema_version:
+            raise ValueError(
+                f"Replay buffer schema mismatch at {metadata_path}: stored "
+                f"schema is {stored}, but {self.schema_version} was requested. "
+                f"Use a separate replay directory or migrate the data."
+            )
+
     def _get_trajectory_path(
         self,
         trajectory_id: int,
@@ -360,6 +395,7 @@ class TrajectoryReplayBuffer:
         with self._index_lock:
             metadata = {
                 "trajectory_format": self.trajectory_format,
+                "schema_version": self.schema_version,
                 "size": self.size,
                 "total_samples": self._total_samples,
                 "trajectory_counter": self._trajectory_counter,
@@ -1022,6 +1058,7 @@ class TrajectoryReplayBuffer:
 
         with open(metadata_path, "r") as f:
             metadata = json.load(f)
+        self._validate_schema_metadata(metadata, metadata_path)
 
         # Update instance attributes from metadata
         self.trajectory_format = metadata.get(

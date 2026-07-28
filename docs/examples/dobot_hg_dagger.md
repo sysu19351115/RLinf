@@ -225,7 +225,7 @@ cd /home/tyz/project/RLinf
 Replay 数据默认写入：
 
 ```text
-logs/dobot_hg_dagger/replay_buffer/rank_<actor_rank>/
+logs/dobot_hg_dagger/replay_buffer_h50/rank_<actor_rank>/
 ```
 
 不要把 replay 目录当作未经检查即可发布的数据集；训练前仍应核对 episode 数量、
@@ -269,6 +269,89 @@ export DOBOT_HG_DAGGER_EVAL_CHECKPOINT_ID=hgdagger-step-0040
 输出包含 `autonomous_success`、`episode_duration_s`、`success_once`、
 `success_no_intervened` 和 `episode_end/<termination_reason>`；启动日志同时打印
 checkpoint id 与路径。评估配置固定为一个物理环境。
+
+## 混合 50 步训练窗口
+
+PI0.5 的训练 horizon 为 50 步（`action_horizon=50`），但环境每轮执行 10 步
+（`num_action_chunks=10`）。当前 HG-DAgger 不再只保存 10 步专家 chunk，而是
+构建 50 步混合窗口：每个全人工 10 步 chunk 成为一个窗口锚点，后续重新推理且
+实际执行的模型 chunk 填充至 50 步。
+
+### 窗口构建规则
+
+- 每个全人工 10 步 chunk 开启一个候选窗口。
+- 一个窗口只能包含同一模型版本生成的 chunk；权重版本变化会丢弃未完成的旧
+  anchor，避免版本 provenance 与实际 suffix 不一致。
+- 后续 chunk（人工或模型）按时间顺序追加到所有兼容的候选窗口。
+- 当候选窗口积累 5 个 chunk（50 步）时，生成一个训练样本。
+- 模型后缀动作是每次 10 步重新推理的结果，不是干预前预测的残留动作。
+- Dobot safety guard 拒绝指令或检测到 NaN/Inf 动作时立即停止当前 chunk；
+  rejected step 和剩余 padding 都不会标记为 executed。该 episode 记录
+  `controller_rejection` 并要求显式 reset，不会自动 reset 后继续运动。
+- `only_save_expert: true` 是兼容既有 rollout 代码的旧配置名，表示关闭经典
+  DAgger 的 model-only chunk 专家重标注；它不表示 replay 窗口只有专家动作。
+  H50 样本仍由人工前缀和真机实际执行的模型后缀组成。
+- 窗口内只要有人工动作就优先使用人工动作。例如 30 步连续人工干预会产生
+  三个窗口：
+  - `h0-h29 + m30-m49`（obs@s0，60% 人工）
+  - `h10-h29 + m30-m59`（obs@s10，40% 人工）
+  - `h20-h29 + m30-m69`（obs@s20，20% 人工）
+
+### Loss 范围
+
+默认 `loss_scope: human_only`，仅对 `human_action_mask=True` 的动作步计算
+8 维环境动作 MSE；模型 suffix 用于补齐 PI0.5 的 50 步输入目标，但不会产生
+监督梯度。实验性 `loss_scope: full_window` 会恢复对全部 50 步计算 loss 的
+自蒸馏行为。未知 scope 或缺失 human mask 会立即失败。
+
+Replay 同时保存 step-level `[1,1,50]` 的 `human_action_mask`，并把
+`Trajectory.intervene_flags` 按 8 维环境动作展开为 `[1,1,400]`。窗口级
+`human_steps/model_steps/human_fraction` 保持 `[1,1]`，三类字段的语义和维度
+有意不同。
+
+### 窗口可观测指标
+
+Actor 指标包含累计计数 `dagger/window_emitted`、
+`dagger/window_dropped`，当前 gauge `dagger/pending_anchor`，以及
+`dagger/window_drop_reason/<reason>`。drop reason 区分终止、未执行动作、
+episode 切换、模型版本变化、step 不连续和人工步数不足；控制器拒绝同时记录
+`episode_end/controller_rejection`。即使 replay 尚未达到
+最小训练大小、该轮跳过 optimizer update，这些指标也会返回，便于发现“训练
+进程存活但窗口一直没有落盘”的情况。
+
+### Replay 目录
+
+50 步窗口使用独立 schema（`dobot_hg_dagger_hybrid_h50_v2`）。v2 增加
+masked-loss 输入、规范化版本和 action-aligned intervention mask；旧 replay
+无法加载到新 buffer。目录为：
+
+```text
+logs/dobot_hg_dagger/replay_buffer_h50/rank_<actor_rank>/
+```
+
+Hybrid replay 只保存 SFT 所需的 observation、tokenized prompt、action 和
+human mask；`chains`、`denoise_inds`、`model_action` 等 rollout-only 字段会
+在写入前删除。空目录允许初始化新的 metadata；非空目录缺少
+`metadata.json`、schema 不匹配，或 checkpoint schema 不匹配时都会拒绝启动
+或加载。
+
+### Preflight 检查
+
+硬件启动前运行真实 checkpoint 的 forward 验证：
+
+```bash
+.venv/bin/python tests/integration_tests/test_dobot_hg_dagger_openpi_h50.py
+```
+
+脚本从自身位置解析仓库根目录，并从
+`DOBOT_HG_DAGGER_MODEL_PATH`、`DOBOT_HG_DAGGER_NORM_STATS_PATH` 读取
+checkpoint，不依赖 `/home/zylab` 或 `/home/tyz` 等机器特定路径。
+
+验证 `prepare_dagger_sft_batch` 正确 reshape 为 `[B, 50, 32]`，`sft_forward`
+产生有限 masked loss，严格验证全部 PaliGemma 参数冻结且 action expert 至少
+存在一个可训练参数。脚本必须完成
+backward、optimizer step、冻结参数不变、可训练参数变化和更新后有限 loss 的
+全部断言才返回成功；CUDA OOM 会使 gate 失败。完整验证需要 32 GB 以上显存。
 
 ## 机器人独占所有权
 

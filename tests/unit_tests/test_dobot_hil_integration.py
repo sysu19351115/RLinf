@@ -229,6 +229,72 @@ class TestHGDAggerRealWorldPropagation:
         )
         venv.close()
 
+    def test_rejected_command_stops_chunk_and_requires_reset(self, monkeypatch):
+        env, venv, kb = _make_realworld_stack()
+        env.reset()
+        original_step = venv.step
+        command_acceptance = iter([True, False])
+        step_calls = 0
+
+        def step_with_rejection(action):
+            nonlocal step_calls
+            step_calls += 1
+            obs, reward, terminated, truncated, info = original_step(action)
+            info["action_command_accepted"] = np.array(
+                [next(command_acceptance)], dtype=bool
+            )
+            return obs, reward, terminated, truncated, info
+
+        monkeypatch.setattr(venv, "step", step_with_rejection)
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        _, _, _, truncations, infos_list = env.chunk_step(chunk)
+
+        assert step_calls == 2
+        assert kb.unwrapped.num_steps == 2
+        np.testing.assert_array_equal(
+            truncations.numpy(), np.array([[False, True, False, False]])
+        )
+        assert infos_list[-1]["skipped_action_steps"] == 2
+        np.testing.assert_array_equal(
+            infos_list[-1]["executed_action_mask"].numpy(),
+            np.array([[True, False, False, False]]),
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["action_command_accepted_mask"].numpy(),
+            np.array([[True, False, False, False]]),
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["episode_step_ids"].numpy(),
+            np.array([[0, 1, -1, -1]]),
+        )
+        assert np.asarray(infos_list[-1]["termination_reason"]).item() == (
+            "controller_rejection"
+        )
+        with pytest.raises(RuntimeError, match="reset"):
+            env.chunk_step(chunk[:, :1])
+        venv.close()
+
+    def test_controller_rejection_never_auto_resets(self, monkeypatch):
+        env, venv, kb = _make_realworld_stack(auto_reset=True)
+        env.reset()
+        original_step = venv.step
+
+        def step_with_rejection(action):
+            obs, reward, terminated, truncated, info = original_step(action)
+            info["action_command_accepted"] = np.array([False], dtype=bool)
+            return obs, reward, terminated, truncated, info
+
+        monkeypatch.setattr(venv, "step", step_with_rejection)
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 1
+        with pytest.raises(RuntimeError, match="reset"):
+            env.chunk_step(chunk[:, :1])
+        venv.close()
+
     def test_online_termination_skips_remaining_chunk_actions(self):
         env, venv, kb = _make_realworld_stack(episode_control_mode="online")
         env.reset()

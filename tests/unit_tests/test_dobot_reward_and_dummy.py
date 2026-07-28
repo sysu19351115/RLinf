@@ -95,15 +95,29 @@ def test_relative_gripper_action_is_binary_and_reported_as_executed():
         )
     )
     env._state = SimpleNamespace(gripper_position=0.8)
-    action = np.array(
-        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.1], dtype=np.float32
-    )
+    action = np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.1], dtype=np.float32)
 
     _, _, _, _, info = env.step(action)
 
     assert info["executed_action"][-1] == 0.0
     assert info["action_command_accepted"] is True
     assert action[-1] == pytest.approx(0.1)
+    env.close()
+
+
+@pytest.mark.parametrize("invalid_value", [np.nan, np.inf, -np.inf])
+def test_nonfinite_action_reports_command_rejection(invalid_value):
+    env = _dummy_pose_env()
+    action = np.array(
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5],
+        dtype=np.float64,
+    )
+    action[0] = invalid_value
+
+    _, _, _, _, info = env.step(action)
+
+    assert info["action_command_accepted"] is False
+    assert info["action_rejection_reason"] == "non_finite_action"
     env.close()
 
 
@@ -184,9 +198,7 @@ def test_reset_trajectory_is_minimum_jerk_and_step_limited():
 
     assert duration > 3.0
     assert np.max(step_deg) <= 1.0 + 1e-9
-    np.testing.assert_allclose(
-        trajectory[-1], effective_target, rtol=0.0, atol=1e-12
-    )
+    np.testing.assert_allclose(trajectory[-1], effective_target, rtol=0.0, atol=1e-12)
 
     # Minimum-jerk starts and ends much more gently than its middle section.
     first_step = float(np.max(step_deg[0]))

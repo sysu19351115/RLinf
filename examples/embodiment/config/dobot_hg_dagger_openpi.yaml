@@ -72,9 +72,26 @@ algorithm:
     init_beta: 1.0
     beta_schedule: "constant"
     beta_decay: 1.0
+    # Legacy rollout key: True disables classic expert relabeling of model-only
+    # chunks. Hybrid replay still contains a human prefix plus the actually
+    # executed model suffix; it is not an "expert-only window" switch.
     only_save_expert: True
-    # Dobot pose training is unsafe without the pre-action robot state.
-    required_forward_input_keys: ["observation/prev_state"]
+    # Training is unsafe without the anchor image and pre-action robot state.
+    required_forward_input_keys:
+      - "observation/prev_state"
+      - "observation/image"
+    # Hybrid 50-step window: every fully-human 10-step execution chunk opens a
+    # candidate window.  Subsequent re-planned and actually-executed model
+    # chunks complete the 50-step training horizon.  Model suffix actions are
+    # fresh re-inference results, never stale predictions from the pre-
+    # intervention output.
+    execution_chunk_steps: ${actor.model.num_action_chunks}
+    training_window_steps: ${actor.model.openpi.action_horizon}
+    window_stride_steps: ${actor.model.num_action_chunks}
+    window_anchor: "full_human_chunk"
+    min_human_steps_per_window: ${actor.model.num_action_chunks}
+    # Default decision: supervise only human-controlled steps in each H50 window.
+    loss_scope: "human_only"
 
   gamma: 0.99
   update_epoch: 1
@@ -87,7 +104,9 @@ algorithm:
     min_buffer_size: 4
     sample_window_size: 200
     auto_save: True
+    auto_save_path: ${project_path:logs/dobot_hg_dagger/replay_buffer_h50}
     trajectory_format: "pt"
+    schema_version: "dobot_hg_dagger_hybrid_h50_v2"
 
 env:
   group_name: "EnvGroup"

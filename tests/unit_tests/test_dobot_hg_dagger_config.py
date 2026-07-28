@@ -70,6 +70,27 @@ def _assert_algorithm_and_safety_contract(cfg: DictConfig) -> None:
     assert cfg.actor.model.openpi.train_expert_only is True
     assert cfg.rollout.model.model_path == cfg.actor.model.model_path
 
+    # Hybrid 50-step window contract
+    d = cfg.algorithm.dagger
+    assert d.execution_chunk_steps == 10
+    assert d.training_window_steps == 50
+    assert d.window_stride_steps == 10
+    assert d.window_anchor == "full_human_chunk"
+    assert d.min_human_steps_per_window == 10
+    assert d.loss_scope == "human_only"
+    assert list(d.required_forward_input_keys) == [
+        "observation/prev_state",
+        "observation/image",
+    ]
+    assert cfg.algorithm.replay_buffer.schema_version.endswith("_v2")
+    assert str(cfg.algorithm.replay_buffer.auto_save_path).endswith(
+        "logs/dobot_hg_dagger/replay_buffer_h50"
+    )
+    assert d.training_window_steps == cfg.actor.model.openpi.action_horizon
+    assert d.execution_chunk_steps == cfg.actor.model.num_action_chunks
+    assert d.window_stride_steps == d.execution_chunk_steps
+    assert d.training_window_steps % d.execution_chunk_steps == 0
+
 
 def test_single_node_config_is_safe_and_resolvable(monkeypatch):
     cfg = _compose("dobot_hg_dagger_openpi", monkeypatch)

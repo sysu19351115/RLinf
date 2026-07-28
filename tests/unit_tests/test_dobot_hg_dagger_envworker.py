@@ -64,6 +64,23 @@ def test_extracts_keyboard_failure_reason():
     )
 
 
+def test_extracts_controller_rejection_metrics_and_audit_code():
+    infos = {
+        "termination_reason": np.array(["controller_rejection"]),
+        "executed_action_mask": torch.tensor([[True, False, False, False]]),
+        "episode_id": torch.tensor([4]),
+        "episode_step_ids": torch.tensor([[0, 1, -1, -1]]),
+    }
+
+    metrics = EnvWorker._extract_operator_metrics(infos)
+    audit_info = EnvWorker._extract_trajectory_audit_info(infos)
+
+    torch.testing.assert_close(
+        metrics["episode_end/controller_rejection"], torch.tensor([1.0])
+    )
+    torch.testing.assert_close(audit_info["termination_reason_code"], torch.tensor([6]))
+
+
 def test_extracts_trajectory_audit_info_from_final_info():
     audit_info = EnvWorker._extract_trajectory_audit_info(
         {

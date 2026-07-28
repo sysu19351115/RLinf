@@ -16,6 +16,7 @@ import asyncio
 import os
 import threading
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -26,7 +27,11 @@ from rlinf.data.datasets.dagger import (
     RollingLeRobotDataset,
     build_dataloader_from_dataset,
 )
-from rlinf.data.embodied_io_struct import Trajectory
+from rlinf.data.embodied_io_struct import (
+    TERMINATION_REASON_CODES,
+    ExpertAnchoredWindowAssembler,
+    Trajectory,
+)
 from rlinf.data.replay_buffer import TrajectoryReplayBuffer
 from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.scheduler import Channel, Worker
@@ -273,6 +278,19 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
                 trajectory_format=self.cfg.algorithm.replay_buffer.get(
                     "trajectory_format", "pt"
                 ),
+                schema_version=self.cfg.algorithm.replay_buffer.get(
+                    "schema_version", "unversioned"
+                ),
+            )
+            dagger_cfg = self.cfg.algorithm.dagger
+            self._window_assembler = ExpertAnchoredWindowAssembler(
+                execution_chunk_steps=dagger_cfg.get("execution_chunk_steps", 10),
+                training_window_steps=dagger_cfg.get("training_window_steps", 50),
+                window_stride_steps=dagger_cfg.get("window_stride_steps", 10),
+                min_human_steps_per_window=dagger_cfg.get(
+                    "min_human_steps_per_window", 10
+                ),
+                action_dim=self.cfg.actor.model.action_dim,
             )
         else:
             self._build_lerobot_dataset()
@@ -297,19 +315,84 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
             return self.recv_lerobot_rollout_trajectories(input_channel)
 
     def recv_buffer_rollout_trajectories(self, recv_list: list[Trajectory]) -> None:
-        intervene_traj_list = []
+        action_dim = self.cfg.actor.model.action_dim
         for traj in recv_list:
             assert isinstance(traj, Trajectory)
-            intervene_trajs = traj.extract_intervene_traj(mode="all")
-            if intervene_trajs is not None:
-                required_keys = self.cfg.algorithm.dagger.get(
-                    "required_forward_input_keys", []
+            self._window_assembler.ingest_trajectory(traj, action_dim)
+        windows = self._window_assembler.emit_windows()
+        if not windows:
+            return
+        required_keys = self.cfg.algorithm.dagger.get("required_forward_input_keys", [])
+        min_human = self.cfg.algorithm.dagger.get("min_human_steps_per_window", 10)
+        window_trajectories = [
+            self._window_to_trajectory(w, action_dim) for w in windows
+        ]
+        for traj in window_trajectories:
+            traj.validate_expert_replay_contract(
+                required_keys, min_human_steps=min_human
+            )
+        self.replay_buffer.add_trajectories(window_trajectories)
+
+    @staticmethod
+    def _window_to_trajectory(window: dict[str, Any], action_dim: int) -> Trajectory:
+        """Convert a 50-step hybrid window into a single-step Trajectory."""
+        actions = window["action"].reshape(1, 1, -1)  # [1, 1, 50*action_dim]
+        human_mask = window["human_action_mask"].reshape(1, 1, -1)  # [1, 1, 50]
+        intervene_flags = (
+            human_mask.unsqueeze(-1).expand(-1, -1, -1, action_dim).reshape(1, 1, -1)
+        )
+        executed_mask = window["executed_action_mask"].reshape(1, 1, -1)
+        step_ids = window["episode_step_ids"].reshape(1, 1, -1)
+        episode_id = torch.tensor([[window["episode_id"]]], dtype=torch.int64)
+        term_code = TERMINATION_REASON_CODES["none"]
+        termination_reason_code = torch.tensor([[term_code]], dtype=torch.int64)
+        forward_inputs: dict[str, Any] = {}
+        for key, val in window["forward_inputs"].items():
+            keep_key = key.startswith("observation/") or key in {
+                "tokenized_prompt",
+                "tokenized_prompt_mask",
+            }
+            if keep_key and isinstance(val, torch.Tensor):
+                # Add T=1, B=1 leading dims. unsqueeze works for any rank,
+                # preserving multi-D tensors like images [C, H, W] intact.
+                forward_inputs[key] = val.unsqueeze(0).unsqueeze(0)
+            elif keep_key:
+                forward_inputs[key] = val
+        forward_inputs["action"] = actions.clone()
+        forward_inputs["human_action_mask"] = human_mask.clone()
+        audit_info = {
+            "executed_action_mask": executed_mask,
+            "termination_reason_code": termination_reason_code,
+            "episode_id": episode_id,
+            "episode_step_ids": step_ids,
+            "human_action_mask": human_mask,
+            "human_steps": torch.tensor([[window["human_steps"]]], dtype=torch.int64),
+            "model_steps": torch.tensor([[window["model_steps"]]], dtype=torch.int64),
+            "human_fraction": torch.tensor(
+                [[window["human_fraction"]]], dtype=torch.float32
+            ),
+        }
+        mw_id = ""
+        mv = window.get("model_version")
+        versions = None
+        if mv is not None:
+            mv = torch.as_tensor(mv).reshape(-1)
+            if mv.numel() != 1:
+                raise ValueError(
+                    "Hybrid window model_version must contain exactly one value."
                 )
-                for intervene_traj in intervene_trajs:
-                    intervene_traj.validate_expert_replay_contract(required_keys)
-                intervene_traj_list.extend(intervene_trajs)
-        if intervene_traj_list:
-            self.replay_buffer.add_trajectories(intervene_traj_list)
+            mw_id = f"v{int(mv.item())}"
+            versions = mv.reshape(1, 1).clone()
+        return Trajectory(
+            max_episode_length=1,
+            model_weights_id=mw_id,
+            actions=actions,
+            intervene_flags=intervene_flags,
+            audit_info=audit_info,
+            forward_inputs=forward_inputs,
+            versions=versions,
+            rewards=torch.zeros((1, 1, 1)),
+        )
 
     def _recv_lerobot_episodes_from_channel(self, input_channel: Channel) -> bool:
         """Receive up to one actor-side split from the shared Actor channel.
@@ -449,7 +532,8 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
             # Replay-buffer samples store model inputs under forward_inputs.
             if "forward_inputs" in batch:
                 batch = batch["forward_inputs"]
-            return self.model.prepare_dagger_sft_batch(batch)
+            loss_scope = self.cfg.algorithm.dagger.get("loss_scope", "full_window")
+            return self.model.prepare_dagger_sft_batch(batch, loss_scope=loss_scope)
         return self.model.prepare_lerobot_sft_batch(batch)
 
     @Worker.timer("forward_actor")
@@ -578,6 +662,11 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
                 for key, value in replay_buffer_stats.items()
             }
             append_to_dict(metrics, replay_buffer_stats)
+            window_stats = {
+                f"dagger/{key}": value
+                for key, value in self._window_assembler.get_metrics().items()
+            }
+            append_to_dict(metrics, window_stats)
         else:
             lerobot_dataset_stats = self.dataset.get_stats()
             lerobot_dataset_stats = {
@@ -646,7 +735,7 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
                 self.log_on_first_rank(
                     f"Replay buffer size {len(self.replay_buffer)} < {min_buffer_size}, skipping training"
                 )
-                return {}
+                return self.process_train_metrics({})
         elif self._skip_lerobot_training():
             return {}
         assert (

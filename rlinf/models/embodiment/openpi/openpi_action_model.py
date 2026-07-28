@@ -40,6 +40,53 @@ def _to_numpy(x):
     return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
 
 
+def _resolve_dagger_loss_mask(
+    batch: dict[str, Any], loss_scope: str
+) -> torch.Tensor | None:
+    """Resolve the per-step mask requested by a DAgger loss scope."""
+    if loss_scope == "full_window":
+        return None
+    if loss_scope != "human_only":
+        raise ValueError(
+            f"Unsupported DAgger loss_scope '{loss_scope}'. "
+            "Expected one of: full_window, human_only."
+        )
+    if "human_action_mask" not in batch:
+        raise ValueError(
+            "DAgger loss_scope='human_only' requires human_action_mask in "
+            "replay forward_inputs."
+        )
+    return batch["human_action_mask"].to(torch.bool)
+
+
+def _reduce_sft_loss(
+    loss: torch.Tensor,
+    *,
+    action_horizon: int,
+    action_env_dim: int,
+    use_action_chunk_loss: bool,
+    loss_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reduce elementwise SFT loss, optionally over selected action steps."""
+    if use_action_chunk_loss:
+        loss = loss[:, :action_horizon, :action_env_dim]
+    if loss_mask is None:
+        return loss.mean()
+
+    mask = torch.as_tensor(loss_mask, device=loss.device)
+    if mask.dim() != 2 or tuple(mask.shape) != tuple(loss.shape[:2]):
+        raise ValueError(
+            "SFT loss_mask must have shape [batch, action_horizon]; "
+            f"got {tuple(mask.shape)} for loss {tuple(loss.shape)}."
+        )
+    selected_steps = mask.to(dtype=loss.dtype).sum()
+    if selected_steps.item() <= 0:
+        raise ValueError("SFT loss_mask selects no action steps.")
+    expanded_mask = mask.to(dtype=loss.dtype).unsqueeze(-1)
+    selected_elements = selected_steps * loss.shape[-1]
+    return (loss * expanded_mask).sum() / selected_elements
+
+
 @dataclass(frozen=True)
 class OpenPi0Config(Pi0Config):
     # config for rl
@@ -371,9 +418,11 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
 
         if isinstance(data, tuple):
             observation, actions = data
+            loss_mask = None
         else:
             observation = data["observation"]
             actions = data["actions"]
+            loss_mask = data.get("loss_mask")
 
         device = next(self.parameters()).device
         register_pytree_dataclasses(observation)
@@ -398,9 +447,13 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             )
         else:
             loss = super().forward(observation, actions)
-        if use_action_chunk_loss:
-            loss = loss[:, : self.config.action_chunk, : self.config.action_env_dim]
-        vla_loss = loss.mean()
+        vla_loss = _reduce_sft_loss(
+            loss,
+            action_horizon=self.config.action_horizon,
+            action_env_dim=self.config.action_env_dim,
+            use_action_chunk_loss=use_action_chunk_loss,
+            loss_mask=loss_mask,
+        )
         if not self.config.use_rlt:
             return vla_loss
 
@@ -603,9 +656,10 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             "ref_chunk": ref_chunk.to(device=z_rl.device, dtype=torch.float32),
         }
 
-    def prepare_dagger_sft_batch(self, batch):
+    def prepare_dagger_sft_batch(self, batch, loss_scope: str = "full_window"):
         """Prepare replay-buffer samples for DAgger SFT updates."""
         device = next(self.parameters()).device
+        loss_mask = _resolve_dagger_loss_mask(batch, loss_scope)
         obs_dict = {}
         obs_prefix_keys = [k for k in batch.keys() if k.startswith("observation/")]
         for key in obs_prefix_keys:
@@ -626,8 +680,17 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             processed_obs = self.precision_processor(processed_obs)
             observation = _model.Observation.from_dict(processed_obs)
         else:
+            # Hybrid 50-step window: action is [B, action_horizon * action_env_dim].
+            expected = bsz * self.config.action_horizon * self.config.action_env_dim
+            if batch["action"].numel() != expected:
+                raise ValueError(
+                    f"DAgger action has {batch['action'].numel()} elements, "
+                    f"expected {expected} (bsz={bsz}, "
+                    f"action_horizon={self.config.action_horizon}, "
+                    f"action_env_dim={self.config.action_env_dim})."
+                )
             obs_dict["actions"] = batch["action"].reshape(
-                bsz, self.config.action_chunk, -1
+                bsz, self.config.action_horizon, self.config.action_env_dim
             )
             obs_dict["prompt"] = ["empty" for _ in range(bsz)]
             processed_obs = self.input_transform(obs_dict, transpose=False)
@@ -645,10 +708,13 @@ class OpenPi0ForRLActionPrediction(PI0Pytorch, BasePolicy):
             lambda x: torch.as_tensor(x, device=device).contiguous().clone(),
             observation,
         )
-        return {
+        result = {
             "observation": observation,
             "actions": actions.to(torch.float32).to(device),
         }
+        if loss_mask is not None:
+            result["loss_mask"] = loss_mask.to(device=device).contiguous()
+        return result
 
     def prepare_lerobot_sft_batch(self, batch):
         """Prepare replay-buffer samples for DAgger SFT updates."""
