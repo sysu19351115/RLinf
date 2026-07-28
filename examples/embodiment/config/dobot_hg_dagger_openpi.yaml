@@ -34,7 +34,7 @@ cluster:
         configs:
           - node_rank: 0
             ip: "192.168.5.2"
-            speed: 5
+            speed: 10
             user_index: 0
             tool_index: 2
             action_mode: "cartesian"
@@ -63,7 +63,7 @@ runner:
   only_eval: False
   # Physical training and evaluation must be separate processes.
   val_check_interval: -1
-  save_interval: 20
+  save_interval: 10
   resume_dir: null
   ckpt_path: null
 
@@ -91,7 +91,7 @@ algorithm:
     window_anchor: "full_human_chunk"
     min_human_steps_per_window: ${actor.model.num_action_chunks}
     # Default decision: supervise only human-controlled steps in each H50 window.
-    loss_scope: "human_only"
+    loss_scope: "full_window" #"human_only"
 
   gamma: 0.99
   update_epoch: 1
