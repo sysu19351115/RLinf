@@ -36,8 +36,9 @@ from rlinf.models.embodiment.base_policy import ForwardType
 from rlinf.utils import omega_resolver  # noqa: F401
 
 
-def _load_cfg(checkpoint: str, precision: str):
+def _load_cfg(checkpoint: str, norm_stats: str, precision: str):
     os.environ["DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH"] = checkpoint
+    os.environ["DOBOT_HG_DAGGER_NORM_STATS_PATH"] = norm_stats
     os.environ.setdefault("DOBOT_HG_DAGGER_LR", "1e-6")
     config_dir = (
         Path(__file__).resolve().parents[2] / "examples" / "embodiment" / "config"
@@ -67,8 +68,13 @@ def _synthetic_env_obs():
     }
 
 
-def _load_model(checkpoint: str, precision: str, device: torch.device):
-    cfg, model_cfg = _load_cfg(checkpoint, precision)
+def _load_model(
+    checkpoint: str,
+    norm_stats: str,
+    precision: str,
+    device: torch.device,
+):
+    cfg, model_cfg = _load_cfg(checkpoint, norm_stats, precision)
     model = get_model(model_cfg)
     if model is None:
         raise RuntimeError("OpenPI PyTorch model factory returned None.")
@@ -80,7 +86,7 @@ def run_rollout_gate(args) -> None:
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    _, model = _load_model(args.checkpoint, "bf16", device)
+    _, model = _load_model(args.checkpoint, args.norm_stats, "bf16", device)
     noise = torch.randn(
         1,
         model.model.action_horizon,
@@ -153,7 +159,7 @@ def run_actor_gate(args) -> None:
     torch.manual_seed(args.seed)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    cfg, model = _load_model(args.checkpoint, "fp32", device)
+    cfg, model = _load_model(args.checkpoint, args.norm_stats, "fp32", device)
     model.train()
     model.gradient_checkpointing_enable(
         gradient_checkpointing_kwargs={"use_reentrant": False}
@@ -239,6 +245,7 @@ def run_actor_gate(args) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--norm-stats", required=True)
     parser.add_argument("--mode", choices=("rollout", "actor"), required=True)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--seed", type=int, default=1234)

@@ -31,6 +31,7 @@ transforms (the SFT data loader applies them upstream).
 from __future__ import annotations
 
 import logging
+import pathlib
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,26 @@ def _resolve_data_kwargs(cfg):
     if data_kwargs is not None:
         data_kwargs = OmegaConf.to_container(data_kwargs, resolve=True)
     return data_kwargs
+
+
+def _resolve_transform_kwargs(cfg, model_cfg) -> dict:
+    """Resolve data and explicit norm-stat overrides for OpenPI transforms."""
+    from omegaconf import OmegaConf
+
+    kwargs = {"data_kwargs": _resolve_data_kwargs(cfg)}
+    norm_stats_path = OmegaConf.select(model_cfg, "norm_stats_path", default=None)
+    if norm_stats_path is None:
+        return kwargs
+
+    path = pathlib.Path(str(norm_stats_path)).expanduser()
+    if path.name != "norm_stats.json" or not path.parent.name:
+        raise ValueError(
+            "actor.model.openpi.norm_stats_path must point to a norm_stats.json "
+            f"file; got {norm_stats_path!r}."
+        )
+    kwargs["norm_stats_dir"] = str(path.parent.parent)
+    kwargs["norm_stats_asset_id"] = path.parent.name
+    return kwargs
 
 
 def _build_eval_model(
@@ -78,7 +99,9 @@ def _build_eval_model(
         )
 
     input_transforms, output_transforms = build_openpi_transforms(
-        cfg.model_path, config_name, data_kwargs=_resolve_data_kwargs(cfg)
+        cfg.model_path,
+        config_name,
+        **_resolve_transform_kwargs(cfg, model_cfg),
     )
 
     eval_model = OpenPiPytorchEvalActionModel(
@@ -142,7 +165,9 @@ def _build_dagger_model(
             "actor.model.openpi.config_name is required for task='dagger'."
         )
     input_transforms, output_transforms = build_openpi_transforms(
-        cfg.model_path, config_name, data_kwargs=_resolve_data_kwargs(cfg)
+        cfg.model_path,
+        config_name,
+        **_resolve_transform_kwargs(cfg, model_cfg),
     )
     dagger_model = OpenPiPytorchDaggerActionModel(
         model,
@@ -198,7 +223,9 @@ def _build_rl_model(
         )
 
     input_transforms, output_transforms = build_openpi_transforms(
-        cfg.model_path, config_name, data_kwargs=_resolve_data_kwargs(cfg)
+        cfg.model_path,
+        config_name,
+        **_resolve_transform_kwargs(cfg, model_cfg),
     )
 
     rl_cfg = OpenPiPytorchRLConfig(

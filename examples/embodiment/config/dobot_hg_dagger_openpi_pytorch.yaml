@@ -241,8 +241,8 @@ actor:
       action_expert_variant: "gemma_300m"
       max_token_len: 200
       train_expert_only: True
-    # The new-format checkpoint bundles
-    # dobot_lerobot_pose_data/norm_stats.json.
+      # Exact norm_stats.json path; its parent directory is the OpenPI asset id.
+      norm_stats_path: ${oc.env:DOBOT_HG_DAGGER_NORM_STATS_PATH}
     openpi_data: null
 
   optim:

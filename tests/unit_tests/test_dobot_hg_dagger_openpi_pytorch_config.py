@@ -22,12 +22,16 @@ from rlinf.utils import omega_resolver  # noqa: F401
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "examples" / "embodiment" / "config"
 
 
-def _compose(config_name, monkeypatch):
+def _compose(config_name, monkeypatch, overrides=None):
     monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
     monkeypatch.setenv("DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH", "/tmp/model")
+    monkeypatch.setenv(
+        "DOBOT_HG_DAGGER_NORM_STATS_PATH",
+        "/tmp/assets/custom_dobot/norm_stats.json",
+    )
     monkeypatch.setenv("DOBOT_HG_DAGGER_LR", "1e-6")
     with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
-        cfg = compose(config_name=config_name)
+        cfg = compose(config_name=config_name, overrides=overrides or [])
     OmegaConf.resolve(cfg)
     return cfg
 
@@ -42,6 +46,10 @@ def _assert_contract(cfg):
     assert cfg.actor.model.action_dim == 8
     assert cfg.actor.model.openpi.model_action_dim == 32
     assert cfg.actor.model.openpi.train_expert_only is True
+    assert (
+        cfg.actor.model.openpi.norm_stats_path
+        == "/tmp/assets/custom_dobot/norm_stats.json"
+    )
     assert cfg.actor.model.add_value_head is False
     assert cfg.actor.fsdp_config.use_orig_params is True
     assert cfg.actor.fsdp_config.gradient_checkpointing is True
@@ -81,18 +89,54 @@ def test_two_node_openpi_pytorch_config(monkeypatch):
     assert cfg.cluster.node_groups[0].node_ranks == 0
     assert cfg.cluster.node_groups[1].node_ranks == 1
     assert cfg.cluster.node_groups[1].hardware.configs[0].node_rank == 1
-    assert cfg.dobot.ip == "192.168.5.2"
-    assert cfg.dobot.tool_index == 2
-    assert cfg.dobot.initial_joint_pos == [
-        -5.87,
-        -0.799,
-        -2.175,
-        1.89,
-        1.424,
-        0.621,
-        0.9,
-    ]
+    assert isinstance(cfg.dobot.ip, str) and cfg.dobot.ip
+    assert isinstance(cfg.dobot.tool_index, int)
+    assert len(cfg.dobot.initial_joint_pos) == 7
     hardware_cfg = cfg.cluster.node_groups[1].hardware.configs[0]
     assert hardware_cfg.ip == cfg.dobot.ip
     assert hardware_cfg.tool_index == cfg.dobot.tool_index
     assert cfg.env.train.override_cfg.initial_joint_pos == cfg.dobot.initial_joint_pos
+
+
+def test_two_node_top_level_dobot_overrides_propagate(monkeypatch):
+    cfg = _compose(
+        "dobot_hg_dagger_openpi_pytorch_2node",
+        monkeypatch,
+        overrides=[
+            "dobot.ip=10.0.0.8",
+            "dobot.tool_index=7",
+            "dobot.initial_joint_pos=[0.1,0.2,0.3,0.4,0.5,0.6,0.7]",
+        ],
+    )
+
+    hardware_cfg = cfg.cluster.node_groups[1].hardware.configs[0]
+    assert hardware_cfg.ip == "10.0.0.8"
+    assert hardware_cfg.tool_index == 7
+    assert cfg.env.train.override_cfg.initial_joint_pos == [
+        0.1,
+        0.2,
+        0.3,
+        0.4,
+        0.5,
+        0.6,
+        0.7,
+    ]
+
+
+def test_explicit_norm_stats_path_maps_to_transform_asset():
+    from rlinf.models.embodiment.openpi_pytorch.utils.model_builders import (
+        _resolve_transform_kwargs,
+    )
+
+    cfg = OmegaConf.create({"openpi_data": None})
+    model_cfg = OmegaConf.create(
+        {"norm_stats_path": "/data/checkpoints/run/custom_asset/norm_stats.json"}
+    )
+
+    kwargs = _resolve_transform_kwargs(cfg, model_cfg)
+
+    assert kwargs == {
+        "data_kwargs": None,
+        "norm_stats_dir": "/data/checkpoints/run",
+        "norm_stats_asset_id": "custom_asset",
+    }

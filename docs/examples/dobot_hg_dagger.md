@@ -60,8 +60,17 @@ python -m rlinf.utils.ckpt_convertor.openpi.convert old2new \
     "$NEW_MODEL/dobot_lerobot_pose_data/norm_stats.json"
 
 export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH="$NEW_MODEL"
+export DOBOT_HG_DAGGER_NORM_STATS_PATH="$NEW_MODEL/dobot_lerobot_pose_data/norm_stats.json"
 export DOBOT_HG_DAGGER_LR=1e-6
 
+```
+
+如果 norm stats 位于 checkpoint 内的其他 asset 目录，变量必须直接指向实际
+文件。例如当前多物体 checkpoint：
+
+```bash
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new
+export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json"
 ```
 
 ## 4. OpenPI PyTorch 上线前门禁
@@ -77,6 +86,7 @@ source .venv/bin/activate
 
 python tests/hardware_tests/openpi_pytorch_dobot_hg_dagger_gate.py \
   --checkpoint "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH" \
+  --norm-stats "$DOBOT_HG_DAGGER_NORM_STATS_PATH" \
   --mode rollout \
   --device cuda
 ```
@@ -86,6 +96,7 @@ python tests/hardware_tests/openpi_pytorch_dobot_hg_dagger_gate.py \
 ```bash
 python tests/hardware_tests/openpi_pytorch_dobot_hg_dagger_gate.py \
   --checkpoint "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH" \
+  --norm-stats "$DOBOT_HG_DAGGER_NORM_STATS_PATH" \
   --mode actor \
   --device cuda
 ```
@@ -149,7 +160,8 @@ source .venv/bin/activate
 
 export RLINF_NODE_RANK=0
 export RLINF_COMM_NET_DEVICES=<GPU_COMM_IFACE>
-export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/data/checkpoints/pi05_dobot_pose_newtorch
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new
+export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json"
 export DOBOT_HG_DAGGER_LR=1e-6
 
 ray stop
@@ -165,7 +177,8 @@ source .venv/bin/activate
 export RLINF_NODE_RANK=1
 export RLINF_COMM_NET_DEVICES=<ROBOT_COMM_IFACE>
 export NCCL_IB_DISABLE=1
-export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/data/checkpoints/pi05_dobot_pose_newtorch
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new
+export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json"
 export DOBOT_HG_DAGGER_LR=1e-6
 export RLINF_KEYBOARD_DEVICE=/dev/input/by-id/<keyboard-event-kbd>
 
