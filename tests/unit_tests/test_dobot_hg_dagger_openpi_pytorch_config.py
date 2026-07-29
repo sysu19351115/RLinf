@@ -82,6 +82,8 @@ def test_single_node_openpi_pytorch_config(monkeypatch):
 def test_two_node_openpi_pytorch_config(monkeypatch):
     cfg = _compose("dobot_hg_dagger_openpi_pytorch_2node", monkeypatch)
     _assert_contract(cfg, actor_precision="bf16")
+    assert cfg.actor.fsdp_config.mixed_precision.reduce_dtype == "bf16"
+    assert cfg.actor.fsdp_config.mixed_precision.buffer_dtype == "bf16"
     assert cfg.cluster.num_nodes == 2
     assert cfg.cluster.component_placement.actor.node_group == "inference"
     assert cfg.cluster.component_placement.rollout.node_group == "robot"

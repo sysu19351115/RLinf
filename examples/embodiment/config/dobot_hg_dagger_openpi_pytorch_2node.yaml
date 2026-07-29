@@ -59,6 +59,13 @@ runner:
 actor:
   model:
     precision: bf16
+  # With one NO_SHARD actor rank there is no cross-rank gradient reduction.
+  # Keeping reduce_dtype=fp32 creates a full-model FP32 gradient buffer and a
+  # second 6.25 GiB BF16 cast buffer in FSDP's post-backward hook.
+  fsdp_config:
+    mixed_precision:
+      reduce_dtype: bf16
+      buffer_dtype: bf16
 
 env:
   train:
