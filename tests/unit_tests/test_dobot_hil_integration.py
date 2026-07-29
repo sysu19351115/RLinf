@@ -214,18 +214,76 @@ class TestHGDAggerRealWorldPropagation:
         )
         venv.close()
 
-    def test_partial_intervention_chunk_keeps_exact_step_mask(self):
+    def test_human_to_model_holds_stale_suffix_until_next_chunk(self):
         env, venv, kb = _make_realworld_stack()
         env.reset()
         kb.listener.press("h")
         kb.listener.press("m")
         chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        chunk[:, 2:, 0] = 0.05
 
-        _, _, _, _, infos_list = env.chunk_step(chunk)
+        _, _, terminations, truncations, infos_list = env.chunk_step(chunk)
 
         np.testing.assert_array_equal(
             infos_list[-1]["intervene_flag"].numpy(),
             np.array([[True, True, False, False]]),
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["handoff_hold_mask"].numpy(),
+            np.array([[False, False, True, True]]),
+        )
+        assert not np.logical_and(
+            infos_list[-1]["intervene_flag"].numpy(),
+            infos_list[-1]["handoff_hold_mask"].numpy(),
+        ).any()
+        override_actions = infos_list[-1]["intervene_action"].numpy().reshape(1, 4, 8)
+        np.testing.assert_allclose(
+            override_actions[0, 2:, 0],
+            np.array([_DUMMY_POSE[0], _DUMMY_POSE[0]]),
+        )
+        assert not bool(terminations.any())
+        assert not bool(truncations.any())
+        assert infos_list[-1]["skipped_action_steps"] == 0
+        assert kb._state == "model_armed"
+        for info in infos_list[2:]:
+            executed = np.asarray(info["executed_action"])[0]
+            assert executed[0] == pytest.approx(_DUMMY_POSE[0])
+
+        fresh = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        fresh[:, :, 0] = 0.003
+        _, _, _, _, fresh_infos = env.chunk_step(fresh)
+        assert kb._state == "model"
+        np.testing.assert_array_equal(
+            fresh_infos[-1]["handoff_hold_mask"].numpy(),
+            np.array([[False, False, False, False]]),
+        )
+        first_fresh_executed = np.asarray(fresh_infos[0]["executed_action"])[0]
+        assert first_fresh_executed[0] == pytest.approx(0.003)
+        venv.close()
+
+    def test_unsafe_fresh_model_chunk_after_handoff_is_rejected(self):
+        env, venv, kb = _make_realworld_stack()
+        env.reset()
+        kb.listener.press("h")
+        kb.listener.press("m")
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        env.chunk_step(chunk)
+
+        unsafe = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        unsafe[:, :, 0] = 0.05
+        _, _, _, truncations, infos_list = env.chunk_step(unsafe)
+
+        assert kb.unwrapped.num_steps == 5
+        np.testing.assert_array_equal(
+            truncations.numpy(), np.array([[True, False, False, False]])
+        )
+        assert infos_list[-1]["skipped_action_steps"] == 3
+        assert np.asarray(infos_list[-1]["termination_reason"]).item() == (
+            "unsafe_model_handoff"
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["executed_action_mask"].numpy(),
+            np.array([[True, False, False, False]]),
         )
         venv.close()
 

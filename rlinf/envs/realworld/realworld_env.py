@@ -288,7 +288,12 @@ class RealWorldEnv(gym.Env):
         step_reward = self._calc_step_reward(_reward)
         success_current_step = np.isclose(step_reward, 1.0)
         intervene_flag = np.zeros(self.num_envs, dtype=bool)
-        if "intervene_action" in infos:
+        if "intervene_flag" in infos:
+            raw_intervene_flag = np.asarray(infos["intervene_flag"], dtype=bool)
+            intervene_flag = raw_intervene_flag.reshape(self.num_envs, -1).any(axis=1)
+        elif "intervene_action" in infos:
+            # Backward compatibility for intervention wrappers that expose an
+            # override action but not an explicit per-step human label.
             for env_id in range(self.num_envs):
                 if infos["intervene_action"][env_id] is not None:
                     intervene_flag[env_id] = True
@@ -345,12 +350,15 @@ class RealWorldEnv(gym.Env):
         raw_chunk_intervene_actions = []
         raw_chunk_intervene_flag = []
         raw_chunk_rlt_switch_flags = []
+        raw_chunk_handoff_hold = []
         raw_chunk_episode_step_ids = []
         raw_chunk_action_command_accepted = []
         chunk_episode_id = None
         stopped_early = False
         shutdown_requested = False
         controller_rejection_detected = False
+        handoff_requested = False
+        handoff_rejection_detected = False
         for i in range(chunk_size):
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
@@ -408,6 +416,16 @@ class RealWorldEnv(gym.Env):
             shutdown_requested = shutdown_requested or bool(
                 self._info_bool_array(infos, "operator_shutdown_requested").any()
             )
+            request_replan = self._info_bool_array(infos, "request_replan")
+            handoff_hold = self._info_bool_array(infos, "handoff_hold")
+            handoff_rejected = self._info_bool_array(infos, "handoff_rejected")
+            handoff_requested = handoff_requested or bool(request_replan.any())
+            handoff_rejection_detected = handoff_rejection_detected or bool(
+                handoff_rejected.any()
+            )
+            raw_chunk_handoff_hold.append(
+                torch.as_tensor(handoff_hold, dtype=torch.bool)
+            )
             if "intervene_action" in infos:
                 raw_chunk_intervene_actions.append(infos["intervene_action"])
                 raw_chunk_intervene_flag.append(infos["intervene_flag"])
@@ -460,6 +478,9 @@ class RealWorldEnv(gym.Env):
                 if raw_chunk_intervene_actions:
                     raw_chunk_intervene_actions.append(zero_intervene_action.clone())
                     raw_chunk_intervene_flag.append(zero_intervene_flag.clone())
+                raw_chunk_handoff_hold.append(
+                    torch.zeros(self.num_envs, dtype=torch.bool)
+                )
 
         chunk_rewards = torch.stack(chunk_rewards, dim=1)  # [num_envs, chunk_steps]
         raw_chunk_terminations = torch.stack(
@@ -485,6 +506,8 @@ class RealWorldEnv(gym.Env):
                 raw_chunk_rlt_switch_flags, dim=1
             )
             infos_list[-1] = infos_last
+        infos_last["handoff_hold_mask"] = torch.stack(raw_chunk_handoff_hold, dim=1)
+        infos_list[-1] = infos_last
         action_command_accepted_mask = torch.stack(
             raw_chunk_action_command_accepted, dim=1
         )
@@ -505,10 +528,19 @@ class RealWorldEnv(gym.Env):
             and self.auto_reset
             and not shutdown_requested
             and not controller_rejection_detected
+            and not handoff_rejection_detected
         ):
             obs_list[-1], infos_list[-1] = self._handle_auto_reset(
                 past_dones.cpu().numpy(), obs_list[-1], infos_list[-1]
             )
+
+        if handoff_requested and not (
+            past_dones.any()
+            or shutdown_requested
+            or controller_rejection_detected
+            or handoff_rejection_detected
+        ):
+            self.env.call("complete_model_handoff")
 
         if self.auto_reset or self.ignore_terminations:
             chunk_terminations = torch.zeros_like(raw_chunk_terminations)

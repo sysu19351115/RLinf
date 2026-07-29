@@ -553,6 +553,7 @@ class EnvWorker(Worker):
                 "keyboard_disconnected",
                 "keyboard_listener_error",
                 "controller_rejection",
+                "unsafe_model_handoff",
             ):
                 reason_mask = reason_values == reason
                 if reason_mask.any():
@@ -571,6 +572,13 @@ class EnvWorker(Worker):
             if executed_mask.ndim == 1:
                 executed_mask = executed_mask.unsqueeze(0)
             metrics["episode_end/executed_action_fraction"] = executed_mask.mean(dim=-1)
+        if "handoff_hold_mask" in infos:
+            handoff_hold_mask = torch.as_tensor(
+                infos["handoff_hold_mask"], dtype=torch.float32
+            )
+            if handoff_hold_mask.ndim == 1:
+                handoff_hold_mask = handoff_hold_mask.unsqueeze(0)
+            metrics["control/handoff_hold_fraction"] = handoff_hold_mask.mean(dim=-1)
         return metrics
 
     @staticmethod
@@ -602,6 +610,21 @@ class EnvWorker(Worker):
         episode_id = torch.as_tensor(
             control_infos["episode_id"], dtype=torch.int64
         ).reshape(-1)
+        handoff_hold_mask = torch.as_tensor(
+            control_infos.get(
+                "handoff_hold_mask",
+                torch.zeros_like(executed_action_mask),
+            ),
+            dtype=torch.bool,
+        ).cpu()
+        if handoff_hold_mask.dim() == 1:
+            handoff_hold_mask = handoff_hold_mask.unsqueeze(0)
+        if handoff_hold_mask.shape != executed_action_mask.shape:
+            raise ValueError(
+                "handoff_hold_mask must match executed_action_mask, got "
+                f"{tuple(handoff_hold_mask.shape)} and "
+                f"{tuple(executed_action_mask.shape)}."
+            )
 
         reason_values = np.asarray(
             control_infos.get("termination_reason", ["none"])
@@ -622,12 +645,55 @@ class EnvWorker(Worker):
             "termination_reason_code": reason_codes.contiguous(),
             "episode_id": episode_id.contiguous(),
             "episode_step_ids": episode_step_ids.contiguous(),
+            "handoff_hold_mask": handoff_hold_mask.contiguous(),
         }
 
     def _update_last_rollout_audit(self, stage_id: int, env_output: EnvOutput) -> None:
         audit_info = self._extract_trajectory_audit_info(env_output.env_infos)
         if audit_info:
             self.rollout_results[stage_id].update_last_audit_info(audit_info)
+
+    def _apply_last_action_overrides(
+        self, stage_id: int, env_output: EnvOutput
+    ) -> None:
+        """Persist human and handoff-hold actions without relabeling holds."""
+        if env_output.intervene_actions is None:
+            return
+        human_flags = env_output.intervene_flags
+        if human_flags is None:
+            return
+
+        override_flags = human_flags
+        infos = env_output.env_infos
+        control_infos = (
+            infos["final_info"]
+            if isinstance(infos, dict) and "final_info" in infos
+            else infos
+        )
+        if isinstance(control_infos, dict) and "handoff_hold_mask" in control_infos:
+            handoff_hold_mask = torch.as_tensor(
+                control_infos["handoff_hold_mask"],
+                dtype=torch.bool,
+                device=human_flags.device,
+            )
+            if handoff_hold_mask.dim() == 1:
+                handoff_hold_mask = handoff_hold_mask.unsqueeze(0)
+            if handoff_hold_mask.shape != human_flags.shape:
+                raise ValueError(
+                    "handoff_hold_mask must match intervene_flags, got "
+                    f"{tuple(handoff_hold_mask.shape)} and "
+                    f"{tuple(human_flags.shape)}."
+                )
+            override_flags = torch.logical_or(human_flags, handoff_hold_mask)
+
+        self.rollout_results[stage_id].update_last_actions(
+            env_output.intervene_actions,
+            override_flags,
+        )
+        if not torch.equal(override_flags, human_flags):
+            self.rollout_results[stage_id].mark_last_step_with_intervene_flags(
+                human_flags
+            )
 
     def env_evaluate_step(
         self, raw_actions: torch.Tensor, stage_id: int
@@ -1199,11 +1265,7 @@ class EnvWorker(Worker):
                     env_output = env_outputs[stage_id]
                     curr_obs = env_output.obs
                     self._update_last_rollout_audit(stage_id, env_output)
-                    if env_output.intervene_actions is not None:
-                        self.rollout_results[stage_id].update_last_actions(
-                            env_output.intervene_actions,
-                            env_output.intervene_flags,
-                        )
+                    self._apply_last_action_overrides(stage_id, env_output)
 
                     reward_model_output = None
                     if reward_channel is not None and chunk_step_idx != 0:
@@ -1314,11 +1376,7 @@ class EnvWorker(Worker):
             for stage_id in range(self.stage_num):
                 env_output = env_outputs[stage_id]
                 self._update_last_rollout_audit(stage_id, env_output)
-                if env_output.intervene_actions is not None:
-                    self.rollout_results[stage_id].update_last_actions(
-                        env_output.intervene_actions,
-                        env_output.intervene_flags,
-                    )
+                self._apply_last_action_overrides(stage_id, env_output)
 
                 reward_model_output = None
                 if reward_channel is not None:

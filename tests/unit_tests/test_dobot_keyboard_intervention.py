@@ -564,6 +564,29 @@ class TestWrapperInit:
         with pytest.raises(ValueError, match="delta"):
             _make_wrapper(env, position_delta=-0.001)
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"handoff_max_position_jump_m": 0.0},
+            {"handoff_max_rotation_jump_deg": 0.0},
+        ],
+    )
+    def test_non_positive_handoff_limit_raises(self, kwargs):
+        env = _dummy_pose_env()
+        with pytest.raises(ValueError, match="handoff_max"):
+            _make_wrapper(env, **kwargs)
+        env.close()
+
+    def test_online_mode_cannot_disable_safe_model_handoff(self):
+        env = _dummy_pose_env()
+        with pytest.raises(ValueError, match="safe_model_handoff"):
+            _make_wrapper(
+                env,
+                episode_control_mode="online",
+                safe_model_handoff=False,
+            )
+        env.close()
+
 
 class TestStateMachine:
     def test_model_passthrough_no_event(self):
@@ -584,7 +607,7 @@ class TestStateMachine:
         assert bool(info["intervene_flag"].all())
         env.close()
 
-    def test_m_returns_to_model(self):
+    def test_m_defers_model_until_chunk_boundary(self):
         env = _dummy_pose_env()
         w = _make_wrapper(env, listener=FakeListener())
         w.reset()
@@ -592,7 +615,66 @@ class TestStateMachine:
         w.step(_DUMMY_POSE.copy())  # enter engage
         w.listener.press("m")
         _, _, _, _, info = w.step(_DUMMY_POSE.copy())
+        assert info["hil_state"] == "model_pending"
+        assert bool(np.asarray(info["request_replan"]).item())
+
+        stale = _DUMMY_POSE.copy()
+        stale[0] = 0.05
+        _, _, _, _, info = w.step(stale)
+        assert info["hil_state"] == "model_pending"
+        assert bool(np.asarray(info["handoff_hold"]).item())
+        np.testing.assert_allclose(info["executed_action"], _DUMMY_POSE)
+
+        w.complete_model_handoff()
+        fresh = _DUMMY_POSE.copy()
+        fresh[0] = 0.003
+        _, _, _, _, info = w.step(fresh)
         assert info["hil_state"] == "model"
+        assert not bool(np.asarray(info["handoff_hold"]).item())
+        np.testing.assert_allclose(info["executed_action"], fresh)
+        env.close()
+
+    def test_unsafe_first_model_action_after_handoff_fails_closed(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener())
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.press("m")
+        w.step(_DUMMY_POSE.copy())
+        w.complete_model_handoff()
+
+        unsafe = _DUMMY_POSE.copy()
+        unsafe[0] = 0.05
+        _, _, terminated, truncated, info = w.step(unsafe)
+
+        assert not terminated
+        assert truncated
+        assert info["hil_state"] == "model_armed"
+        assert bool(np.asarray(info["handoff_rejected"]).item())
+        assert info["termination_reason"] == "unsafe_model_handoff"
+        np.testing.assert_allclose(info["executed_action"], _DUMMY_POSE)
+        with pytest.raises(RuntimeError, match="reset"):
+            w.step(_DUMMY_POSE.copy())
+        env.close()
+
+    def test_non_finite_first_model_action_after_handoff_fails_closed(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(env, listener=FakeListener())
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.press("m")
+        w.step(_DUMMY_POSE.copy())
+        w.complete_model_handoff()
+
+        non_finite = _DUMMY_POSE.copy()
+        non_finite[0] = np.nan
+        _, _, _, truncated, info = w.step(non_finite)
+
+        assert truncated
+        assert bool(np.asarray(info["handoff_rejected"]).item())
+        np.testing.assert_allclose(info["executed_action"], _DUMMY_POSE)
         env.close()
 
     def test_model_to_model_no_intervene(self):

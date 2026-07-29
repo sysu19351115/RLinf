@@ -105,6 +105,12 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         abort_key: Key that discards the current episode (resets without saving).
         quit_keys: Keys that discard the current episode and exit the program.
         start_in_engage: If ``True``, begin in ENGAGE instead of MODEL.
+        safe_model_handoff: Hold until the current action chunk ends before
+            allowing MODEL control to resume.
+        handoff_max_position_jump_m: Maximum position difference between the
+            first fresh model action and current TCP feedback.
+        handoff_max_rotation_jump_deg: Maximum orientation difference between
+            the first fresh model action and current TCP feedback.
         listener: Optional pre-constructed keyboard listener (for testing).
             ``None`` creates a real :class:`KeyboardListener` (or a dummy one
             in dummy mode when evdev is unavailable).
@@ -130,6 +136,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         wait_for_start_on_reset: bool = False,
         start_key: str = "y",
         start_gate_timeout_s: float | None = None,
+        safe_model_handoff: bool = True,
+        handoff_max_position_jump_m: float = 0.005,
+        handoff_max_rotation_jump_deg: float = 2.0,
         listener=None,
     ):
         super().__init__(env)
@@ -167,6 +176,24 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             raise ValueError(
                 "start_gate_timeout_s must be positive or None, "
                 f"got {start_gate_timeout_s}."
+            )
+        if handoff_max_position_jump_m <= 0:
+            raise ValueError(
+                "handoff_max_position_jump_m must be positive, "
+                f"got {handoff_max_position_jump_m}."
+            )
+        if handoff_max_rotation_jump_deg <= 0:
+            raise ValueError(
+                "handoff_max_rotation_jump_deg must be positive, "
+                f"got {handoff_max_rotation_jump_deg}."
+            )
+        if (
+            episode_control_mode == "online"
+            and allow_motion_intervention
+            and not safe_model_handoff
+        ):
+            raise ValueError(
+                "online motion intervention requires safe_model_handoff=True."
             )
 
         # ── Validate workspace (optional software safety layer) ──────────────
@@ -217,6 +244,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._wait_for_start_on_reset = bool(wait_for_start_on_reset)
         self._start_key = start_key
         self._start_gate_timeout_s = start_gate_timeout_s
+        self._safe_model_handoff = bool(safe_model_handoff)
+        self._handoff_max_position_jump_m = float(handoff_max_position_jump_m)
+        self._handoff_max_rotation_jump_deg = float(handoff_max_rotation_jump_deg)
 
         # ── Base-frame rotation (physical → base frame) ──────────────────────
         # Adapts keyboard translation for non-standard robot mounting.
@@ -272,6 +302,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         # model_action_valid: set by the collector before each step to indicate
         # whether the incoming action came from a real model inference.
         self._model_action_valid = False
+        self._request_replan_this_step = False
+        self._handoff_hold_this_step = False
+        self._handoff_rejected_this_step = False
 
     # ── Public API for collector ─────────────────────────────────────────────
 
@@ -282,6 +315,14 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         ``False``) after each step so it never leaks across frames.
         """
         self._model_action_valid = bool(valid)
+
+    def complete_model_handoff(self) -> None:
+        """Arm MODEL control after the stale action chunk has been exhausted."""
+        if self._state != "model_pending":
+            return
+        self.get_wrapper_attr("reset_servo_smoothing")()
+        self._state = "model_armed"
+        get_logger().info("[DobotKeyboardIntervention] MODEL_PENDING -> MODEL_ARMED")
 
     def wait_for_start_key(self, key: str | None = None) -> None:
         """Block until the operator presses *key* to start the episode.
@@ -349,6 +390,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._target_quaternion_wxyz = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
         self._target_gripper = 0.5
         self._model_action_valid = False
+        self._request_replan_this_step = False
+        self._handoff_hold_this_step = False
+        self._handoff_rejected_this_step = False
         obs, info = self.env.reset(**kwargs)
         # Clear the episode latch only after the underlying reset succeeds.
         # A failed reset must leave all future actions blocked.
@@ -539,6 +583,35 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             )
         return action
 
+    def _build_feedback_hold_action(self) -> np.ndarray:
+        """Return the measured TCP pose as a fail-closed hold command."""
+        pose = np.asarray(
+            self.get_wrapper_attr("get_pose_state")(), dtype=np.float64
+        ).reshape(8)
+        pose = pose.copy()
+        pose[3:7] = _normalize_same_hemisphere(pose[3:7], self._target_quaternion_wxyz)
+        pose[7] = float(np.clip(pose[7], 0.0, 1.0))
+        if not np.isfinite(pose).all():
+            raise ValueError(f"Non-finite feedback hold pose: {pose}")
+        return pose
+
+    def _model_handoff_is_safe(
+        self, model_action: np.ndarray
+    ) -> tuple[bool, float, float]:
+        """Validate a fresh model chunk's first absolute pose against feedback."""
+        if not np.isfinite(model_action).all():
+            return False, float("inf"), float("inf")
+        current = self._build_feedback_hold_action()
+        position_jump_m = float(np.linalg.norm(model_action[:3] - current[:3]))
+        model_quat = _normalize_same_hemisphere(model_action[3:7], current[3:7])
+        quat_dot = float(np.clip(abs(np.dot(model_quat, current[3:7])), 0.0, 1.0))
+        rotation_jump_deg = float(np.degrees(2.0 * np.arccos(quat_dot)))
+        safe = (
+            position_jump_m <= self._handoff_max_position_jump_m
+            and rotation_jump_deg <= self._handoff_max_rotation_jump_deg
+        )
+        return safe, position_jump_m, rotation_jump_deg
+
     def action(self, action: np.ndarray) -> tuple[np.ndarray, bool]:
         """Transform the incoming model action based on the HIL state.
 
@@ -547,11 +620,15 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             *replaced* is ``True`` if the human target replaced the model action.
         """
         event = self._process_press_events()
+        self._request_replan_this_step = False
+        self._handoff_hold_this_step = False
+        self._handoff_rejected_this_step = False
 
         # "Execute human command first, then switch state" trick:
         # If we toggle back to MODEL this step, we still execute the human
         # target for this frame and switch state for the next step.
         was_engage = self._state == "engage"
+        was_handoff = self._state in ("model_pending", "model_armed")
         next_state = self._state
 
         if event == "quit":
@@ -568,7 +645,13 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             self._episode_save = True
             self._episode_closed = True
         elif event == "model":
-            next_state = "model"
+            if self._safe_model_handoff and self._state == "engage":
+                next_state = "model_pending"
+                self._request_replan_this_step = True
+                self.get_wrapper_attr("reset_servo_smoothing")()
+                get_logger().info("[DobotKeyboardIntervention] ENGAGE -> MODEL_PENDING")
+            elif self._state not in ("model_pending", "model_armed"):
+                next_state = "model"
         elif event == "toggle":
             if not self._allow_motion_intervention:
                 # Autonomous evaluation deliberately keeps the keyboard
@@ -584,10 +667,55 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
                 self._initialize_target_from_current_pose()
                 self.get_wrapper_attr("reset_servo_smoothing")()
                 get_logger().info("[DobotKeyboardIntervention] MODEL -> ENGAGE")
-            else:
-                next_state = "model"
+            elif self._state == "engage":
+                if self._safe_model_handoff:
+                    next_state = "model_pending"
+                    self._request_replan_this_step = True
+                    get_logger().info(
+                        "[DobotKeyboardIntervention] ENGAGE -> MODEL_PENDING"
+                    )
+                else:
+                    next_state = "model"
                 self.get_wrapper_attr("reset_servo_smoothing")()
-                get_logger().info("[DobotKeyboardIntervention] ENGAGE -> MODEL")
+            else:
+                next_state = "engage"
+                self._initialize_target_from_current_pose()
+                self.get_wrapper_attr("reset_servo_smoothing")()
+                get_logger().info(
+                    "[DobotKeyboardIntervention] MODEL handoff cancelled -> ENGAGE"
+                )
+
+        if not was_engage and was_handoff and event in ("quit", "abort", "done"):
+            self._state = next_state
+            self._handoff_hold_this_step = True
+            return self._build_feedback_hold_action(), False
+
+        if not was_engage and next_state == "model_pending":
+            self._state = next_state
+            self._handoff_hold_this_step = True
+            return self._build_feedback_hold_action(), False
+
+        if not was_engage and next_state == "model_armed":
+            model_action = np.asarray(action, dtype=np.float64).reshape(8)
+            safe, position_jump_m, rotation_jump_deg = self._model_handoff_is_safe(
+                model_action
+            )
+            if not safe:
+                self._handoff_hold_this_step = True
+                self._handoff_rejected_this_step = True
+                get_logger().error(
+                    "[DobotKeyboardIntervention] Rejecting unsafe fresh model "
+                    "handoff: position_jump=%.4fm (limit=%.4fm), "
+                    "rotation_jump=%.2fdeg (limit=%.2fdeg)",
+                    position_jump_m,
+                    self._handoff_max_position_jump_m,
+                    rotation_jump_deg,
+                    self._handoff_max_rotation_jump_deg,
+                )
+                return self._build_feedback_hold_action(), False
+            self._state = "model"
+            get_logger().info("[DobotKeyboardIntervention] MODEL_ARMED -> MODEL")
+            return model_action, False
 
         if not was_engage and next_state == "model":
             # Pure model mode: pass through.
@@ -639,13 +767,19 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._model_action_valid = False  # consume
 
         new_action, replaced = self.action(model_action)
-        if replaced:
+        if replaced or self._handoff_hold_this_step:
             # ENGAGE frame: skip RelativeGripperBinarizer so keyboard's
-            # absolute 0/1 gripper commands pass through directly.
+            # absolute 0/1 gripper commands pass through directly. Handoff
+            # holds also preserve the measured gripper position exactly.
             self.get_wrapper_attr("set_gripper_bypass")(True)
         obs, rew, done, truncated, info = self.env.step(new_action)
 
         info["model_action"] = model_action
+        info["request_replan"] = np.array([self._request_replan_this_step], dtype=bool)
+        info["handoff_hold"] = np.array([self._handoff_hold_this_step], dtype=bool)
+        info["handoff_rejected"] = np.array(
+            [self._handoff_rejected_this_step], dtype=bool
+        )
         if replaced:
             # The base Dobot environment may transform the gripper command
             # (for example, stateful relative binarization). Record the command
@@ -656,7 +790,24 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             info["intervene_flag"] = np.ones(1, dtype=bool)
             # ENGAGE frames are never valid model predictions.
             model_action_valid = False
+        elif self._handoff_hold_this_step:
+            # Reuse the action-override transport while keeping the human label
+            # false. EnvWorker combines this with handoff_hold_mask when
+            # replacing the stale rollout action in the trajectory.
+            info["intervene_action"] = np.asarray(
+                info.get("executed_action", new_action), dtype=np.float64
+            ).copy()
+            info["intervene_flag"] = np.zeros(1, dtype=bool)
+            model_action_valid = False
         info["model_action_valid"] = np.array([model_action_valid], dtype=bool)
+
+        if self._handoff_rejected_this_step:
+            truncated = True
+            self._episode_closed = True
+            info["termination_reason"] = "unsafe_model_handoff"
+            info["operator_episode_end"] = False
+            info["operator_success"] = False
+            info["success_once"] = np.array([False], dtype=bool)
 
         if self._episode_save:
             rew = 1.0

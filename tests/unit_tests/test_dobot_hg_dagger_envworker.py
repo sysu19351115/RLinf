@@ -14,6 +14,8 @@
 
 """EnvWorker diagnostics tests for Dobot HG-DAgger."""
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 
@@ -26,6 +28,7 @@ def test_extracts_operator_reason_and_chunk_execution_metrics():
             "termination_reason": np.array(["operator_abort"]),
             "skipped_action_steps": 3,
             "executed_action_mask": torch.tensor([[True, False, False, False]]),
+            "handoff_hold_mask": torch.tensor([[False, True, False, False]]),
         }
     )
 
@@ -37,6 +40,9 @@ def test_extracts_operator_reason_and_chunk_execution_metrics():
     )
     torch.testing.assert_close(
         metrics["episode_end/executed_action_fraction"], torch.tensor([0.25])
+    )
+    torch.testing.assert_close(
+        metrics["control/handoff_hold_fraction"], torch.tensor([0.25])
     )
 
 
@@ -81,6 +87,23 @@ def test_extracts_controller_rejection_metrics_and_audit_code():
     torch.testing.assert_close(audit_info["termination_reason_code"], torch.tensor([6]))
 
 
+def test_extracts_unsafe_model_handoff_metrics_and_audit_code():
+    infos = {
+        "termination_reason": np.array(["unsafe_model_handoff"]),
+        "executed_action_mask": torch.tensor([[True, False]]),
+        "episode_id": torch.tensor([5]),
+        "episode_step_ids": torch.tensor([[10, -1]]),
+    }
+
+    metrics = EnvWorker._extract_operator_metrics(infos)
+    audit_info = EnvWorker._extract_trajectory_audit_info(infos)
+
+    torch.testing.assert_close(
+        metrics["episode_end/unsafe_model_handoff"], torch.tensor([1.0])
+    )
+    torch.testing.assert_close(audit_info["termination_reason_code"], torch.tensor([7]))
+
+
 def test_extracts_trajectory_audit_info_from_final_info():
     audit_info = EnvWorker._extract_trajectory_audit_info(
         {
@@ -89,6 +112,7 @@ def test_extracts_trajectory_audit_info_from_final_info():
                 "termination_reason": np.array(["operator_abort"]),
                 "episode_id": torch.tensor([9]),
                 "episode_step_ids": torch.tensor([[20, 21, -1, -1]]),
+                "handoff_hold_mask": torch.tensor([[False, True, False, False]]),
             }
         }
     )
@@ -99,6 +123,60 @@ def test_extracts_trajectory_audit_info_from_final_info():
     torch.testing.assert_close(
         audit_info["episode_step_ids"], torch.tensor([[20, 21, -1, -1]])
     )
+    torch.testing.assert_close(
+        audit_info["handoff_hold_mask"],
+        torch.tensor([[False, True, False, False]]),
+    )
+
+
+def test_missing_handoff_hold_mask_defaults_to_false():
+    audit_info = EnvWorker._extract_trajectory_audit_info(
+        {
+            "executed_action_mask": torch.tensor([[True, True]]),
+            "episode_id": torch.tensor([1]),
+            "episode_step_ids": torch.tensor([[0, 1]]),
+        }
+    )
+
+    torch.testing.assert_close(
+        audit_info["handoff_hold_mask"], torch.tensor([[False, False]])
+    )
+
+
+def test_handoff_hold_overrides_action_without_becoming_human_label():
+    class RolloutRecorder:
+        def __init__(self):
+            self.actions = None
+            self.override_flags = None
+            self.human_flags = None
+
+        def update_last_actions(self, actions, flags):
+            self.actions = actions
+            self.override_flags = flags
+
+        def mark_last_step_with_intervene_flags(self, flags):
+            self.human_flags = flags
+
+    recorder = RolloutRecorder()
+    worker = EnvWorker.__new__(EnvWorker)
+    worker.rollout_results = [recorder]
+    human_flags = torch.tensor([[True, False, False, False]])
+    handoff_hold_mask = torch.tensor([[False, False, True, True]])
+    override_actions = torch.arange(32, dtype=torch.float32).reshape(1, 32)
+    env_output = SimpleNamespace(
+        intervene_actions=override_actions,
+        intervene_flags=human_flags,
+        env_infos={"handoff_hold_mask": handoff_hold_mask},
+    )
+
+    worker._apply_last_action_overrides(0, env_output)
+
+    torch.testing.assert_close(recorder.actions, override_actions)
+    torch.testing.assert_close(
+        recorder.override_flags,
+        torch.tensor([[True, False, True, True]]),
+    )
+    torch.testing.assert_close(recorder.human_flags, human_flags)
 
 
 def test_missing_execution_metadata_does_not_create_audit_record():

@@ -230,6 +230,13 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             wait_for_start_on_reset=bool(kcfg.get("wait_for_start_on_reset", False)),
             start_key=kcfg.get("start_key", "y"),
             start_gate_timeout_s=kcfg.get("start_gate_timeout_s", None),
+            safe_model_handoff=bool(kcfg.get("safe_model_handoff", True)),
+            handoff_max_position_jump_m=float(
+                kcfg.get("handoff_max_position_jump_m", 0.005)
+            ),
+            handoff_max_rotation_jump_deg=float(
+                kcfg.get("handoff_max_rotation_jump_deg", 2.0)
+            ),
         )
 
     env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))

@@ -9,6 +9,10 @@ expert replay buffer。
 
 - MODEL：执行模型输出。
 - ENGAGE：人工键盘动作替换完整 action chunk。
+- MODEL_PENDING：操作员已请求恢复模型控制；当前 chunk 的剩余旧模型动作全部
+  替换为实时 TCP feedback hold。
+- MODEL_ARMED：旧 chunk 已结束，等待检查下一次新推理的首动作；通过安全门后
+  才进入 MODEL。
 - `Enter`：成功结束当前 episode。
 - `Backspace`：中止当前 episode，清空残留 action queue，再 reset。
 - `Esc`：按安全终止语义结束当前 episode，并请求整个训练任务退出。
@@ -24,6 +28,30 @@ expert replay buffer。
 
 任一条件不满足时采用 fail-closed：抛出错误并停止入库，不能静默污染训练数据。
 Replay 的内存采样与 `.pt` 持久化均保留上述审计字段。
+
+### HUMAN→MODEL 安全交接
+
+人工接管改变了机器人状态，因此接管前或当前 chunk 起点预测的剩余绝对位姿动作
+已经过期。按 `m` 或用 `h` 从 ENGAGE 切回时，当前帧仍执行最后一个人工动作；
+同一 10 步 chunk 的剩余位置执行 feedback hold，而不是旧模型 suffix。chunk
+结束后，rollout 使用最新观测重新推理。
+
+下一 chunk 的第一个新模型动作还必须同时满足：
+
+```yaml
+safe_model_handoff: true
+handoff_max_position_jump_m: 0.005
+handoff_max_rotation_jump_deg: 2.0
+```
+
+阈值在底层 slew smoothing **之前**检查。超阈值时只发送 feedback hold，
+episode 以 `unsafe_model_handoff` 截断并要求显式 reset；不能依赖 slew limiter
+把远距离错误目标逐步执行。正常交接最多等待当前 chunk 的剩余 0.3–0.4 秒。
+
+交接 hold 是已执行动作，但既不是人工标签，也不是有效模型预测：
+`executed_action_mask=True`、`intervene_flag=False`、
+`model_action_valid=False`。`handoff_hold_mask` 单独进入 trajectory audit，
+在 `loss_scope: human_only` 下不产生监督梯度。
 
 ## 配置
 
@@ -217,6 +245,8 @@ cd /home/tyz/project/RLinf
 - `env/episode_end/keyboard_listener_error`
 - `env/episode_end/executed_action_fraction`
 - `env/episode_end/skipped_action_steps`
+- `env/control/handoff_hold_fraction`
+- `env/episode_end/unsafe_model_handoff`
 
 键盘断开或监听线程异常会触发安全终止。`Esc` 的 quit 会在当前通信轮次收束后、
 下一次 actor 更新前停止非流水线训练。DAGGER 配置不支持训练流水线，因此不会
@@ -285,6 +315,8 @@ PI0.5 的训练 horizon 为 50 步（`action_horizon=50`），但环境每轮执
 - 后续 chunk（人工或模型）按时间顺序追加到所有兼容的候选窗口。
 - 当候选窗口积累 5 个 chunk（50 步）时，生成一个训练样本。
 - 模型后缀动作是每次 10 步重新推理的结果，不是干预前预测的残留动作。
+- HUMAN→MODEL 发生在 chunk 中间时，剩余位置是带独立审计标记的 feedback
+  hold；下一 chunk 才恢复执行重新推理的模型动作。
 - Dobot safety guard 拒绝指令或检测到 NaN/Inf 动作时立即停止当前 chunk；
   rejected step 和剩余 padding 都不会标记为 executed。该 episode 记录
   `controller_rejection` 并要求显式 reset，不会自动 reset 后继续运动。

@@ -91,7 +91,7 @@ algorithm:
     window_anchor: "full_human_chunk"
     min_human_steps_per_window: ${actor.model.num_action_chunks}
     # Default decision: supervise only human-controlled steps in each H50 window.
-    loss_scope: "full_window" #"human_only"
+    loss_scope: "human_only"
 
   gamma: 0.99
   update_epoch: 1
@@ -153,6 +153,11 @@ env:
       rotation_delta: 0.02
       gripper_delta: 0.05
       base_frame_euler_deg: [0, 0, 0]
+      # HUMAN→MODEL is armed only after the current 10-step chunk has ended.
+      # Remaining stale model actions are replaced by feedback-pose holds.
+      safe_model_handoff: True
+      handoff_max_position_jump_m: 0.005
+      handoff_max_rotation_jump_deg: 2.0
       toggle_key: "h"
       model_key: "m"
       done_key: "Key.enter"

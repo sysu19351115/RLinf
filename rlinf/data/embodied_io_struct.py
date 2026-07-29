@@ -39,6 +39,7 @@ TERMINATION_REASON_CODES = {
     "keyboard_disconnected": 4,
     "keyboard_listener_error": 5,
     "controller_rejection": 6,
+    "unsafe_model_handoff": 7,
 }
 UNKNOWN_TERMINATION_REASON_CODE = -1
 

@@ -61,6 +61,9 @@ def _assert_algorithm_and_safety_contract(cfg: DictConfig) -> None:
     assert cfg.env.train.use_keyboard_intervention is True
     assert cfg.env.train.keyboard_intervention.episode_control_mode == "online"
     assert cfg.env.train.keyboard_intervention.wait_for_start_on_reset is True
+    assert cfg.env.train.keyboard_intervention.safe_model_handoff is True
+    assert cfg.env.train.keyboard_intervention.handoff_max_position_jump_m == 0.005
+    assert cfg.env.train.keyboard_intervention.handoff_max_rotation_jump_deg == 2.0
     assert cfg.env.train.data_collection.enabled is False
 
     assert cfg.actor.model.model_type == "openpi"
