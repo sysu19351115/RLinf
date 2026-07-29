@@ -14,6 +14,7 @@
 
 import asyncio
 import gc
+import time
 from collections import defaultdict
 from typing import Any
 
@@ -53,6 +54,7 @@ from rlinf.utils.utils import (
     flatten_embodied_batch,
     pack_batch,
     preprocess_embodied_batch,
+    validate_reward_label_validity_config,
 )
 from rlinf.workers.env.history_manager import HistoryManager
 
@@ -77,6 +79,9 @@ class EnvWorker(Worker):
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.stage_num = self.cfg.rollout.pipeline_stage_num
+        self._terminal_end_monotonic: list[float | None] = [None] * self.stage_num
+        self._terminal_to_reset_latency_s: list[float] = []
+        self.reward_label_validity_enabled = validate_reward_label_validity_config(cfg)
         self.enable_rlt = (
             OmegaConf.select(self.cfg, "algorithm.loss_type", default="") == "rlt_ac"
         )
@@ -115,6 +120,12 @@ class EnvWorker(Worker):
             train_env_cfg.rollout_epoch if train_env_cfg is not None else 1
         )
         self.eval_rollout_epoch = eval_env_cfg.rollout_epoch if self.enable_eval else 1
+        self.train_terminal_padding_enabled = self._terminal_padding_enabled(
+            train_env_cfg
+        )
+        self.eval_terminal_padding_enabled = self._terminal_padding_enabled(
+            eval_env_cfg
+        )
 
         self.train_enable_offload = (
             train_env_cfg.get("enable_offload", False)
@@ -138,6 +149,11 @@ class EnvWorker(Worker):
                 self.cfg.env.train.total_num_envs // self._world_size // self.stage_num
             )
             self.train_batch_size = self.cfg.env.train.total_num_envs // self.stage_num
+            self._validate_terminal_padding_contract(
+                mode="train",
+                env_cfg=train_env_cfg,
+                num_envs_per_stage=self.train_num_envs_per_stage,
+            )
         else:
             self.enable_online_lerobot = False
         if self.enable_eval:
@@ -145,6 +161,11 @@ class EnvWorker(Worker):
                 self.cfg.env.eval.total_num_envs // self._world_size // self.stage_num
             )
             self.eval_batch_size = self.cfg.env.eval.total_num_envs // self.stage_num
+            self._validate_terminal_padding_contract(
+                mode="eval",
+                env_cfg=eval_env_cfg,
+                num_envs_per_stage=self.eval_num_envs_per_stage,
+            )
         self.n_train_chunk_steps = 0
         if self.enable_train:
             self.n_train_chunk_steps = (
@@ -174,6 +195,12 @@ class EnvWorker(Worker):
                 for _ in range(self.stage_num)
             ]
         self.env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        if self.env_decoupled_mode and (
+            self.train_terminal_padding_enabled or self.eval_terminal_padding_enabled
+        ):
+            raise ValueError(
+                "Dobot terminal padding does not support runner.enable_decoupled_mode."
+            )
 
         if self.env_decoupled_mode:
             # Init the batch_router for env decoupled mode
@@ -184,6 +211,68 @@ class EnvWorker(Worker):
             ) >= self._component_placement.get_world_size("rollout"), (
                 "the world size of env must be greater than the world size of rollout in env_decoupled_mode"
             )
+
+    @staticmethod
+    def _terminal_padding_enabled(env_cfg: Any) -> bool:
+        if env_cfg is None:
+            return False
+        padding_cfg = env_cfg.get("terminal_padding", {})
+        return bool(padding_cfg.get("enabled", False))
+
+    @classmethod
+    def _validate_terminal_padding_contract(
+        cls,
+        *,
+        mode: str,
+        env_cfg: Any,
+        num_envs_per_stage: int,
+    ) -> bool:
+        """Fail closed: terminal padding currently supports one Dobot per stage."""
+        if not cls._terminal_padding_enabled(env_cfg):
+            return False
+
+        if num_envs_per_stage != 1:
+            raise ValueError(
+                f"env.{mode}.terminal_padding.enabled requires exactly one "
+                f"environment per stage; got {num_envs_per_stage}."
+            )
+        if bool(env_cfg.get("auto_reset", False)):
+            raise ValueError(
+                f"env.{mode}.terminal_padding.enabled requires auto_reset=False."
+            )
+
+        init_params = env_cfg.get("init_params", {})
+        env_id = str(init_params.get("id", ""))
+        if not env_id.startswith("Dobot"):
+            raise ValueError(
+                f"env.{mode}.terminal_padding.enabled is restricted to Dobot "
+                f"real-world environments; got init_params.id={env_id!r}."
+            )
+        keyboard_cfg = env_cfg.get("keyboard_intervention", {})
+        if (
+            not bool(env_cfg.get("use_keyboard_intervention", False))
+            or keyboard_cfg.get("episode_control_mode") != "online_chunk_boundary"
+        ):
+            raise ValueError(
+                f"env.{mode}.terminal_padding.enabled requires Dobot keyboard "
+                "episode_control_mode='online_chunk_boundary'."
+            )
+        return True
+
+    @staticmethod
+    def _terminal_padding_triggered(
+        *,
+        enabled: bool,
+        dones: torch.Tensor | None,
+    ) -> bool:
+        if not enabled or dones is None:
+            return False
+        if dones.ndim == 0 or dones.shape[0] != 1:
+            raise RuntimeError(
+                "terminal padding received a non-singleton environment batch after "
+                f"configuration validation: shape={tuple(dones.shape)}."
+            )
+        return bool(dones[0].any())
 
     def _prepare_rollout_results(self, rollout_results: list | None = None) -> list:
         if self.enable_online_lerobot and rollout_results is not None:
@@ -550,7 +639,9 @@ class EnvWorker(Worker):
             for reason in (
                 "operator_success",
                 "operator_abort",
+                "operator_failure",
                 "operator_quit",
+                "episode_timeout",
                 "keyboard_disconnected",
                 "keyboard_listener_error",
                 "controller_rejection",
@@ -561,6 +652,10 @@ class EnvWorker(Worker):
                     metrics[f"episode_end/{reason}"] = torch.as_tensor(
                         reason_mask, dtype=torch.float32
                     )
+        if "reward_label_valid" in infos:
+            metrics["rollout/reward_label_valid"] = torch.as_tensor(
+                infos["reward_label_valid"], dtype=torch.float32
+            ).reshape(-1)
 
         if "skipped_action_steps" in infos:
             metrics["episode_end/skipped_action_steps"] = torch.as_tensor(
@@ -611,6 +706,18 @@ class EnvWorker(Worker):
         episode_id = torch.as_tensor(
             control_infos["episode_id"], dtype=torch.int64
         ).reshape(-1)
+        reward_label_valid = torch.as_tensor(
+            control_infos.get(
+                "reward_label_valid",
+                torch.ones(executed_action_mask.shape[0], dtype=torch.bool),
+            ),
+            dtype=torch.bool,
+        ).reshape(-1)
+        if reward_label_valid.shape != (executed_action_mask.shape[0],):
+            raise ValueError(
+                "reward_label_valid must have one value per environment, got "
+                f"{tuple(reward_label_valid.shape)}."
+            )
         handoff_hold_mask = torch.as_tensor(
             control_infos.get(
                 "handoff_hold_mask",
@@ -647,6 +754,7 @@ class EnvWorker(Worker):
             "episode_id": episode_id.contiguous(),
             "episode_step_ids": episode_step_ids.contiguous(),
             "handoff_hold_mask": handoff_hold_mask.contiguous(),
+            "reward_label_valid": reward_label_valid.contiguous(),
         }
 
     def _update_last_rollout_audit(self, stage_id: int, env_output: EnvOutput) -> None:
@@ -1147,15 +1255,90 @@ class EnvWorker(Worker):
 
         return env_outputs
 
-    def _build_rollout_input_data(self, env_batch: dict[str, Any]) -> dict[str, Any]:
+    def _build_rollout_input_data(
+        self,
+        env_batch: dict[str, Any],
+        *,
+        rollout_padding: bool | None = None,
+    ) -> dict[str, Any]:
         data = {
             "obs": env_batch["obs"],
             "final_obs": env_batch["final_obs"],
         }
+        if rollout_padding is not None:
+            states = env_batch["obs"].get("states")
+            if isinstance(states, torch.Tensor):
+                batch_size = states.shape[0]
+            else:
+                task_descriptions = env_batch["obs"].get("task_descriptions")
+                if task_descriptions is None:
+                    raise ValueError("Cannot infer rollout-padding batch size.")
+                batch_size = len(task_descriptions)
+            data["rollout_padding"] = torch.full(
+                (batch_size,), rollout_padding, dtype=torch.bool
+            )
         if self.enable_rlt:
             data["rlt_switch_flags"] = env_batch.get("rlt_switch_flags", None)
             data["intervene_flags"] = env_batch.get("intervene_flags", None)
         return data
+
+    def _make_terminal_padding_env_output(
+        self,
+        source: EnvOutput,
+    ) -> EnvOutput:
+        """Build one shape-compatible chunk without stepping the environment."""
+        batch_size = (
+            source.dones.shape[0]
+            if source.dones is not None
+            else self.train_num_envs_per_stage
+        )
+        chunk_size = self.model_cfg.num_action_chunks
+        zero_done = torch.zeros((batch_size, chunk_size), dtype=torch.bool)
+        reward_dtype = (
+            source.rewards.dtype if source.rewards is not None else torch.float32
+        )
+        zero_reward = torch.zeros((batch_size, chunk_size), dtype=reward_dtype)
+
+        episode_id = torch.full((batch_size,), -1, dtype=torch.int64)
+        source_infos = source.env_infos
+        if isinstance(source_infos, dict):
+            control_infos = source_infos.get("final_info", source_infos)
+            if isinstance(control_infos, dict) and "episode_id" in control_infos:
+                episode_id = torch.as_tensor(
+                    control_infos["episode_id"], dtype=torch.int64
+                ).reshape(-1)
+
+        padding_infos = {
+            "executed_action_mask": torch.zeros(
+                (batch_size, chunk_size), dtype=torch.bool
+            ),
+            "action_command_accepted_mask": torch.zeros(
+                (batch_size, chunk_size), dtype=torch.bool
+            ),
+            "episode_step_ids": torch.full(
+                (batch_size, chunk_size), -1, dtype=torch.int64
+            ),
+            "episode_id": episode_id,
+            "handoff_hold_mask": torch.zeros(
+                (batch_size, chunk_size), dtype=torch.bool
+            ),
+            "termination_reason": np.full(batch_size, "none", dtype=object),
+            "reward_label_valid": torch.ones(batch_size, dtype=torch.bool),
+            "skipped_action_steps": chunk_size,
+            "rollout_padding": True,
+        }
+        return EnvOutput(
+            obs=source.obs,
+            final_obs=None,
+            rewards=zero_reward,
+            dones=zero_done,
+            terminations=zero_done.clone(),
+            truncations=zero_done.clone(),
+            env_infos=padding_infos,
+            intervene_actions=None,
+            intervene_flags=None,
+            rlt_switch_flags=None,
+        )
 
     def _send_train_bootstrap(
         self, rollout_channel: Channel, env_outputs: list[EnvOutput]
@@ -1174,6 +1357,12 @@ class EnvWorker(Worker):
             )
 
     def _bootstrap_and_send_train(self, rollout_channel: Channel) -> list[EnvOutput]:
+        reset_started_at = time.monotonic()
+        for stage_id, terminal_at in enumerate(self._terminal_end_monotonic):
+            if terminal_at is None:
+                continue
+            self._terminal_to_reset_latency_s.append(reset_started_at - terminal_at)
+            self._terminal_end_monotonic[stage_id] = None
         env_outputs = self.bootstrap_step()
         self._send_train_bootstrap(rollout_channel, env_outputs)
         return env_outputs
@@ -1251,13 +1440,31 @@ class EnvWorker(Worker):
         )
         env_metrics = defaultdict(list)
         rlt_pending_obs: list[dict[str, Any] | None] = [None] * self.stage_num
+        valid_chunks = 0
+        padded_chunks = 0
+        train_terminal_padding_enabled = getattr(
+            self,
+            "train_terminal_padding_enabled",
+            False,
+        )
+        terminal_to_reset_latency_s = getattr(
+            self,
+            "_terminal_to_reset_latency_s",
+            [],
+        )
 
         for epoch in range(self.rollout_epoch):
+            terminal_padding_active = [False] * self.stage_num
             if epoch == 0 and self._prefetched_train_bootstrap is not None:
                 env_outputs = self._prefetched_train_bootstrap
                 self._prefetched_train_bootstrap = None
             else:
                 env_outputs = self._bootstrap_and_send_train(rollout_channel)
+            if terminal_to_reset_latency_s:
+                env_metrics["rollout/terminal_to_reset_latency_s"].append(
+                    torch.tensor(terminal_to_reset_latency_s, dtype=torch.float32)
+                )
+                terminal_to_reset_latency_s.clear()
 
             for chunk_step_idx in range(self.n_train_chunk_steps):
                 for stage_id in range(self.stage_num):
@@ -1265,12 +1472,21 @@ class EnvWorker(Worker):
                         await asyncio.sleep(0)
 
                     env_output = env_outputs[stage_id]
+                    if train_terminal_padding_enabled:
+                        if terminal_padding_active[stage_id]:
+                            padded_chunks += self.train_num_envs_per_stage
+                        else:
+                            valid_chunks += self.train_num_envs_per_stage
                     curr_obs = env_output.obs
                     self._update_last_rollout_audit(stage_id, env_output)
                     self._apply_last_action_overrides(stage_id, env_output)
 
                     reward_model_output = None
-                    if reward_channel is not None and chunk_step_idx != 0:
+                    if (
+                        reward_channel is not None
+                        and chunk_step_idx != 0
+                        and not terminal_padding_active[stage_id]
+                    ):
                         reward_model_output = self.get_reward_model_output(
                             env_output,
                             send_channel=reward_channel,
@@ -1328,7 +1544,11 @@ class EnvWorker(Worker):
                         ].mark_last_step_with_intervene_flags(
                             rollout_result.intervene_flags
                         )
-                    if self.enable_rlt and self.collect_transitions:
+                    if (
+                        self.enable_rlt
+                        and self.collect_transitions
+                        and not terminal_padding_active[stage_id]
+                    ):
                         update_rlt_transitions(
                             stage_id,
                             rlt_pending_obs,
@@ -1337,26 +1557,57 @@ class EnvWorker(Worker):
                             cache_current=True,
                         )
 
-                    env_output, env_info, chunk_step_payload = self.env_interact_step(
-                        rollout_result.actions, stage_id
-                    )
-                    stage_rollout = self.rollout_results[stage_id]
-                    if isinstance(stage_rollout, EmbodiedLerobotRolloutResult):
-                        stage_rollout.append_chunk_episode_data(
-                            rollout_result=rollout_result,
-                            **chunk_step_payload,
+                    if terminal_padding_active[stage_id]:
+                        env_output = self._make_terminal_padding_env_output(env_output)
+                        env_info = {}
+                        terminal_ended_this_step = False
+                    else:
+                        terminal_ended_this_step = False
+                        env_output, env_info, chunk_step_payload = (
+                            self.env_interact_step(rollout_result.actions, stage_id)
                         )
+                        stage_rollout = self.rollout_results[stage_id]
+                        if isinstance(stage_rollout, EmbodiedLerobotRolloutResult):
+                            stage_rollout.append_chunk_episode_data(
+                                rollout_result=rollout_result,
+                                **chunk_step_payload,
+                            )
+                        if (
+                            not self.cfg.env.train.auto_reset
+                            and self._terminal_padding_triggered(
+                                enabled=train_terminal_padding_enabled,
+                                dones=env_output.dones,
+                            )
+                        ):
+                            terminal_padding_active[stage_id] = True
+                            terminal_ended_this_step = True
+                            if self._terminal_end_monotonic[stage_id] is None:
+                                self._terminal_end_monotonic[stage_id] = (
+                                    time.monotonic()
+                                )
+                            self.record_env_metrics(env_metrics, env_info)
                     env_batch = env_output.to_dict()
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
+                        data=self._build_rollout_input_data(
+                            env_batch,
+                            rollout_padding=(
+                                terminal_padding_active[stage_id]
+                                if train_terminal_padding_enabled
+                                else None
+                            ),
+                        ),
                         mode="train",
                         tag="rollout_results",
                         route_key=stage_id if not self.env_decoupled_mode else None,
                         decoupled_mode=self.env_decoupled_mode,
                     )
-                    if self.collect_transitions and not self.enable_rlt:
+                    if (
+                        self.collect_transitions
+                        and not self.enable_rlt
+                        and not terminal_padding_active[stage_id]
+                    ):
                         next_obs = (
                             env_output.final_obs
                             if env_output.dones.any() and self.cfg.env.train.auto_reset
@@ -1372,7 +1623,7 @@ class EnvWorker(Worker):
                         or self.cfg.env.train.ignore_terminations
                         or chunk_step_idx == self.n_train_chunk_steps - 1
                     )
-                    if should_record:
+                    if should_record and not terminal_ended_this_step:
                         self.record_env_metrics(env_metrics, env_info)
 
             for stage_id in range(self.stage_num):
@@ -1381,7 +1632,7 @@ class EnvWorker(Worker):
                 self._apply_last_action_overrides(stage_id, env_output)
 
                 reward_model_output = None
-                if reward_channel is not None:
+                if reward_channel is not None and not terminal_padding_active[stage_id]:
                     last_run = epoch == self.rollout_epoch - 1
                     reward_model_output = self.get_reward_model_output(
                         env_output,
@@ -1462,6 +1713,24 @@ class EnvWorker(Worker):
                         self.rollout_results[stage_id], actor_channel
                     )
 
+        if train_terminal_padding_enabled:
+            total_chunks = valid_chunks + padded_chunks
+            env_metrics["rollout/valid_chunks"].append(
+                torch.tensor([valid_chunks], dtype=torch.float32)
+            )
+            env_metrics["rollout/padded_chunks"].append(
+                torch.tensor([padded_chunks], dtype=torch.float32)
+            )
+            env_metrics["rollout/padding_fast_path_count"].append(
+                torch.tensor([padded_chunks], dtype=torch.float32)
+            )
+            env_metrics["rollout/padding_fraction"].append(
+                torch.tensor(
+                    [padded_chunks / total_chunks if total_chunks else 0.0],
+                    dtype=torch.float32,
+                )
+            )
+
         for key, value in env_metrics.items():
             env_metrics[key] = torch.cat(value, dim=0).contiguous().cpu()
 
@@ -1492,7 +1761,13 @@ class EnvWorker(Worker):
     @Worker.timer("evaluate")
     def evaluate(self, input_channel: Channel, rollout_channel: Channel):
         eval_metrics = defaultdict(list)
+        eval_terminal_padding_enabled = getattr(
+            self,
+            "eval_terminal_padding_enabled",
+            False,
+        )
         for eval_rollout_epoch in range(self.eval_rollout_epoch):
+            eval_padding_active = [False] * self.stage_num
             if not self.cfg.env.eval.auto_reset or eval_rollout_epoch == 0:
                 for stage_id in range(self.stage_num):
                     self.eval_env_list[stage_id].is_start = True
@@ -1542,9 +1817,21 @@ class EnvWorker(Worker):
                         raw_chunk_actions = raw_chunk_actions.detach().cpu().numpy()
                     else:
                         raw_chunk_actions = np.asarray(raw_chunk_actions)
-                    env_output, env_info = self.env_evaluate_step(
-                        raw_chunk_actions, stage_id
-                    )
+                    if eval_padding_active[stage_id]:
+                        env_output = self._make_terminal_padding_env_output(env_output)
+                        env_info = {}
+                    else:
+                        env_output, env_info = self.env_evaluate_step(
+                            raw_chunk_actions, stage_id
+                        )
+                        if (
+                            not self.cfg.env.eval.auto_reset
+                            and self._terminal_padding_triggered(
+                                enabled=eval_terminal_padding_enabled,
+                                dones=env_output.dones,
+                            )
+                        ):
+                            eval_padding_active[stage_id] = True
 
                     for key, value in env_info.items():
                         eval_metrics[key].append(value)
@@ -1562,7 +1849,14 @@ class EnvWorker(Worker):
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
-                        data=self._build_rollout_input_data(env_batch),
+                        data=self._build_rollout_input_data(
+                            env_batch,
+                            rollout_padding=(
+                                eval_padding_active[stage_id]
+                                if eval_terminal_padding_enabled
+                                else None
+                            ),
+                        ),
                         mode="eval",
                         tag="rollout_results",
                         route_key=stage_id if not self.env_decoupled_mode else None,
@@ -1633,6 +1927,7 @@ class EnvWorker(Worker):
             reward_type=self.cfg.algorithm.reward_type,
             filter_rewards=self.cfg.algorithm.get("filter_rewards", False),
             group_size=self.cfg.algorithm.group_size,
+            reward_label_validity=self.reward_label_validity_enabled,
             rewards_lower_bound=self.cfg.algorithm.get("rewards_lower_bound", None),
             rewards_upper_bound=self.cfg.algorithm.get("rewards_upper_bound", None),
         )

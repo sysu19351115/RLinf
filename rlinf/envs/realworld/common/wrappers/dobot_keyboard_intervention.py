@@ -167,9 +167,14 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             raise ValueError(f"rotation_delta must be positive, got {rotation_delta}.")
         if gripper_delta <= 0:
             raise ValueError(f"gripper_delta must be positive, got {gripper_delta}.")
-        if episode_control_mode not in ("collector", "online"):
+        if episode_control_mode not in (
+            "collector",
+            "online",
+            "online_chunk_boundary",
+        ):
             raise ValueError(
-                "episode_control_mode must be 'collector' or 'online', "
+                "episode_control_mode must be 'collector', 'online', or "
+                "'online_chunk_boundary', "
                 f"got {episode_control_mode!r}."
             )
         if start_gate_timeout_s is not None and start_gate_timeout_s <= 0:
@@ -298,6 +303,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._episode_abort = False
         self._quit_program = False
         self._episode_closed = False
+        self._pending_episode_label: str | None = None
+        self._is_chunk_boundary = False
+        self._label_conflict_this_step = False
 
         # model_action_valid: set by the collector before each step to indicate
         # whether the incoming action came from a real model inference.
@@ -315,6 +323,15 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         ``False``) after each step so it never leaks across frames.
         """
         self._model_action_valid = bool(valid)
+
+    def set_chunk_boundary(self, is_boundary: bool) -> None:
+        """Mark whether the next step is the last action in its action chunk.
+
+        ``RealWorldEnv.chunk_step`` owns the actual chunk size and calls this
+        before every sub-step. Keeping the boundary outside this wrapper avoids
+        duplicating ``num_action_chunks`` in keyboard configuration.
+        """
+        self._is_chunk_boundary = bool(is_boundary)
 
     def complete_model_handoff(self) -> None:
         """Arm MODEL control after the stale action chunk has been exhausted."""
@@ -400,6 +417,9 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._episode_abort = False
         self._quit_program = False
         self._episode_closed = False
+        self._pending_episode_label = None
+        self._is_chunk_boundary = False
+        self._label_conflict_this_step = False
         # Only now (after env.reset) can we safely read the real TCP pose.
         if self._start_in_engage:
             self._initialize_target_from_current_pose()
@@ -623,6 +643,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._request_replan_this_step = False
         self._handoff_hold_this_step = False
         self._handoff_rejected_this_step = False
+        self._label_conflict_this_step = False
 
         # "Execute human command first, then switch state" trick:
         # If we toggle back to MODEL this step, we still execute the human
@@ -634,16 +655,29 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         if event == "quit":
             next_state = "model"
             self._quit_program = True
+            self._pending_episode_label = None
             self._episode_closed = True
         elif event == "abort":
             next_state = "model"
-            self._episode_abort = True
-            if self._episode_control_mode == "online":
-                self._episode_closed = True
+            if self._episode_control_mode == "online_chunk_boundary":
+                if self._pending_episode_label is None:
+                    self._pending_episode_label = "failure"
+                elif self._pending_episode_label != "failure":
+                    self._label_conflict_this_step = True
+            else:
+                self._episode_abort = True
+                if self._episode_control_mode == "online":
+                    self._episode_closed = True
         elif event == "done":
             next_state = "model"
-            self._episode_save = True
-            self._episode_closed = True
+            if self._episode_control_mode == "online_chunk_boundary":
+                if self._pending_episode_label is None:
+                    self._pending_episode_label = "success"
+                elif self._pending_episode_label != "success":
+                    self._label_conflict_this_step = True
+            else:
+                self._episode_save = True
+                self._episode_closed = True
         elif event == "model":
             if self._safe_model_handoff and self._state == "engage":
                 next_state = "model_pending"
@@ -685,7 +719,17 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
                     "[DobotKeyboardIntervention] MODEL handoff cancelled -> ENGAGE"
                 )
 
-        if not was_engage and was_handoff and event in ("quit", "abort", "done"):
+        if event == "quit":
+            self._state = next_state
+            self._handoff_hold_this_step = True
+            return self._build_feedback_hold_action(), False
+
+        if (
+            not was_engage
+            and was_handoff
+            and event in ("abort", "done")
+            and self._episode_control_mode != "online_chunk_boundary"
+        ):
             self._state = next_state
             self._handoff_hold_this_step = True
             return self._build_feedback_hold_action(), False
@@ -748,13 +792,15 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             obs, rew, done, truncated, info = self.env.step(hold_action)
             self._state = "model"
             self._model_action_valid = False
+            self._pending_episode_label = None
             info["model_action"] = model_action
             info["model_action_valid"] = np.array([False], dtype=bool)
             info["hil_event"] = "abort"
             info["termination_reason"] = listener_failure
             info["keyboard_connected"] = False
+            info["reward_label_valid"] = False
             info["success_once"] = np.array([False], dtype=bool)
-            if self._episode_control_mode == "online":
+            if self._episode_control_mode in ("online", "online_chunk_boundary"):
                 self._episode_closed = True
                 info["operator_episode_end"] = True
                 info["operator_success"] = False
@@ -800,37 +846,65 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             info["intervene_flag"] = np.zeros(1, dtype=bool)
             model_action_valid = False
         info["model_action_valid"] = np.array([model_action_valid], dtype=bool)
+        if self._pending_episode_label is not None:
+            info["operator_label_pending"] = self._pending_episode_label
+        if self._label_conflict_this_step:
+            info["operator_label_conflict_ignored"] = True
 
         if self._handoff_rejected_this_step:
             truncated = True
             self._episode_closed = True
+            self._pending_episode_label = None
             info["termination_reason"] = "unsafe_model_handoff"
             info["operator_episode_end"] = False
             info["operator_success"] = False
+            info["reward_label_valid"] = False
             info["success_once"] = np.array([False], dtype=bool)
+
+        if (
+            self._episode_control_mode == "online_chunk_boundary"
+            and self._is_chunk_boundary
+            and self._pending_episode_label is not None
+            and not self._handoff_rejected_this_step
+        ):
+            if self._pending_episode_label == "success":
+                self._episode_save = True
+            else:
+                self._episode_abort = True
+            self._pending_episode_label = None
+            self._episode_closed = True
 
         if self._episode_save:
             rew = 1.0
             done = True
+            truncated = False
             info["hil_event"] = "save"
             info["termination_reason"] = "operator_success"
             info["operator_episode_end"] = True
             info["operator_success"] = True
+            info["reward_label_valid"] = True
             info["success_once"] = np.array([True], dtype=bool)
         elif self._episode_abort:
             info["hil_event"] = "abort"
-            info["termination_reason"] = "operator_abort"
+            info["termination_reason"] = (
+                "operator_failure"
+                if self._episode_control_mode == "online_chunk_boundary"
+                else "operator_abort"
+            )
             info["success_once"] = np.array([False], dtype=bool)
-            if self._episode_control_mode == "online":
+            if self._episode_control_mode in ("online", "online_chunk_boundary"):
                 info["operator_episode_end"] = True
                 info["operator_success"] = False
+                info["reward_label_valid"] = True
+                done = False
                 truncated = True
         if self._quit_program:
             info["quit_program"] = True
             info["operator_shutdown_requested"] = True
             info["termination_reason"] = "operator_quit"
+            info["reward_label_valid"] = False
             info["success_once"] = np.array([False], dtype=bool)
-            if self._episode_control_mode == "online":
+            if self._episode_control_mode in ("online", "online_chunk_boundary"):
                 info["operator_episode_end"] = True
                 info["operator_success"] = False
                 truncated = True
@@ -841,4 +915,5 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._episode_save = False
         self._episode_abort = False
         self._quit_program = False
+        self._is_chunk_boundary = False
         return obs, rew, done, truncated, info

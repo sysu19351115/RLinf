@@ -122,6 +122,7 @@ def _make_realworld_stack(
     env.manual_episode_control_only = manual_episode_control_only
     env.auto_reset = auto_reset
     env.ignore_terminations = ignore_terminations
+    env.chunk_boundary_episode_control = episode_control_mode == "online_chunk_boundary"
     env._episode_needs_reset = False
     env._elapsed_steps = np.zeros(1, dtype=np.int64)
     env.prev_step_reward = np.zeros(1, dtype=np.float32)
@@ -377,6 +378,80 @@ class TestHGDAggerRealWorldPropagation:
             infos_list[-1]["episode_step_ids"].numpy(),
             np.array([[0, -1, -1, -1]]),
         )
+        venv.close()
+
+    @pytest.mark.parametrize(
+        ("key", "expected_reward", "expected_termination", "expected_truncation"),
+        [
+            ("Key.enter", 1.0, True, False),
+            ("Key.backspace", 0.0, False, True),
+        ],
+    )
+    def test_chunk_boundary_rating_executes_full_chunk_before_end(
+        self,
+        key,
+        expected_reward,
+        expected_termination,
+        expected_truncation,
+    ):
+        env, venv, kb = _make_realworld_stack(
+            episode_control_mode="online_chunk_boundary"
+        )
+        env.reset()
+        kb.listener.press(key)
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+        chunk[0, :, 0] = np.array([0.01, 0.02, 0.03, 0.04])
+
+        _, rewards, terminations, truncations, infos_list = env.chunk_step(chunk)
+
+        assert kb.unwrapped.num_steps == 4
+        np.testing.assert_array_equal(
+            rewards.numpy(),
+            np.array([[0.0, 0.0, 0.0, expected_reward]], dtype=np.float32),
+        )
+        np.testing.assert_array_equal(
+            terminations.numpy(),
+            np.array([[False, False, False, expected_termination]]),
+        )
+        np.testing.assert_array_equal(
+            truncations.numpy(),
+            np.array([[False, False, False, expected_truncation]]),
+        )
+        assert infos_list[-1]["skipped_action_steps"] == 0
+        np.testing.assert_array_equal(
+            infos_list[-1]["executed_action_mask"].numpy(),
+            np.array([[True, True, True, True]]),
+        )
+        np.testing.assert_array_equal(
+            infos_list[-1]["episode_step_ids"].numpy(),
+            np.array([[0, 1, 2, 3]]),
+        )
+        for index, info in enumerate(infos_list):
+            executed = np.asarray(info["executed_action"])[0]
+            assert executed[0] == pytest.approx(chunk[0, index, 0])
+        assert env._episode_needs_reset is True
+        with pytest.raises(RuntimeError, match="reset"):
+            env.chunk_step(chunk[:, :1])
+        venv.close()
+
+    def test_realworld_marks_only_last_substep_as_chunk_boundary(self, monkeypatch):
+        env, venv, kb = _make_realworld_stack(
+            episode_control_mode="online_chunk_boundary"
+        )
+        env.reset()
+        observed_boundaries = []
+        original = kb.set_chunk_boundary
+
+        def record_boundary(is_boundary):
+            observed_boundaries.append(is_boundary)
+            original(is_boundary)
+
+        monkeypatch.setattr(kb, "set_chunk_boundary", record_boundary)
+        chunk = np.repeat(_DUMMY_POSE[None, None, :], 4, axis=1)
+
+        env.chunk_step(chunk)
+
+        assert observed_boundaries == [False, False, False, True]
         venv.close()
 
     @pytest.mark.parametrize(

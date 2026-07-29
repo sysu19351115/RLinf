@@ -207,10 +207,12 @@ class DobotRobotConfig:
     """Use a learned vision-based reward model instead of geometry."""
 
     reward_mode: str = "per_step"
-    """Reward computation mode: ``per_step`` or ``terminal``.
+    """Reward computation mode: ``per_step``, ``terminal``, or ``none``.
 
     ``terminal`` evaluates the reward worker only once, when the episode reaches
     ``max_num_steps``. Earlier steps receive zero reward.
+    ``none`` disables environment-side reward computation so an outer wrapper
+    can provide the sole reward signal.
     """
 
     reward_worker_cfg: Optional[dict] = None
@@ -247,7 +249,7 @@ class DobotRobotConfig:
 
     _VALID_ACTION_MODES = ("joint", "cartesian")
     _VALID_STATE_MODES = ("joint", "pose")
-    _VALID_REWARD_MODES = ("per_step", "terminal")
+    _VALID_REWARD_MODES = ("per_step", "terminal", "none")
 
     def __post_init__(self):
         """Validate mode-compatibility constraints."""
@@ -893,6 +895,9 @@ class DobotEnv(gym.Env):
         is_gripper_action_effective: bool = False,
     ) -> float:
         """Compute reward from reward model / geometry / sparse."""
+        if self.config.reward_mode == "none":
+            return 0.0
+
         if self.config.is_dummy and not self.config.use_reward_model:
             return 0.0
 

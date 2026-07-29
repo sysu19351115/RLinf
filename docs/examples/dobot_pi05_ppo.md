@@ -3,11 +3,11 @@
 双节点真机训练流程：
 
 ```text
-cloud（rank 0，GPU）：actor 训练 + 人工奖励服务
+cloud（rank 0，GPU）：actor 训练
 robot（rank 1，GPU）：rollout 推理 + env worker + Dobot
 ```
 
-配置文件：`examples/embodiment/config/dobot_async_ppo_pi05.yaml`
+配置文件：`examples/embodiment/config/dobot_async_ppo_pi05_newtorch.yaml`
 
 > 真机运行前必须清空工作空间、确认急停可用，并由操作人员全程监护。
 
@@ -72,7 +72,8 @@ sudo usermod -aG dialout,video "$USER"
 # 重新登录生效
 ```
 
-填写 `examples/embodiment/config/dobot_async_ppo_pi05.yaml` 中 `cluster.node_groups` 的 robot hardware 配置：
+填写 `examples/embodiment/config/dobot_async_ppo_pi05_newtorch.yaml` 中
+`cluster.node_groups` 的 robot hardware 配置：
 
 ```yaml
 hardware:
@@ -109,28 +110,68 @@ init_params:
   initial_joint_pos: [<j1_rad>, <j2_rad>, <j3_rad>, <j4_rad>, <j5_rad>, <j6_rad>, <gripper_0_to_1>]
 ```
 
-> `enable_high_camera: false` 时唯一的相机命名为 `cam_left_wrist`（策略输入槽）。`reward_image_key` 也必须用 `cam_left_wrist`。
+> `enable_high_camera: false` 时唯一的相机命名为 `cam_left_wrist`（策略输入槽）。
 >
 > `camera_fourcc: "MJPG"` 是 1080p 采集所必需的（YUYV 在 1080p 下仅约 5 FPS）。
 >
 > `initial_joint_pos` 前 6 维是弧度，最后一维是夹爪归一化位置，不要保留占位值。
 
-## 4. 人工稀疏奖励
+## 4. 键盘人工稀疏奖励
 
-每个 episode 结束时，cloud 节点把最终图像显示在网页上，人工点击 Success（`1.0`）或 Failure（`0.0`）。
+评分键由 robot 节点上的物理键盘监听，不再启动 HTTP 人工奖励服务：
 
-在 cloud 节点启动评分服务：
+| 按键 | 含义 | 生效时机 |
+|---|---|---|
+| Enter | 成功，reward=1 | 当前 10-action chunk 完整执行后 |
+| Backspace | 失败，reward=0 | 当前 10-action chunk 完整执行后 |
+| Esc | 安全停止，不是失败标签 | 立即 |
 
-```bash
-cd /home/zylab/project/RLinf
-source .venv/bin/activate
+Enter/Backspace 是评分键，不是急停键。按下后，当前 chunk 最多还会运动约
+0.33 秒（30 Hz、10 actions）；其后的 chunk 不再调用机器人，也不再执行
+OpenPI rollout 推理。系统只发送固定形状的轻量 padding 消息，待本轮 rollout
+协议结束后，在下一次 bootstrap 开始 ServoJ reset。
 
-python examples/embodiment/human_reward_server.py \
-  --port 12345 \
-  --log_dir logs/human_rewards
+Esc、键盘断连、监听器异常和控制器拒绝会立即 hold/truncate，并把整条
+trajectory 标为不可训练。合法的 Backspace 与 episode timeout 虽然 reward
+同为 0，仍是有效训练标签。
+
+配置必须保持：
+
+```yaml
+env:
+  train:
+    auto_reset: false
+    ignore_terminations: false
+    terminal_padding:
+      enabled: true
+    override_cfg:
+      use_reward_model: false
+      reward_mode: none
+    use_keyboard_intervention: true
+    keyboard_intervention:
+      allow_motion_intervention: false
+      episode_control_mode: online_chunk_boundary
+      safe_model_handoff: false
+      done_key: Key.enter
+      abort_key: Key.backspace
+      quit_keys: [Key.esc]
+
+algorithm:
+  adv_type: gae
+  group_size: 1
+  reward_label_validity:
+    enabled: true
 ```
 
-浏览器访问 `http://<cloud-ip>:12345`（若无法直连，用 `ssh -L 12345:localhost:12345 <cloud-user>@<cloud-ip>` 转发）。
+reset 只使用现有 ServoJ minimum-jerk 路径，禁止 MoveJ。
+
+当前 terminal padding 是显式启用的单环境 Dobot 协议。每个 env worker 的每个
+pipeline stage 必须恰好只有一个环境；多环境配置会在启动时直接拒绝，而不会用
+`dones.any()` 提前停止同 stage 的其他环境。其他 embodied 算法默认不启用该协议。
+
+`reward_label_validity` 当前只支持 GAE 且 `group_size=1`。这是为了确保无效安全
+终止不会进入 GRPO 等算法的分组 reward 均值和标准差；不满足条件的配置会在
+worker 初始化时直接报错。
 
 ## 5. 启动 Ray 集群
 
@@ -182,14 +223,17 @@ ray status
 
 ```bash
 python examples/embodiment/train_async.py \
-  --config-name dobot_async_ppo_pi05 \
+  --config-name dobot_async_ppo_pi05_newtorch \
   env.train.override_cfg.is_dummy=True \
-  env.train.override_cfg.use_reward_model=False \
+  env.train.use_intervention_in_dummy=True \
   env.eval.override_cfg.is_dummy=True \
-  env.eval.override_cfg.use_reward_model=False
+  env.eval.use_intervention_in_dummy=True
 ```
 
-Dummy 模式不连接 Dobot、不需要评分服务。通过标准：actor 在 cloud 启动、rollout 和 dummy env 在 robot 启动、checkpoint 成功加载、完成至少一次训练交互。完成后 `Ctrl+C` 停止。
+Dummy 模式不连接 Dobot、不需要评分服务。内置 dummy keyboard listener 不会自动
+产生 Enter/Backspace；自动化评分测试需要注入 fake listener。通过标准：actor
+在 cloud 启动、rollout 和 dummy env 在 robot 启动、checkpoint 成功加载、完成
+至少一次训练交互。完成后 `Ctrl+C` 停止。
 
 ## 7. 硬件验证
 
@@ -215,16 +259,21 @@ python rlinf/envs/realworld/dobot/verify_env.py \
 
 ## 8. 真机训练
 
-确认：两个 Ray 节点 alive、评分服务运行中、硬件验证通过、`is_dummy: False`、`action_mode: cartesian`、`state_mode: pose`。
+确认：两个 Ray 节点 alive、robot 键盘可用、硬件验证通过、`is_dummy: False`、
+`action_mode: cartesian`、`state_mode: pose`。
 
 在 cloud 节点启动：
 
 ```bash
 python examples/embodiment/train_async.py \
-  --config-name dobot_async_ppo_pi05
+  --config-name dobot_async_ppo_pi05_newtorch
 ```
 
-每个 episode 结束后在网页点击 Success 或 Failure。查看 TensorBoard：
+任务成功时按 Enter，任务失败时按 Backspace；紧急情况按 Esc 或硬件急停。评分
+生效后机械臂不会执行新的 action chunk。逻辑 padding 不需要等待机器人运动或
+模型推理，但固定数量的进程间消息仍需完成，因此 reset 不是评分后立即发生。
+
+查看 TensorBoard：
 
 ```bash
 tensorboard --logdir ../results
@@ -242,17 +291,22 @@ echo "$RLINF_COMM_NET_DEVICES"
 ray status
 ```
 
-### 评分页面一直没有 episode
+### 按 Enter/Backspace 后没有立刻 reset
 
-```bash
-curl http://127.0.0.1:12345/current_episode
+评分会在当前 chunk 边界生效，之后系统以 padding fast path 补齐本 rollout 的
+固定通信轮数，再在下一 bootstrap reset。可查看：
+
+```text
+rollout/valid_chunks
+rollout/padded_chunks
+rollout/padding_fraction
+rollout/padding_fast_path_count
+rollout/reward_label_valid
+rollout/terminal_to_reset_latency_s
 ```
 
-确认服务运行在 cloud 节点，配置中 `human_reward_url` 为 `http://127.0.0.1:12345`。
-
-### 人工评分图像不正确
-
-确认 `reward_image_key: cam_left_wrist`（单相机部署的帧名）。
+如果评分后仍听到或看到新一段机械臂运动，应立即按 Esc/急停并停止训练；这是
+异常行为，不应解释为正常 padding。
 
 ### 相机打开失败 / device busy
 

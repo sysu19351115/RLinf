@@ -57,6 +57,11 @@ class RealWorldEnv(gym.Env):
         self.manual_episode_control_only = bool(
             self.override_cfg.get("manual_episode_control_only", False)
         )
+        keyboard_cfg = cfg.get("keyboard_intervention", {})
+        self.chunk_boundary_episode_control = (
+            cfg.get("use_keyboard_intervention", False)
+            and keyboard_cfg.get("episode_control_mode") == "online_chunk_boundary"
+        )
 
         self._init_env()
 
@@ -284,6 +289,31 @@ class RealWorldEnv(gym.Env):
         terminations[operator_episode_end] = operator_success[operator_episode_end]
         truncations[operator_episode_end] = ~operator_success[operator_episode_end]
 
+        reward_label_valid = (
+            self._info_bool_array(infos, "reward_label_valid")
+            if "reward_label_valid" in infos
+            else np.ones(self.num_envs, dtype=bool)
+        )
+        reason_values = np.asarray(
+            infos.get(
+                "termination_reason",
+                np.full(self.num_envs, "none", dtype=object),
+            ),
+            dtype=object,
+        )
+        if reason_values.ndim == 0:
+            reason_values = np.full(self.num_envs, reason_values.item(), dtype=object)
+        reason_values = reason_values.reshape(-1)
+        if reason_values.shape != (self.num_envs,):
+            raise ValueError(
+                "info['termination_reason'] must have shape "
+                f"({self.num_envs},), got {reason_values.shape}."
+            )
+        timeout_failures = timeout_truncations & truncations & ~operator_episode_end
+        reason_values[timeout_failures & (reason_values == "none")] = "episode_timeout"
+        infos["termination_reason"] = reason_values
+        infos["reward_label_valid"] = reward_label_valid
+
         obs = self._wrap_obs(raw_obs)
         step_reward = self._calc_step_reward(_reward)
         success_current_step = np.isclose(step_reward, 1.0)
@@ -360,6 +390,11 @@ class RealWorldEnv(gym.Env):
         handoff_requested = False
         handoff_rejection_detected = False
         for i in range(chunk_size):
+            if self.chunk_boundary_episode_control:
+                # The vector environment owns the real action-chunk shape.
+                # Tell the keyboard wrapper whether this is the final action
+                # instead of duplicating num_action_chunks in wrapper config.
+                self.env.call("set_chunk_boundary", i == chunk_size - 1)
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
                 actions, auto_reset=False
@@ -407,6 +442,9 @@ class RealWorldEnv(gym.Env):
                 reason_values[command_rejected] = "controller_rejection"
                 infos["termination_reason"] = reason_values
                 infos["controller_rejection"] = command_rejected.copy()
+                reward_label_valid = self._info_bool_array(infos, "reward_label_valid")
+                reward_label_valid[command_rejected] = False
+                infos["reward_label_valid"] = reward_label_valid
                 truncations = torch.logical_or(
                     truncations,
                     torch.as_tensor(command_rejected, dtype=torch.bool),

@@ -22,6 +22,7 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from rlinf.utils import omega_resolver  # noqa: F401
+from rlinf.utils.utils import validate_reward_label_validity_config
 
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "examples" / "embodiment" / "config"
 
@@ -29,7 +30,7 @@ _CONFIG_DIR = Path(__file__).resolve().parents[2] / "examples" / "embodiment" / 
 def test_dobot_openpi_pytorch_async_ppo_config_is_resolvable(monkeypatch):
     monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
     with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
-        cfg = compose(config_name="dobot_async_ppo_pi05_pytorch")
+        cfg = compose(config_name="dobot_async_ppo_pi05_newtorch")
     OmegaConf.resolve(cfg)
 
     assert cfg.cluster.num_nodes == 2
@@ -66,3 +67,34 @@ def test_dobot_openpi_pytorch_async_ppo_config_is_resolvable(monkeypatch):
     assert cfg.actor.fsdp_config.use_orig_params is True
     assert cfg.actor.fsdp_config.sharding_strategy == "no_shard"
     assert cfg.algorithm.loss_type == "decoupled_actor_critic"
+    assert cfg.algorithm.reward_type == "chunk_level"
+    assert cfg.algorithm.logprob_type == "chunk_level"
+    assert cfg.algorithm.entropy_type == "chunk_level"
+    assert cfg.algorithm.adv_type == "gae"
+    assert cfg.algorithm.group_size == 1
+    assert cfg.algorithm.reward_label_validity.enabled is True
+
+    assert cfg.reward.use_reward_model is False
+    assert cfg.reward.reward_mode == "none"
+    for env_cfg in (cfg.env.train, cfg.env.eval):
+        assert env_cfg.auto_reset is False
+        assert env_cfg.ignore_terminations is False
+        assert env_cfg.total_num_envs == 1
+        assert env_cfg.terminal_padding.enabled is True
+        assert env_cfg.use_keyboard_intervention is True
+        assert env_cfg.keyboard_intervention.allow_motion_intervention is False
+        assert (
+            env_cfg.keyboard_intervention.episode_control_mode
+            == "online_chunk_boundary"
+        )
+        assert env_cfg.keyboard_intervention.safe_model_handoff is False
+        assert env_cfg.keyboard_intervention.done_key == "Key.enter"
+        assert env_cfg.keyboard_intervention.abort_key == "Key.backspace"
+        assert list(env_cfg.keyboard_intervention.quit_keys) == ["Key.esc"]
+        assert env_cfg.override_cfg.use_reward_model is False
+        assert env_cfg.override_cfg.reward_mode == "none"
+        assert env_cfg.max_episode_steps == env_cfg.max_steps_per_rollout_epoch
+        assert env_cfg.max_episode_steps == env_cfg.override_cfg.max_num_steps
+        assert env_cfg.max_steps_per_rollout_epoch % model.num_action_chunks == 0
+
+    assert validate_reward_label_validity_config(cfg)

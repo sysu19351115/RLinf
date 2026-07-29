@@ -77,6 +77,7 @@ from rlinf.utils.placement import (
     ModelParallelComponentPlacement,
 )
 from rlinf.utils.utils import (
+    apply_reward_label_validity_mask,
     clear_memory,
     compute_entropy_from_logits,
     compute_logprobs_from_logits,
@@ -85,6 +86,7 @@ from rlinf.utils.utils import (
     masked_mean,
     reshape_entropy,
     retrieve_model_state_dict_in_cpu,
+    validate_reward_label_validity_config,
 )
 from rlinf.workers.rollout.utils import RankMapper
 
@@ -1075,6 +1077,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         Worker.__init__(self)
         super().__init__(cfg.actor, self._world_size, self._rank)
         self.cfg = cfg
+        self.reward_label_validity_enabled = validate_reward_label_validity_config(cfg)
         self._env_group_name = cfg.env.group_name
         self._rollout_group_name = cfg.rollout.group_name
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
@@ -1243,6 +1246,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
             rollout_batch["loss_mask"] = loss_mask
             rollout_batch["loss_mask_sum"] = loss_mask_sum
+
+        rollout_batch = apply_reward_label_validity_mask(
+            rollout_batch,
+            enabled=self.reward_label_validity_enabled,
+        )
 
         # filter data by rewards
         if self.cfg.algorithm.get("filter_rewards", False):

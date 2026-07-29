@@ -78,6 +78,29 @@ def test_invalid_reward_mode_is_rejected():
         DobotRobotConfig(reward_mode="invalid")
 
 
+def test_none_reward_mode_is_valid_and_disables_geometry_reward():
+    env = _dummy_pose_env()
+    env.config.reward_mode = "none"
+    env.config.is_dummy = False
+    env._state = SimpleNamespace(
+        tcp_pose=np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
+        gripper_position=0.5,
+    )
+    env.config.target_ee_pose = np.zeros(6)
+    env.config.reward_threshold = np.ones(6)
+
+    assert env._calc_step_reward({}) == 0.0
+    env.close()
+
+
+def test_disabled_reward_model_does_not_create_worker():
+    env = _dummy_pose_env()
+
+    assert env.config.use_reward_model is False
+    assert env._reward_worker is None
+    env.close()
+
+
 def test_invalid_gripper_relative_threshold_is_rejected():
     for threshold in (0.0, 1.0, -0.1, 1.1):
         with pytest.raises(ValueError, match="gripper_relative_threshold"):

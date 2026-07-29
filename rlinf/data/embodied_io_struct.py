@@ -35,11 +35,13 @@ TERMINATION_REASON_CODES = {
     "none": 0,
     "operator_success": 1,
     "operator_abort": 2,
+    "operator_failure": 8,
     "operator_quit": 3,
     "keyboard_disconnected": 4,
     "keyboard_listener_error": 5,
     "controller_rejection": 6,
     "unsafe_model_handoff": 7,
+    "episode_timeout": 9,
 }
 UNKNOWN_TERMINATION_REASON_CODE = -1
 
@@ -732,6 +734,9 @@ class EmbodiedRolloutResult:
                         ),
                         "episode_id": torch.full((batch_size,), -1),
                         "episode_step_ids": torch.full((batch_size, chunk_size), -1),
+                        "reward_label_valid": torch.ones(
+                            (batch_size,), dtype=torch.bool
+                        ),
                     }
                 )
         if result.rewards is not None:
@@ -850,6 +855,17 @@ class EmbodiedRolloutResult:
                     f"{key} must have shape ({batch_size},), got "
                     f"{tuple(audit_info[key].shape)}."
                 )
+        reward_label_valid = audit_info.get(
+            "reward_label_valid",
+            torch.ones((batch_size,), dtype=torch.bool),
+        )
+        if reward_label_valid.shape != (batch_size,):
+            raise ValueError(
+                f"reward_label_valid must have shape ({batch_size},), got "
+                f"{tuple(reward_label_valid.shape)}."
+            )
+        audit_info = dict(audit_info)
+        audit_info["reward_label_valid"] = reward_label_valid
         self.audit_info[-1] = {
             key: value.detach().cpu().contiguous() for key, value in audit_info.items()
         }

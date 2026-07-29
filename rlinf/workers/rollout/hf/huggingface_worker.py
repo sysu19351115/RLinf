@@ -16,6 +16,7 @@ import asyncio
 import copy
 import gc
 import time
+from dataclasses import dataclass
 from typing import Any, Callable, Literal, Optional
 
 import numpy as np
@@ -37,6 +38,92 @@ from rlinf.models import get_model
 from rlinf.models.embodiment.base_policy import BasePolicy
 from rlinf.scheduler import Channel, Cluster, Worker, split_channel_message
 from rlinf.utils.placement import HybridComponentPlacement
+
+
+@dataclass(frozen=True)
+class _TensorPaddingSpec:
+    shape: torch.Size
+    dtype: torch.dtype
+    device: torch.device
+
+    @classmethod
+    def capture(cls, tensor: torch.Tensor | None) -> "_TensorPaddingSpec | None":
+        if tensor is None:
+            return None
+        return cls(
+            shape=tensor.shape,
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+
+    def materialize(self, *, fill_value: int | float | bool = 0) -> torch.Tensor:
+        return torch.full(
+            self.shape,
+            fill_value,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+
+@dataclass(frozen=True)
+class _RolloutPaddingSpec:
+    actions: _TensorPaddingSpec | None
+    prev_logprobs: _TensorPaddingSpec | None
+    prev_values: _TensorPaddingSpec | None
+    intervene_flags: _TensorPaddingSpec | None
+    forward_inputs: dict[str, _TensorPaddingSpec | None]
+    versions: _TensorPaddingSpec | None
+
+    @classmethod
+    def capture(cls, result: RolloutResult) -> "_RolloutPaddingSpec":
+        forward_inputs = {}
+        for key, value in result.forward_inputs.items():
+            if value is None:
+                forward_inputs[key] = None
+                continue
+            if not isinstance(value, torch.Tensor):
+                raise TypeError(
+                    "terminal padding requires tensor-only forward_inputs; "
+                    f"key {key!r} has type {type(value).__name__}."
+                )
+            forward_inputs[key] = _TensorPaddingSpec.capture(value)
+        return cls(
+            actions=_TensorPaddingSpec.capture(result.actions),
+            prev_logprobs=_TensorPaddingSpec.capture(result.prev_logprobs),
+            prev_values=_TensorPaddingSpec.capture(result.prev_values),
+            intervene_flags=_TensorPaddingSpec.capture(result.intervene_flags),
+            forward_inputs=forward_inputs,
+            versions=_TensorPaddingSpec.capture(result.versions),
+        )
+
+    @staticmethod
+    def _zeros(spec: _TensorPaddingSpec | None) -> torch.Tensor | None:
+        return None if spec is None else spec.materialize()
+
+    def materialize(self, *, final: bool) -> RolloutResult:
+        if final:
+            return RolloutResult(
+                actions=self._zeros(self.actions),
+                prev_values=self._zeros(self.prev_values),
+                bootstrap_values=None,
+                forward_inputs={},
+            )
+        return RolloutResult(
+            actions=self._zeros(self.actions),
+            prev_logprobs=self._zeros(self.prev_logprobs),
+            prev_values=self._zeros(self.prev_values),
+            bootstrap_values=None,
+            intervene_flags=self._zeros(self.intervene_flags),
+            forward_inputs={
+                key: None if spec is None else spec.materialize()
+                for key, spec in self.forward_inputs.items()
+            },
+            versions=(
+                None
+                if self.versions is None
+                else self.versions.materialize(fill_value=-1)
+            ),
+        )
 
 
 class MultiStepRolloutWorker(Worker):
@@ -70,6 +157,14 @@ class MultiStepRolloutWorker(Worker):
         self.enable_train = not self.only_eval and train_env_cfg is not None
         self.enable_eval = (
             cfg.runner.get("val_check_interval", -1) > 0 or self.only_eval
+        )
+        self.train_terminal_padding_enabled = bool(
+            train_env_cfg is not None
+            and train_env_cfg.get("terminal_padding", {}).get("enabled", False)
+        )
+        self.eval_terminal_padding_enabled = bool(
+            eval_env_cfg is not None
+            and eval_env_cfg.get("terminal_padding", {}).get("enabled", False)
         )
         self.rollout_epoch = (
             train_env_cfg.rollout_epoch if train_env_cfg is not None else 1
@@ -129,6 +224,12 @@ class MultiStepRolloutWorker(Worker):
             self._sync_weight_comm_options = self.weight_syncer.comm_options
 
         self.env_decoupled_mode = self.cfg.runner.get("enable_decoupled_mode", False)
+        if self.env_decoupled_mode and (
+            self.train_terminal_padding_enabled or self.eval_terminal_padding_enabled
+        ):
+            raise ValueError(
+                "Dobot terminal padding does not support runner.enable_decoupled_mode."
+            )
 
         if self.env_decoupled_mode:
             # save the run-time imformation in communicate channel for decoupled mode
@@ -604,6 +705,42 @@ class MultiStepRolloutWorker(Worker):
             ),
         )
 
+    @staticmethod
+    def _is_full_rollout_padding(env_output: dict[str, Any]) -> bool:
+        padding = env_output.get("rollout_padding")
+        if padding is None:
+            return False
+        padding = torch.as_tensor(padding, dtype=torch.bool)
+        return padding.numel() > 0 and bool(padding.all())
+
+    @staticmethod
+    def _capture_rollout_padding_spec(
+        result: RolloutResult,
+    ) -> _RolloutPaddingSpec:
+        return _RolloutPaddingSpec.capture(result)
+
+    @staticmethod
+    def _new_padding_spec_slots(
+        *,
+        enabled: bool,
+        num_pipeline_stages: int,
+    ) -> list[_RolloutPaddingSpec | None] | None:
+        return [None] * num_pipeline_stages if enabled else None
+
+    @staticmethod
+    def _build_padding_rollout_result(
+        spec: _RolloutPaddingSpec | None,
+        *,
+        final: bool,
+    ) -> RolloutResult:
+        """Return a shape-compatible result without running policy inference."""
+        if spec is None:
+            raise RuntimeError(
+                "rollout_padding was requested before a valid rollout tensor "
+                "specification was captured."
+            )
+        return spec.materialize(final=final)
+
     def get_bootstrap_values(
         self, final_obs: dict[str, Any] | None
     ) -> torch.Tensor | None:
@@ -672,6 +809,12 @@ class MultiStepRolloutWorker(Worker):
     @Worker.timer("generate_one_epoch")
     async def generate_one_epoch(self, input_channel: Channel, output_channel: Channel):
         self.update_dagger_beta()
+        padding_specs: list[_RolloutPaddingSpec | None] | None = (
+            self._new_padding_spec_slots(
+                enabled=self.train_terminal_padding_enabled,
+                num_pipeline_stages=self.num_pipeline_stages,
+            )
+        )
         for _ in range(self.n_train_chunk_steps):
             for stage_id in range(self.num_pipeline_stages):
                 env_output = await self.recv_from(
@@ -684,18 +827,33 @@ class MultiStepRolloutWorker(Worker):
                     merge_fn=self._merge_obs_batches,
                     infer_batch_size_fn=self._infer_env_batch_size,
                 ).async_wait()
-                actions, result = self._predict_rollout_actions(
-                    env_output["obs"],
-                    final_obs=env_output.get("final_obs", None),
-                    rlt_switch_flags=env_output.get("rlt_switch_flags", None),
-                    intervene_requested=env_output.get("intervene_flags", None),
-                )
+                if self._is_full_rollout_padding(env_output):
+                    if padding_specs is None:
+                        raise RuntimeError(
+                            "Received rollout_padding while "
+                            "env.train.terminal_padding.enabled is false."
+                        )
+                    rollout_result = self._build_padding_rollout_result(
+                        padding_specs[stage_id],
+                        final=False,
+                    )
+                else:
+                    actions, result = self._predict_rollout_actions(
+                        env_output["obs"],
+                        final_obs=env_output.get("final_obs", None),
+                        rlt_switch_flags=env_output.get("rlt_switch_flags", None),
+                        intervene_requested=env_output.get("intervene_flags", None),
+                    )
 
-                rollout_result = self._build_rollout_result(
-                    actions,
-                    result,
-                    final_obs=env_output.get("final_obs", None),
-                )
+                    rollout_result = self._build_rollout_result(
+                        actions,
+                        result,
+                        final_obs=env_output.get("final_obs", None),
+                    )
+                    if padding_specs is not None and padding_specs[stage_id] is None:
+                        padding_specs[stage_id] = self._capture_rollout_padding_spec(
+                            rollout_result
+                        )
                 self.send_to(
                     group_name=self.cfg.env.group_name,
                     channel=output_channel,
@@ -717,35 +875,46 @@ class MultiStepRolloutWorker(Worker):
                 merge_fn=self._merge_obs_batches,
                 infer_batch_size_fn=self._infer_env_batch_size,
             ).async_wait()
-            actions, result = self._predict_rollout_actions(
-                env_output["obs"],
-                final_obs=env_output.get("final_obs", None),
-                rlt_switch_flags=env_output.get("rlt_switch_flags", None),
-                intervene_requested=env_output.get("intervene_flags", None),
-            )
-
-            if self.enable_opd:
-                # OPD keeps this path separate to retain student action tokens for post-rollout teacher logprobs.
-                rollout_result = self._build_rollout_result(
-                    actions,
-                    result,
-                    final_obs=env_output.get("final_obs", None),
+            if self._is_full_rollout_padding(env_output):
+                if padding_specs is None:
+                    raise RuntimeError(
+                        "Received rollout_padding while "
+                        "env.train.terminal_padding.enabled is false."
+                    )
+                rollout_result = self._build_padding_rollout_result(
+                    padding_specs[stage_id],
+                    final=True,
                 )
             else:
-                rollout_result = RolloutResult(
-                    actions=actions,
-                    prev_values=(
-                        result["prev_values"] if self.collect_prev_infos else None
-                    ),
-                    bootstrap_values=self.get_bootstrap_values(
-                        env_output.get("final_obs", None)
-                    ),
-                    forward_inputs=(
-                        result["forward_inputs"]
-                        if self.rlt_feature_model is not None
-                        else {}
-                    ),
+                actions, result = self._predict_rollout_actions(
+                    env_output["obs"],
+                    final_obs=env_output.get("final_obs", None),
+                    rlt_switch_flags=env_output.get("rlt_switch_flags", None),
+                    intervene_requested=env_output.get("intervene_flags", None),
                 )
+
+                if self.enable_opd:
+                    # OPD keeps this path separate to retain student action tokens for post-rollout teacher logprobs.
+                    rollout_result = self._build_rollout_result(
+                        actions,
+                        result,
+                        final_obs=env_output.get("final_obs", None),
+                    )
+                else:
+                    rollout_result = RolloutResult(
+                        actions=actions,
+                        prev_values=(
+                            result["prev_values"] if self.collect_prev_infos else None
+                        ),
+                        bootstrap_values=self.get_bootstrap_values(
+                            env_output.get("final_obs", None)
+                        ),
+                        forward_inputs=(
+                            result["forward_inputs"]
+                            if self.rlt_feature_model is not None
+                            else {}
+                        ),
+                    )
             self.send_to(
                 group_name=self.cfg.env.group_name,
                 channel=output_channel,
@@ -817,6 +986,12 @@ class MultiStepRolloutWorker(Worker):
                 desc="Evaluating Rollout Epochs",
                 disable=(self._rank != 0),
             ):
+                eval_action_specs: list[_TensorPaddingSpec | None] | None = (
+                    self._new_padding_spec_slots(
+                        enabled=self.eval_terminal_padding_enabled,
+                        num_pipeline_stages=self.num_pipeline_stages,
+                    )
+                )
                 for _ in range(self.n_eval_chunk_steps):
                     for stage_id in range(self.num_pipeline_stages):
                         env_output = await self.recv_from(
@@ -829,13 +1004,39 @@ class MultiStepRolloutWorker(Worker):
                             merge_fn=self._merge_obs_batches,
                             infer_batch_size_fn=self._infer_env_batch_size,
                         ).async_wait()
-                        actions, _ = self._predict_rollout_actions(
-                            env_output["obs"],
-                            mode="eval",
-                            final_obs=env_output.get("final_obs", None),
-                            rlt_switch_flags=env_output.get("rlt_switch_flags", None),
-                            intervene_requested=env_output.get("intervene_flags", None),
-                        )
+                        if self._is_full_rollout_padding(env_output):
+                            if eval_action_specs is None:
+                                raise RuntimeError(
+                                    "Received rollout_padding while "
+                                    "env.eval.terminal_padding.enabled is false."
+                                )
+                            action_spec = eval_action_specs[stage_id]
+                            if action_spec is None:
+                                raise RuntimeError(
+                                    "eval rollout_padding was requested before "
+                                    "a valid action specification was captured."
+                                )
+                            actions = action_spec.materialize()
+                        else:
+                            actions, _ = self._predict_rollout_actions(
+                                env_output["obs"],
+                                mode="eval",
+                                final_obs=env_output.get("final_obs", None),
+                                rlt_switch_flags=env_output.get(
+                                    "rlt_switch_flags", None
+                                ),
+                                intervene_requested=env_output.get(
+                                    "intervene_flags", None
+                                ),
+                            )
+                            actions = torch.as_tensor(actions).detach().cpu()
+                            if (
+                                eval_action_specs is not None
+                                and eval_action_specs[stage_id] is None
+                            ):
+                                eval_action_specs[stage_id] = (
+                                    _TensorPaddingSpec.capture(actions)
+                                )
                         if isinstance(actions, torch.Tensor):
                             actions = actions.detach().cpu().contiguous()
                         self.send_to(
@@ -916,6 +1117,9 @@ class MultiStepRolloutWorker(Worker):
         intervene_flags_list = [
             obs_batch.get("intervene_flags", None) for obs_batch in obs_batches
         ]
+        rollout_padding_list = [
+            obs_batch.get("rollout_padding", None) for obs_batch in obs_batches
+        ]
 
         def _merge_obs_dicts(dicts: list[dict[str, Any]]) -> dict[str, Any]:
             merged: dict[str, Any] = {}
@@ -951,6 +1155,9 @@ class MultiStepRolloutWorker(Worker):
             ),
             "intervene_flags": self._merge_optional_flag_tensors(
                 obs_dicts, intervene_flags_list
+            ),
+            "rollout_padding": self._merge_optional_flag_tensors(
+                obs_dicts, rollout_padding_list
             ),
         }
 

@@ -761,6 +761,93 @@ def merge_rollout_epochs(batch: dict[str, Any], rollout_epoch: int) -> dict[str,
     return ret_dict
 
 
+def reward_label_validity_enabled(cfg: Any) -> bool:
+    """Return whether episode-level reward-label validity masking is enabled."""
+    algorithm_cfg = cfg.get("algorithm", {})
+    validity_cfg = algorithm_cfg.get("reward_label_validity", {})
+    return bool(validity_cfg.get("enabled", False))
+
+
+def validate_reward_label_validity_config(cfg: Any) -> bool:
+    """Validate the deliberately narrow algorithm contract for validity masking."""
+    enabled = reward_label_validity_enabled(cfg)
+    if not enabled:
+        return False
+
+    algorithm_cfg = cfg.get("algorithm", {})
+    adv_type = algorithm_cfg.get("adv_type")
+    group_size = int(algorithm_cfg.get("group_size", 1))
+    if adv_type != "gae":
+        raise ValueError(
+            "algorithm.reward_label_validity.enabled requires adv_type='gae'; "
+            f"got {adv_type!r}."
+        )
+    if group_size != 1:
+        raise ValueError(
+            "algorithm.reward_label_validity.enabled requires group_size=1; "
+            f"got {group_size}."
+        )
+
+    train_cfg = cfg.get("env", {}).get("train")
+    if train_cfg is not None:
+        if bool(train_cfg.get("auto_reset", False)):
+            raise ValueError(
+                "algorithm.reward_label_validity.enabled requires "
+                "env.train.auto_reset=False."
+            )
+        if bool(train_cfg.get("ignore_terminations", False)):
+            raise ValueError(
+                "algorithm.reward_label_validity.enabled requires "
+                "env.train.ignore_terminations=False."
+            )
+    return True
+
+
+def apply_reward_label_validity_mask(
+    batch: dict[str, Any],
+    *,
+    enabled: bool = False,
+) -> dict[str, Any]:
+    """Exclude an entire trajectory when any of its reward labels is invalid."""
+    if not enabled:
+        return batch
+    audit_info = batch.get("audit_info")
+    if not isinstance(audit_info, dict):
+        return batch
+    reward_label_valid = audit_info.get("reward_label_valid")
+    if not isinstance(reward_label_valid, torch.Tensor):
+        return batch
+    if reward_label_valid.ndim < 2:
+        raise ValueError(
+            "reward_label_valid must have at least [time, batch] dimensions, "
+            f"got {tuple(reward_label_valid.shape)}."
+        )
+
+    reduction_dims = (0, *range(2, reward_label_valid.ndim))
+    trajectory_valid = reward_label_valid.to(torch.bool).all(dim=reduction_dims)
+
+    loss_mask = batch.get("loss_mask")
+    if loss_mask is None:
+        rewards = batch.get("rewards")
+        if not isinstance(rewards, torch.Tensor) or rewards.ndim < 2:
+            raise ValueError(
+                "rewards must be a tensor with at least [time, batch] dimensions "
+                "when reward_label_valid is present."
+            )
+        loss_mask = torch.ones_like(rewards, dtype=torch.bool)
+    if loss_mask.shape[1] != trajectory_valid.shape[0]:
+        raise ValueError(
+            "reward_label_valid batch dimension does not match loss_mask: "
+            f"{trajectory_valid.shape[0]} and {loss_mask.shape[1]}."
+        )
+
+    trajectory_valid = trajectory_valid.reshape(
+        1, trajectory_valid.shape[0], *([1] * (loss_mask.ndim - 2))
+    )
+    batch["loss_mask"] = loss_mask.to(torch.bool) & trajectory_valid
+    return batch
+
+
 def preprocess_embodied_batch(
     batch: dict[str, Any],
     *,
@@ -770,6 +857,7 @@ def preprocess_embodied_batch(
     reward_type: str,
     filter_rewards: bool,
     group_size: int,
+    reward_label_validity: bool = False,
     rewards_lower_bound: float | None = None,
     rewards_upper_bound: float | None = None,
 ) -> dict[str, torch.Tensor]:
@@ -785,6 +873,11 @@ def preprocess_embodied_batch(
 
         batch["loss_mask"] = loss_mask
         batch["loss_mask_sum"] = loss_mask_sum
+
+    batch = apply_reward_label_validity_mask(
+        batch,
+        enabled=reward_label_validity,
+    )
 
     if filter_rewards:
         rewards = batch["rewards"]

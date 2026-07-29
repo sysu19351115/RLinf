@@ -261,6 +261,129 @@ class TestEpisodeControlMode:
         assert info["hil_state"] == "model"
         env.close()
 
+    def test_chunk_boundary_mode_defers_success_and_keeps_actions_pass_through(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            episode_control_mode="online_chunk_boundary",
+            allow_motion_intervention=False,
+            safe_model_handoff=False,
+        )
+        w.reset()
+        first_action = _DUMMY_POSE.copy()
+        first_action[0] = 0.1
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.enter")
+
+        _, reward, terminated, truncated, info = w.step(first_action)
+
+        assert reward == 0.0
+        assert not terminated
+        assert not truncated
+        assert info["operator_label_pending"] == "success"
+        assert "operator_episode_end" not in info
+        np.testing.assert_allclose(info["executed_action"], first_action)
+
+        final_action = _DUMMY_POSE.copy()
+        final_action[0] = 0.2
+        w.set_chunk_boundary(True)
+        _, reward, terminated, truncated, info = w.step(final_action)
+
+        assert reward == 1.0
+        assert terminated
+        assert not truncated
+        assert info["termination_reason"] == "operator_success"
+        assert info["operator_episode_end"] is True
+        assert info["operator_success"] is True
+        assert info["reward_label_valid"] is True
+        np.testing.assert_allclose(info["executed_action"], final_action)
+        with pytest.raises(RuntimeError, match="episode"):
+            w.step(_DUMMY_POSE.copy())
+        env.close()
+
+    def test_chunk_boundary_mode_defers_failure_to_boundary(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            episode_control_mode="online_chunk_boundary",
+            allow_motion_intervention=False,
+            safe_model_handoff=False,
+        )
+        w.reset()
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.backspace")
+
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert not truncated
+        assert info["operator_label_pending"] == "failure"
+
+        w.set_chunk_boundary(True)
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert truncated
+        assert info["termination_reason"] == "operator_failure"
+        assert info["operator_episode_end"] is True
+        assert info["operator_success"] is False
+        assert info["reward_label_valid"] is True
+        env.close()
+
+    def test_chunk_boundary_mode_first_label_wins(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            episode_control_mode="online_chunk_boundary",
+            allow_motion_intervention=False,
+            safe_model_handoff=False,
+        )
+        w.reset()
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.enter")
+        w.step(_DUMMY_POSE.copy())
+
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.backspace")
+        _, _, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert not terminated
+        assert not truncated
+        assert info["operator_label_pending"] == "success"
+        assert info["operator_label_conflict_ignored"] is True
+
+        w.set_chunk_boundary(True)
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+        assert reward == 1.0
+        assert terminated
+        assert not truncated
+        env.close()
+
+    def test_chunk_boundary_reset_clears_pending_label(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            episode_control_mode="online_chunk_boundary",
+            allow_motion_intervention=False,
+            safe_model_handoff=False,
+        )
+        w.reset()
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.enter")
+        w.step(_DUMMY_POSE.copy())
+
+        w.reset()
+        w.set_chunk_boundary(True)
+        _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert reward == 0.0
+        assert not terminated
+        assert not truncated
+        assert "operator_label_pending" not in info
+        env.close()
+
     def test_online_quit_truncates_and_requests_shutdown(self):
         env = _dummy_pose_env()
         w = _make_wrapper(env, episode_control_mode="online")
@@ -276,6 +399,30 @@ class TestEpisodeControlMode:
         assert info["quit_program"] is True
         assert info["operator_episode_end"] is True
         assert info["operator_success"] is False
+        env.close()
+
+    def test_chunk_boundary_quit_is_immediate_hold_with_invalid_label(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            episode_control_mode="online_chunk_boundary",
+            allow_motion_intervention=False,
+            safe_model_handoff=False,
+        )
+        w.reset()
+        unsafe_model_action = _DUMMY_POSE.copy()
+        unsafe_model_action[:3] = [0.4, 0.4, 0.4]
+        w.set_chunk_boundary(False)
+        w.listener.press("Key.esc")
+
+        _, reward, terminated, truncated, info = w.step(unsafe_model_action)
+
+        assert reward == 0.0
+        assert not terminated
+        assert truncated
+        assert info["termination_reason"] == "operator_quit"
+        assert info["reward_label_valid"] is False
+        np.testing.assert_allclose(info["executed_action"], _DUMMY_POSE)
         env.close()
 
     def test_online_reset_can_wait_for_start_key(self):
