@@ -81,3 +81,18 @@ def test_two_node_openpi_pytorch_config(monkeypatch):
     assert cfg.cluster.node_groups[0].node_ranks == 0
     assert cfg.cluster.node_groups[1].node_ranks == 1
     assert cfg.cluster.node_groups[1].hardware.configs[0].node_rank == 1
+    assert cfg.dobot.ip == "192.168.5.2"
+    assert cfg.dobot.tool_index == 2
+    assert cfg.dobot.initial_joint_pos == [
+        -5.87,
+        -0.799,
+        -2.175,
+        1.89,
+        1.424,
+        0.621,
+        0.9,
+    ]
+    hardware_cfg = cfg.cluster.node_groups[1].hardware.configs[0]
+    assert hardware_cfg.ip == cfg.dobot.ip
+    assert hardware_cfg.tool_index == cfg.dobot.tool_index
+    assert cfg.env.train.override_cfg.initial_joint_pos == cfg.dobot.initial_joint_pos

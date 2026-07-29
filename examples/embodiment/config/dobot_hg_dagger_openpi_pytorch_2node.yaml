@@ -5,6 +5,14 @@ defaults:
 # Two-node production topology:
 #   rank 0 / 192.168.3.223: actor (model, optimizer, gradients)
 #   rank 1 / 192.168.3.224: rollout inference and Dobot environment
+# Robot-specific values are defined once here and routed to the scheduler and
+# environment layers below.
+dobot:
+  ip: "192.168.5.1"
+  tool_index: 1
+  # [j1..j6 rad, gripper norm]. Reset always uses joint-space ServoJ.
+  initial_joint_pos: [6.026, 1.1, 1.78, -1.975, -1.537, 0.195, 0.9]
+
 cluster:
   num_nodes: 2
   component_placement:
@@ -26,10 +34,10 @@ cluster:
         type: Dobot
         configs:
           - node_rank: 1
-            ip: "192.168.5.2"
+            ip: ${dobot.ip}
             speed: 5
             user_index: 0
-            tool_index: 2
+            tool_index: ${dobot.tool_index}
             action_mode: "cartesian"
             state_mode: "pose"
             gripper_port: "/dev/ttyACM0"
@@ -45,3 +53,8 @@ cluster:
 runner:
   logger:
     experiment_name: "dobot-hg-dagger-openpi-pytorch-two-node"
+
+env:
+  train:
+    override_cfg:
+      initial_joint_pos: ${dobot.initial_joint_pos}

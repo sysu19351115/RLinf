@@ -29,7 +29,7 @@ cluster:
         type: Dobot
         configs:
           - node_rank: 1
-            ip: "192.168.5.2"
+            ip: "192.168.5.1"
             speed: 5
             user_index: 0
             tool_index: 2
