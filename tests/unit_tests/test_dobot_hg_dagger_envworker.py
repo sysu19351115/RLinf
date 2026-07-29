@@ -303,6 +303,36 @@ def test_rollout_padding_result_reuses_shapes_without_mutating_cache():
     assert final.prev_logprobs is None
 
 
+@pytest.mark.parametrize("collect_prev_infos", [False, True])
+def test_rollout_result_versions_do_not_depend_on_logprobs(collect_prev_infos):
+    worker = MultiStepRolloutWorker.__new__(MultiStepRolloutWorker)
+    worker.collect_prev_infos = collect_prev_infos
+    worker.version = 7
+    worker.get_bootstrap_values = lambda _final_obs: None
+
+    actions = torch.ones((2, 32))
+    prev_logprobs = torch.ones((2, 4, 8)) if collect_prev_infos else None
+    result = {
+        "prev_logprobs": prev_logprobs,
+        "prev_values": torch.ones((2, 1)) if collect_prev_infos else None,
+        "forward_inputs": {"action": actions.clone()},
+        "expert_label_flag": False,
+    }
+
+    rollout_result = worker._build_rollout_result(actions, result)
+
+    if collect_prev_infos:
+        torch.testing.assert_close(rollout_result.prev_logprobs, prev_logprobs)
+    else:
+        assert rollout_result.prev_logprobs is None
+    assert rollout_result.versions.shape == (2, 1)
+    assert rollout_result.versions.dtype == torch.float32
+    torch.testing.assert_close(
+        rollout_result.versions,
+        torch.full((2, 1), 7.0),
+    )
+
+
 def test_rollout_padding_detection_requires_the_whole_batch():
     assert MultiStepRolloutWorker._is_full_rollout_padding(
         {"rollout_padding": torch.tensor([True, True])}
