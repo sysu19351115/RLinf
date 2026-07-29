@@ -26,7 +26,7 @@ from .hardware import (
     RebotArmHWInfo,
     Turtle2HWInfo,
 )
-from .manager import WorkerInfo
+from .manager import Tracer, WorkerInfo
 from .placement import (
     ComponentPlacement,
     FlexiblePlacementStrategy,
@@ -87,4 +87,5 @@ __all__ = [
     "Channel",
     "ChannelWorker",
     "WeightedItem",
+    "Tracer",
 ]

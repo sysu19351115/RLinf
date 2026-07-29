@@ -52,6 +52,8 @@ infer_benchmark() {
         maniskill_*|maniskill-* ) echo "maniskill" ;;
         metaworld_*|metaworld-* ) echo "metaworld" ;;
         calvin_*|calvin-* ) echo "calvin" ;;
+        robocasa365_*|robocasa365-* ) echo "robocasa365" ;;
+        robocasa_*|robocasa-* ) echo "robocasa" ;;
         roboverse_*|roboverse-* ) echo "roboverse" ;;
         polaris_*|polaris-* ) echo "polaris" ;;
         gym_aloha_*|gym-aloha-* ) echo "gym_aloha" ;;
@@ -183,6 +185,14 @@ if [ "${BENCHMARK}" = "gym_aloha" ]; then
     echo "Using benchmark=${BENCHMARK}, config=${CONFIG_NAME}, ROBOT_PLATFORM=${ROBOT_PLATFORM}"
 elif [ "${BENCHMARK}" = "libero" ]; then
     setup_sim_env
+fi
+
+if [ "${BENCHMARK}" = "robocasa365" ]; then
+    # Disable numba JIT to avoid LLVM crashes with multiple env subprocesses.
+    export NUMBA_DISABLE_JIT="${NUMBA_DISABLE_JIT:-1}"
+fi
+
+if [ "${BENCHMARK}" = "libero" ]; then
     export ROBOT_PLATFORM="${ROBOT_PLATFORM:-LIBERO}"
     export LIBERO_TYPE="${LIBERO_TYPE:-standard}"
     if [ "${LIBERO_TYPE}" = "pro" ]; then
