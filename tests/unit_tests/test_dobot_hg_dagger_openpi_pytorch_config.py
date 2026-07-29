@@ -36,10 +36,10 @@ def _compose(config_name, monkeypatch, overrides=None):
     return cfg
 
 
-def _assert_contract(cfg):
+def _assert_contract(cfg, actor_precision="fp32"):
     assert cfg.actor.model.model_type == "openpi_pytorch"
     assert cfg.actor.model.openpi.task == "dagger"
-    assert cfg.actor.model.precision == "fp32"
+    assert cfg.actor.model.precision == actor_precision
     assert cfg.rollout.model.precision == "bf16"
     assert cfg.actor.model.openpi.action_horizon == 50
     assert cfg.actor.model.num_action_chunks == 10
@@ -81,7 +81,7 @@ def test_single_node_openpi_pytorch_config(monkeypatch):
 
 def test_two_node_openpi_pytorch_config(monkeypatch):
     cfg = _compose("dobot_hg_dagger_openpi_pytorch_2node", monkeypatch)
-    _assert_contract(cfg)
+    _assert_contract(cfg, actor_precision="bf16")
     assert cfg.cluster.num_nodes == 2
     assert cfg.cluster.component_placement.actor.node_group == "inference"
     assert cfg.cluster.component_placement.rollout.node_group == "robot"

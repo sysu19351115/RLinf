@@ -114,10 +114,20 @@ class AsyncFuncWork(AsyncWork):
     def __call__(self, future: Future):
         """Execute the function and set the done flag."""
         start = time.perf_counter()
-        if self._pass_self:
-            self._result = self._func(self, *self._args, **self._kwargs)
-        else:
-            self._result = self._func(*self._args, **self._kwargs)
+        try:
+            # ``then`` callbacks must not run after the preceding work failed.
+            # Waiting here re-raises the predecessor's exception and forwards
+            # it to this work's future instead of executing the next callback.
+            if future is not None:
+                future.wait()
+            if self._pass_self:
+                self._result = self._func(self, *self._args, **self._kwargs)
+            else:
+                self._result = self._func(*self._args, **self._kwargs)
+        except Exception as error:
+            self._exec_time = time.perf_counter() - start
+            self._done.set_exception(error)
+            return
         self._exec_time = time.perf_counter() - start
         if (
             Worker.current_worker.has_accelerator

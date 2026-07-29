@@ -204,6 +204,7 @@ class CollectiveGroup:
     OBJECT: int = 3
     DATACLASS_WITH_TENSORS: int = 4
     POOL_SIZE: int = 1
+    MAX_TENSOR_LIST_METADATA_BYTES: int = 64 * 1024 * 1024
 
     def __init__(
         self,
@@ -757,10 +758,17 @@ class CollectiveGroup:
             comm_id=comm_id,
             src_rank=src_rank,
         )
+        metadata_size_value = int(metadata_size.item())
+        if not 0 < metadata_size_value <= self.MAX_TENSOR_LIST_METADATA_BYTES:
+            raise RuntimeError(
+                "Invalid tensor-list metadata size received during broadcast: "
+                f"{metadata_size_value} bytes; expected a value in "
+                f"[1, {self.MAX_TENSOR_LIST_METADATA_BYTES}]."
+            )
         metadata_tensor = (
             metadata_tensor
             if self._rank == src_rank
-            else torch.empty(metadata_size.item(), dtype=torch.uint8, device="cpu")
+            else torch.empty(metadata_size_value, dtype=torch.uint8, device="cpu")
         )
         self._broadcast(
             metadata_tensor,

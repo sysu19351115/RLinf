@@ -54,6 +54,12 @@ runner:
   logger:
     experiment_name: "dobot-hg-dagger-openpi-pytorch-two-node"
 
+# A single 32 GiB actor GPU cannot keep the 3.35B model and FSDP state in
+# FP32 while also materializing weights for rollout synchronization.
+actor:
+  model:
+    precision: bf16
+
 env:
   train:
     override_cfg:
