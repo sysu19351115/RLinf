@@ -45,8 +45,8 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
     ``cfg.model_path`` points at a new-format checkpoint containing
     ``model.safetensors``. Model shape comes from YAML; no checkpoint
-    ``config.json`` is read. ``cfg.openpi.task`` selects the SFT, eval, or RL
-    wrapper around the shared Pi0 core.
+    ``config.json`` is read. ``cfg.openpi.task`` selects the SFT, eval, RL, or
+    DAgger wrapper around the shared Pi0 core.
     """
     import pathlib
 
@@ -56,6 +56,7 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     from rlinf.models.embodiment.openpi_pytorch.pi0_model import gemma as pi0_gemma
     from rlinf.models.embodiment.openpi_pytorch.pi0_model.pi0_config import Pi0Config
     from rlinf.models.embodiment.openpi_pytorch.utils.model_builders import (
+        _build_dagger_model,
         _build_eval_model,
         _build_rl_model,
         _build_sft_model,
@@ -106,8 +107,8 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     task = OmegaConf.select(model_cfg, "task", default=None)
     if task is None:
         raise ValueError(
-            "actor.model.openpi.task is required: set it to 'sft', 'rl', or "
-            "'eval' to pick the concrete OpenPI PyTorch model variant."
+            "actor.model.openpi.task is required: set it to 'sft', 'rl', "
+            "'eval', or 'dagger' to pick the concrete OpenPI PyTorch model variant."
         )
     task = str(task).lower()
 
@@ -139,6 +140,16 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
             action_env_dim=action_env_dim,
         )
 
+    if task == "dagger":
+        return _build_dagger_model(
+            cfg,
+            model_cfg,
+            model,
+            num_steps=num_steps,
+            action_chunk=action_chunk,
+            action_env_dim=action_env_dim,
+        )
+
     if task == "rl":
         paligemma_width = pi0_gemma.get_config(pi0_config.paligemma_variant).width
         return _build_rl_model(
@@ -153,5 +164,5 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
     raise ValueError(
         f"actor.model.openpi.task={task!r} is not supported; "
-        "use 'eval', 'sft', or 'rl'."
+        "use 'eval', 'sft', 'rl', or 'dagger'."
     )

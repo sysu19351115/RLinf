@@ -18,6 +18,7 @@ import dataclasses
 import random
 from typing import Any, Literal
 
+import numpy as np
 import torch
 
 from rlinf.models.embodiment.base_policy import ForwardType
@@ -29,6 +30,9 @@ from rlinf.models.embodiment.openpi_pytorch.pi0_model import model as pi0_model_
 from rlinf.models.embodiment.openpi_pytorch.pi0_model.model import Observation
 from rlinf.models.embodiment.openpi_pytorch.pi0_model.pi0 import Pi0
 from rlinf.models.embodiment.openpi_pytorch.utils import rl_sampler
+from rlinf.models.embodiment.openpi_pytorch.utils.freeze import (
+    freeze_paligemma_vlm,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,10 +136,15 @@ class OpenPiPytorchRLActionModel(OpenPiPytorchEvalActionModel):
         # then route to the SDE chain sampler.
         self._ensure_wrappers()
         repacked = self._repack_env_obs(env_obs)
+        prev_state = repacked.get("observation/prev_state")
         processed = self.input_transform(repacked, transpose=False)
         observation = self._observation_dict_to_device(processed)
         return self._predict_train(
-            observation, noise=noise, rng=rng, compute_values=compute_values
+            observation,
+            noise=noise,
+            rng=rng,
+            compute_values=compute_values,
+            prev_state=prev_state,
         )
 
     def _predict_train(
@@ -145,6 +154,7 @@ class OpenPiPytorchRLActionModel(OpenPiPytorchEvalActionModel):
         noise: torch.Tensor | None,
         rng: torch.Generator | None,
         compute_values: bool,
+        prev_state: torch.Tensor | np.ndarray | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         del compute_values  # always True for PPO; value head presence is the real gate
         rl_cfg = self.rl_cfg
@@ -238,7 +248,11 @@ class OpenPiPytorchRLActionModel(OpenPiPytorchEvalActionModel):
         prev_values = vlm_value[:, None].float().contiguous()  # [B, 1]
 
         env_outputs = self.output_transform(
-            {"actions": x_0, "state": observation.state}
+            self._build_output_transform_inputs(
+                x_0,
+                observation,
+                prev_state=prev_state,
+            )
         )
         # openpi Unnormalize runs in float64; cast env actions to float32 to match
         # the eval path + legacy contract (and the env/rollout action dtype).
@@ -367,46 +381,5 @@ class OpenPiPytorchRLActionModel(OpenPiPytorchEvalActionModel):
         }
 
     def freeze_vlm(self) -> int:
-        """Freeze the PaliGemma VLM (vision + expert-0 of the LLM) for PPO.
-        Returns the count of newly-frozen parameter tensors (for logging).
-        """
-        frozen = 0
-        # SigLIP vision encoder — entirely belongs to the PaliGemma side.
-        for p in self.model.img.parameters():
-            if p.requires_grad:
-                p.requires_grad = False
-                frozen += 1
-        # Multi-expert gemma: expert index 0 = paligemma_2b LLM, expert 1 = action expert.
-        llm = self.model.llm
-        # Shared token embedder feeds the paligemma side of the LLM only.
-        for p in llm.embedder.parameters():
-            if p.requires_grad:
-                p.requires_grad = False
-                frozen += 1
-        # Per-Block per-expert submodules: ModuleLists indexed by expert.
-        for block in llm.layers:
-            for sub in (
-                block.pre_attention_norms[0],
-                block.pre_ffw_norms[0],
-                block.mlps[0],
-            ):
-                for p in sub.parameters():
-                    if p.requires_grad:
-                        p.requires_grad = False
-                        frozen += 1
-            attn = block.attn
-            for proj_list in (attn.q_proj, attn.k_proj, attn.v_proj, attn.o_proj):
-                proj = proj_list[0]
-                if proj is None:
-                    continue
-                for p in proj.parameters():
-                    if p.requires_grad:
-                        p.requires_grad = False
-                        frozen += 1
-        # Per-expert final norms.
-        if llm.final_norms[0] is not None:
-            for p in llm.final_norms[0].parameters():
-                if p.requires_grad:
-                    p.requires_grad = False
-                    frozen += 1
-        return frozen
+        """Freeze the PaliGemma VLM using the shared train-expert-only policy."""
+        return freeze_paligemma_vlm(self.model)

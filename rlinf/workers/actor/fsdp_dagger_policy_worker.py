@@ -540,14 +540,24 @@ class EmbodiedDAGGERFSDPPolicy(EmbodiedFSDPActor):
     def forward_actor(self, batch):
         """Run one supervised forward pass for DAgger."""
         data = self._prepare_sft_batch(batch)
-        use_action_chunk_loss = (
-            SupportedModel(self.cfg.actor.model.model_type) == SupportedModel.OPENPI
-        )
-        return self.model(
+        use_action_chunk_loss = SupportedModel(self.cfg.actor.model.model_type) in {
+            SupportedModel.OPENPI,
+            SupportedModel.OPENPI_PYTORCH,
+        }
+        actor_loss = self.model(
             forward_type=ForwardType.SFT,
             data=data,
             use_action_chunk_loss=use_action_chunk_loss,
         )
+        if (
+            not torch.is_tensor(actor_loss)
+            or actor_loss.ndim != 0
+            or not torch.isfinite(actor_loss)
+        ):
+            raise ValueError(
+                f"DAgger actor must return one finite scalar loss; got {actor_loss!r}."
+            )
+        return actor_loss
 
     @Worker.timer("update_one_epoch")
     def update_one_epoch(self):

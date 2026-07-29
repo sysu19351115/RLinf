@@ -321,11 +321,15 @@ class Pi0(model.BaseModel):
         rng: torch.Generator | None = None,
         noise: torch.Tensor | None = None,
         time: torch.Tensor | None = None,
+        reduce_action_dim: bool = True,
     ) -> torch.Tensor:
         """Compute flow matching loss.
 
         Returns:
-            loss: (B, action_horizon) per-timestep MSE loss
+            loss: Per-action squared error with shape
+                ``(B, action_horizon, action_dim)`` when
+                ``reduce_action_dim=False``; otherwise the default
+                per-timestep MSE with shape ``(B, action_horizon)``.
         """
         B = actions.shape[0]
         device = actions.device
@@ -381,7 +385,10 @@ class Pi0(model.BaseModel):
 
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
-        return torch.mean(torch.square(v_t - u_t), dim=-1)
+        squared_error = torch.square(v_t - u_t)
+        if reduce_action_dim:
+            return squared_error.mean(dim=-1)
+        return squared_error
 
     def build_prefix_cache(
         self, observation: model.Observation

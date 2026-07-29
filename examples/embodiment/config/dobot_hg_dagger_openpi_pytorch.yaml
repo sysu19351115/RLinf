@@ -1,0 +1,77 @@
+defaults:
+  - dobot_hg_dagger_openpi
+  - _self_
+
+# Safe-by-default OpenPI PyTorch HG-DAgger configuration. The Pi0 model predicts
+# H50 training targets while only H10 actions are sent to the robot per chunk.
+runner:
+  logger:
+    experiment_name: "dobot-hg-dagger-openpi-pytorch-single-node"
+
+algorithm:
+  dagger:
+    execution_chunk_steps: ${actor.model.num_action_chunks}
+    training_window_steps: ${actor.model.openpi.action_horizon}
+    window_stride_steps: ${actor.model.num_action_chunks}
+    window_anchor: "full_human_chunk"
+    min_human_steps_per_window: ${actor.model.num_action_chunks}
+    loss_scope: "human_only"
+  # PPO reward-label masking is unrelated to DAgger expert-action validity.
+  reward_label_validity:
+    enabled: False
+
+env:
+  train:
+    auto_reset: True
+    ignore_terminations: False
+    terminal_padding:
+      enabled: False
+    override_cfg:
+      is_dummy: True
+      manual_episode_control_only: True
+    keyboard_intervention:
+      allow_motion_intervention: True
+      episode_control_mode: "online"
+      safe_model_handoff: True
+      wait_for_start_on_reset: True
+
+rollout:
+  model:
+    model_path: ${actor.model.model_path}
+    precision: bf16
+
+actor:
+  model:
+    model_path: ${oc.env:DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH}
+    model_type: "openpi_pytorch"
+    precision: fp32
+    num_action_chunks: 10
+    action_dim: 8
+    num_steps: 5
+    add_value_head: False
+    openpi:
+      task: "dagger"
+      config_name: "pi05_dobot_pose"
+      action_horizon: 50
+      action_chunk: ${actor.model.num_action_chunks}
+      action_env_dim: ${actor.model.action_dim}
+      num_steps: ${actor.model.num_steps}
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      train_expert_only: True
+    # The new-format checkpoint bundles
+    # dobot_lerobot_pose_data/norm_stats.json.
+    openpi_data: null
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: True
+    gradient_checkpointing_use_reentrant: False
+    mixed_precision:
+      param_dtype: bf16
+      reduce_dtype: fp32
+      buffer_dtype: fp32

@@ -29,7 +29,15 @@ from rlinf.models.embodiment.openpi_pytorch.pi0_model.pi0 import Pi0
 
 
 def _to_numpy(x):
-    return np.asarray(x.detach().cpu()) if torch.is_tensor(x) else x
+    if not torch.is_tensor(x):
+        return x
+    value = x.detach().cpu()
+    # NumPy has no native bfloat16 dtype. OpenPI transforms operate in NumPy
+    # and already normalize/unnormalize in floating point, so promote only at
+    # this framework boundary without changing model compute precision.
+    if value.dtype == torch.bfloat16:
+        value = value.to(torch.float32)
+    return np.asarray(value)
 
 
 class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
@@ -56,6 +64,7 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         action_chunk: int | None = None,
         config_name: str = "",
         state_indices: Sequence[int] | None = None,
+        preserve_dagger_anchor_inputs: bool = False,
     ):
         super().__init__(
             pi0_model,
@@ -72,6 +81,10 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         # Optional subset of the raw env state dim (openpi ``state_indices``).
         # ``None`` (the BEHAVIOR default) is an identity passthrough.
         self.state_indices = list(state_indices) if state_indices else None
+        # HG-DAgger needs the raw pre-action observation in replay. Keep this
+        # opt-in so ordinary eval/PPO-eval results retain their lightweight
+        # forward-input contract.
+        self.preserve_dagger_anchor_inputs = bool(preserve_dagger_anchor_inputs)
 
         # openpi.transforms pipeline state (installed by :meth:`setup_wrappers`).
         self._input_transform_fn = None
@@ -165,6 +178,9 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         extra_view_images = env_obs.get("extra_view_images")
         if extra_view_images is not None:
             processed_obs["observation/extra_view_image"] = extra_view_images
+        prev_states = env_obs.get("prev_states")
+        if prev_states is not None:
+            processed_obs["observation/prev_state"] = prev_states
         return processed_obs
 
     def input_transform(self, obs: dict, transpose: bool = False) -> dict:
@@ -308,9 +324,40 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
             )
         # openpi.transforms pipeline (eval / RL).
         repacked = self._repack_env_obs(env_obs)
+        prev_state = repacked.get("observation/prev_state")
         processed = self.input_transform(repacked, transpose=False)
         observation = self._observation_dict_to_device(processed)
-        return self._predict_eval(observation, noise=noise, rng=rng)
+        return self._predict_eval(
+            observation,
+            noise=noise,
+            rng=rng,
+            prev_state=prev_state,
+            anchor_inputs=(repacked if self.preserve_dagger_anchor_inputs else None),
+            processed_inputs=(
+                processed if self.preserve_dagger_anchor_inputs else None
+            ),
+        )
+
+    @staticmethod
+    def _build_output_transform_inputs(
+        model_actions: torch.Tensor,
+        observation: Observation,
+        *,
+        prev_state: torch.Tensor | np.ndarray | None,
+    ) -> dict[str, Any]:
+        """Build the reverse-transform payload with the absolute pose anchor.
+
+        Dobot pose policies predict SE(3) deltas. ``AbsolutePose`` needs the
+        raw pre-action ``prev_state`` to reconstruct robot-frame commands; the
+        transformed model state alone is not a safe substitute.
+        """
+        outputs: dict[str, Any] = {
+            "actions": model_actions,
+            "state": observation.state,
+        }
+        if prev_state is not None:
+            outputs["prev_state"] = prev_state
+        return outputs
 
     def _predict_eval(
         self,
@@ -318,6 +365,9 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
         *,
         noise: torch.Tensor | None,
         rng: torch.Generator | None,
+        prev_state: torch.Tensor | np.ndarray | None = None,
+        anchor_inputs: dict[str, Any] | None = None,
+        processed_inputs: dict[str, Any] | None = None,
     ) -> tuple[torch.Tensor, dict[str, Any]]:
         """Deterministic Euler ODE sampler shared by eval and the RL eval path.
 
@@ -331,19 +381,34 @@ class OpenPiPytorchEvalActionModel(OpenPiPytorchActionModel):
             observation, num_steps=self.num_steps, noise=noise, rng=rng
         )
         env_outputs = self.output_transform(
-            {"actions": model_actions, "state": observation.state}
+            self._build_output_transform_inputs(
+                model_actions,
+                observation,
+                prev_state=prev_state,
+            )
         )
         # openpi Unnormalize runs in float64; cast env actions back to float32 to
         # match the legacy eval processor's ``.astype(np.float32)`` contract (and
         # the action dtype the env/rollout worker expects).
         actions = env_outputs["actions"].to(device=self.device, dtype=torch.float32)
         B = actions.shape[0]
+        forward_inputs = {
+            "action": actions.reshape(B, -1).contiguous(),
+            "model_action": model_actions.reshape(B, -1).contiguous(),
+        }
+        if processed_inputs is not None:
+            for key in ("tokenized_prompt", "tokenized_prompt_mask"):
+                value = processed_inputs.get(key)
+                if torch.is_tensor(value):
+                    forward_inputs[key] = value.detach().contiguous().clone()
+        if anchor_inputs is not None:
+            for key, value in anchor_inputs.items():
+                if key != "prompt" and torch.is_tensor(value):
+                    forward_inputs[key] = value.detach().contiguous().clone()
+
         result = {
             "prev_logprobs": None,
             "prev_values": None,
-            "forward_inputs": {
-                "action": actions.reshape(B, -1).contiguous(),
-                "model_action": model_actions.reshape(B, -1).contiguous(),
-            },
+            "forward_inputs": forward_inputs,
         }
         return actions, result

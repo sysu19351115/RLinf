@@ -65,6 +65,8 @@ episode 以 `unsafe_model_handoff` 截断并要求显式 reset；不能依赖 sl
 export DOBOT_HG_DAGGER_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_train_1200_torch
 export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_MODEL_PATH/assets/dobot_cf5af_t265_pose/norm_stats.json"
 export DOBOT_HG_DAGGER_LR=1e-5
+# PyTorch 配置使用本节点可访问的新格式路径。
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/path/on/gpu-node/pi05_dobot_t265_pose_train_1200_newtorch
 ```
 
 首次运行前检查：
@@ -74,6 +76,89 @@ test -f "$DOBOT_HG_DAGGER_MODEL_PATH/model.safetensors"
 test -f "$DOBOT_HG_DAGGER_MODEL_PATH/config.json"
 test -f "$DOBOT_HG_DAGGER_NORM_STATS_PATH"
 ```
+
+## OpenPI PyTorch 模式
+
+HG-DAgger 现在有两条独立模型路径：
+
+- `dobot_hg_dagger_openpi[...].yaml`：原有 legacy `openpi`；
+- `dobot_hg_dagger_openpi_pytorch[...].yaml`：仓库自主实现的
+  `openpi_pytorch`。
+
+PyTorch 模式使用同一个 `task: dagger` wrapper 完成确定性 rollout 和
+`human_only` flow-matching 更新。actor 保留 fp32 主权重并以 bf16 混合精度
+计算；rollout 使用 bf16。模型仍预测 H50，但每次只向环境交付 H10。两侧 wrapper
+没有角色专属参数，因此可继续使用 patch weight sync。
+
+### 转换旧 checkpoint
+
+旧 checkpoint 的 key 以 `paligemma_with_expert.*` 开头，不能直接由新模型
+factory 加载。先在有旧模型的节点执行：
+
+```bash
+cd /home/zylab/project/RLinf
+source .venv/bin/activate
+
+OLD_MODEL=/data/checkpoints/pi05_dobot_t265_pose_train_1200_torch
+NEW_MODEL=/data/checkpoints/pi05_dobot_t265_pose_train_1200_newtorch
+
+python -m rlinf.utils.ckpt_convertor.openpi.convert old2new \
+  --input-model "$OLD_MODEL" \
+  --input-norm-stats \
+    "$OLD_MODEL/assets/dobot_cf5af_t265_pose/norm_stats.json" \
+  --output-model "$NEW_MODEL" \
+  --output-norm-stats \
+    "$NEW_MODEL/dobot_lerobot_pose_data/norm_stats.json"
+
+test -f "$NEW_MODEL/model.safetensors"
+test -f "$NEW_MODEL/dobot_lerobot_pose_data/norm_stats.json"
+```
+
+`dobot_lerobot_pose_data` 是 `pi05_dobot_pose` 的固定 asset id，不能替换成旧
+数据集目录名。转换只改 key/layout，不修改 norm stats 内容，也不要把大型模型
+提交到 Git。
+
+### PyTorch 配置与无硬件门禁
+
+- 单节点：`dobot_hg_dagger_openpi_pytorch`
+- 双节点：`dobot_hg_dagger_openpi_pytorch_2node`
+
+两者仍默认 `env.train.override_cfg.is_dummy=true`。先解析配置：
+
+```bash
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH="$NEW_MODEL"
+export DOBOT_HG_DAGGER_LR=1e-6
+
+python examples/embodiment/train_embodied_agent.py \
+  --config-name dobot_hg_dagger_openpi_pytorch \
+  --cfg job --resolve
+
+python examples/embodiment/train_embodied_agent.py \
+  --config-name dobot_hg_dagger_openpi_pytorch_2node \
+  --cfg job --resolve
+```
+
+在 rollout 节点可用合成观测验证真实 checkpoint；该命令不会创建 Dobot
+controller，也不会向机器人发送动作：
+
+```bash
+python tests/hardware_tests/openpi_pytorch_dobot_hg_dagger_gate.py \
+  --checkpoint "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH" \
+  --mode rollout \
+  --device cuda
+```
+
+actor 节点更新代码后，再运行一次真实 backward/optimizer 门禁：
+
+```bash
+python tests/hardware_tests/openpi_pytorch_dobot_hg_dagger_gate.py \
+  --checkpoint "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH" \
+  --mode actor \
+  --device cuda
+```
+
+只有 actor gate 的 loss、梯度、参数更新和显存余量均通过后，才允许开始在线
+训练。
 
 ## 无硬件检查
 
@@ -203,6 +288,7 @@ export NCCL_IB_DISABLE=1
 export DOBOT_HG_DAGGER_MODEL_PATH=/data/checkpoints/pi05_dobot_t265_pose_train_1200_torch
 export DOBOT_HG_DAGGER_NORM_STATS_PATH="$DOBOT_HG_DAGGER_MODEL_PATH/assets/dobot_cf5af_t265_pose/norm_stats.json"
 export DOBOT_HG_DAGGER_LR=1e-5
+export DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH=/path/on/robot-node/pi05_dobot_t265_pose_train_1200_newtorch
 export RLINF_KEYBOARD_DEVICE=/dev/input/by-id/<keyboard-event-kbd>
 
 test -f "$DOBOT_HG_DAGGER_MODEL_PATH/model.safetensors"
@@ -212,6 +298,17 @@ test -r "$RLINF_KEYBOARD_DEVICE"
 ray start --address='192.168.3.223:6379'
 ```
 
+PyTorch 模式要求两边以下文件内容一致，但路径可以是各节点自己的本地路径：
+
+```bash
+sha256sum \
+  "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH/model.safetensors" \
+  "$DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH/dobot_lerobot_pose_data/norm_stats.json"
+```
+
+环境变量必须在两台机器各自执行 `ray start` **之前**设置。主节点的 shell 环境
+不会自动传播到已启动的 robot 节点 Ray 进程。
+
 确认 `ray status` 同时看到两个节点后，在 GPU 节点（node 0）启动：
 
 ```bash
@@ -219,6 +316,14 @@ cd /home/tyz/project/RLinf
 .venv/bin/python examples/embodiment/train_embodied_agent.py \
   --config-path config \
   --config-name dobot_hg_dagger_openpi_2node \
+  env.train.override_cfg.is_dummy=false
+```
+
+PyTorch 模式改用：
+
+```bash
+.venv/bin/python examples/embodiment/train_embodied_agent.py \
+  --config-name dobot_hg_dagger_openpi_pytorch_2node \
   env.train.override_cfg.is_dummy=false
 ```
 
@@ -247,6 +352,10 @@ cd /home/tyz/project/RLinf
 - `env/episode_end/skipped_action_steps`
 - `env/control/handoff_hold_fraction`
 - `env/episode_end/unsafe_model_handoff`
+- `dagger/actor_loss` 与 `actor/grad_norm`
+- replay buffer size 与 `dagger/human_fraction`
+- actor sent model version 与 rollout applied weight version
+- actor/rollout GPU max allocated/reserved memory
 
 键盘断开或监听线程异常会触发安全终止。`Esc` 的 quit 会在当前通信轮次收束后、
 下一次 actor 更新前停止非流水线训练。DAGGER 配置不支持训练流水线，因此不会
@@ -260,6 +369,26 @@ logs/dobot_hg_dagger/replay_buffer_h50/rank_<actor_rank>/
 
 不要把 replay 目录当作未经检查即可发布的数据集；训练前仍应核对 episode 数量、
 介入比例、动作分布、终止原因和相机质量。
+
+### PyTorch 常见故障
+
+- `model.safetensors` 不存在：确认
+  `DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH` 指向转换后的目录，而不是旧模型的
+  `assets/`。
+- norm stats 找不到：目标必须是
+  `<checkpoint>/dobot_lerobot_pose_data/norm_stats.json`。
+- robot 节点提示模型环境变量缺失：在该节点重新 export，然后 `ray stop` 并重新
+  加入集群；只设置主节点无效。
+- `Gloo connectFullMesh failed`：分别用 `ip route get <对端IP>` 确认网卡，
+  并在两边 `ray start` 前设置 `RLINF_COMM_NET_DEVICES`。
+- actor OOM：保持 `micro_batch_size=1` 和 gradient checkpointing，先降低
+  global batch 或增加梯度累积；不要先把 fp32 主权重降为 bf16。
+- action expert 无梯度：停止训练，检查 `task: dagger`、
+  `train_expert_only: true`、非空 `human_action_mask` 和 actor gate。
+- `observation/prev_state` 缺失：该 replay 必须被拒绝；不能用当前 state 猜测
+  相对 SE(3) 动作的绝对参考。
+- weight version 不前进：核对两侧 checkpoint hash、代码版本、state-dict key、
+  collective 网卡和 patch-sync applied version，不要继续使用旧 rollout 权重。
 
 ## 独立自主评估
 

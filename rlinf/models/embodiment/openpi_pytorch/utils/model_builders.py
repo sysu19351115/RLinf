@@ -21,6 +21,7 @@ builders here, each of which wraps the core in the concrete variant:
 * :func:`_build_eval_model` → :class:`OpenPiPytorchEvalActionModel`
 * :func:`_build_sft_model`  → :class:`OpenPiPytorchSFTActionModel`
 * :func:`_build_rl_model`   → :class:`OpenPiPytorchRLActionModel`
+* :func:`_build_dagger_model` → :class:`OpenPiPytorchDaggerActionModel`
 
 The eval / RL builders assemble the shared ``openpi.transforms`` pipeline via
 :func:`transforms_pipeline.build_openpi_transforms`; the SFT builder holds no
@@ -114,6 +115,52 @@ def _build_sft_model(
         num_steps=num_steps,
         action_env_dim=action_env_dim,
     )
+
+
+def _build_dagger_model(
+    cfg,
+    model_cfg,
+    model,
+    *,
+    num_steps,
+    action_chunk,
+    action_env_dim,
+):
+    """Build deterministic rollout plus masked-SFT DAgger."""
+    from omegaconf import OmegaConf
+
+    from rlinf.models.embodiment.openpi_pytorch.dagger_action_model import (
+        OpenPiPytorchDaggerActionModel,
+    )
+    from rlinf.models.embodiment.openpi_pytorch.transforms_pipeline import (
+        build_openpi_transforms,
+    )
+
+    config_name = str(OmegaConf.select(model_cfg, "config_name", default=""))
+    if not config_name:
+        raise ValueError(
+            "actor.model.openpi.config_name is required for task='dagger'."
+        )
+    input_transforms, output_transforms = build_openpi_transforms(
+        cfg.model_path, config_name, data_kwargs=_resolve_data_kwargs(cfg)
+    )
+    dagger_model = OpenPiPytorchDaggerActionModel(
+        model,
+        num_steps=num_steps,
+        action_env_dim=action_env_dim,
+        action_chunk=action_chunk,
+        config_name=config_name,
+        state_indices=OmegaConf.select(model_cfg, "state_indices", default=None),
+    )
+    dagger_model.setup_wrappers(input_transforms, output_transforms)
+    if bool(OmegaConf.select(model_cfg, "train_expert_only", default=False)):
+        frozen = dagger_model.freeze_vlm()
+        logger.info(
+            "openpi_pytorch[dagger]: train_expert_only=True; froze %d parameter "
+            "tensors (SigLIP + gemma expert-0)",
+            frozen,
+        )
+    return dagger_model
 
 
 def _build_rl_model(

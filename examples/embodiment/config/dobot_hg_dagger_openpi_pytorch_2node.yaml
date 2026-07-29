@@ -1,0 +1,47 @@
+defaults:
+  - dobot_hg_dagger_openpi_pytorch
+  - _self_
+
+# Two-node production topology:
+#   rank 0 / 192.168.3.223: actor (model, optimizer, gradients)
+#   rank 1 / 192.168.3.224: rollout inference and Dobot environment
+cluster:
+  num_nodes: 2
+  component_placement:
+    actor:
+      node_group: inference
+      placement: 0
+    rollout:
+      node_group: robot
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: inference
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      hardware:
+        type: Dobot
+        configs:
+          - node_rank: 1
+            ip: "192.168.5.2"
+            speed: 5
+            user_index: 0
+            tool_index: 2
+            action_mode: "cartesian"
+            state_mode: "pose"
+            gripper_port: "/dev/ttyACM0"
+            gripper_closed_deg: 0.0
+            gripper_open_deg: -300.0
+            camera_serials:
+              - "/dev/video0"
+            camera_type: "opencv"
+            camera_resolution: [1920, 1080]
+            camera_fps: 30
+            camera_fourcc: "MJPG"
+
+runner:
+  logger:
+    experiment_name: "dobot-hg-dagger-openpi-pytorch-two-node"

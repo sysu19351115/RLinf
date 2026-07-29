@@ -14,7 +14,7 @@
 
 """CPU-only HG-DAgger hybrid-window smoke test.
 
-Feeds a 5-chunk trajectory (1 human + 4 model) through the assembler,
+Feeds a 5-chunk trajectory (3 human + 2 model) through the assembler,
 verifies the emitted 50-step window enters the replay buffer, and checks
 a forward/backward/weight-sync cycle.
 """
@@ -38,16 +38,16 @@ _T = 5  # 5 chunks = 50 steps
 def _make_trajectory() -> Trajectory:
     actions = torch.zeros((_T, 1, _CHUNK * _ACTION_DIM))
     step_intervene = torch.zeros((_T, 1, _CHUNK), dtype=torch.bool)
-    # First chunk is fully human
-    step_intervene[0] = True
+    # Three short full-human chunks model the observed frequent handoff pattern.
+    step_intervene[:3] = True
     intervene = (
         step_intervene.unsqueeze(-1)
         .expand(-1, -1, -1, _ACTION_DIM)
         .reshape(_T, 1, _CHUNK * _ACTION_DIM)
     )
-    actions[0] = 0.5
-    # Remaining chunks are model actions
-    for t in range(1, _T):
+    actions[:3] = 0.5
+    # Remaining chunks are freshly re-planned model actions.
+    for t in range(3, _T):
         actions[t] = 0.3
 
     step_ids = torch.stack(
@@ -67,7 +67,10 @@ def _make_trajectory() -> Trajectory:
             "chains": torch.randn((_T, 1, 4, _WINDOW, 32)),
             "denoise_inds": torch.arange(4).reshape(1, 1, 4).expand(_T, 1, 4),
             "observation/prev_state": torch.full((_T, 1, _ACTION_DIM), 0.25),
+            "observation/state": torch.full((_T, 1, _ACTION_DIM), 0.25),
             "observation/image": torch.randn((_T, 1, 3, 8, 8)),
+            "tokenized_prompt": torch.ones((_T, 1, 6), dtype=torch.long),
+            "tokenized_prompt_mask": torch.ones((_T, 1, 6), dtype=torch.bool),
         },
         audit_info={
             "executed_action_mask": torch.ones((_T, 1, _CHUNK), dtype=torch.bool),
@@ -151,16 +154,23 @@ def test_hybrid_window_replay_update_and_weight_sync_smoke():
     actor.recv_buffer_rollout_trajectories([_make_trajectory()])
     batch = actor.replay_buffer.sample(1)
 
-    # The window has 50 steps, 10 human + 40 model
+    # The first complete window has 50 steps, 30 human + 20 model.
     assert batch["actions"].shape[-1] == _WINDOW * _ACTION_DIM
     human_mask = batch["audit_info"]["human_action_mask"]
     assert human_mask.shape[-1] == _WINDOW
-    assert int(human_mask.sum()) == _CHUNK
+    assert int(human_mask.sum()) == 3 * _CHUNK
     assert batch["audit_info"]["executed_action_mask"].all()
     assert batch["versions"].shape == (1,)
     assert batch["versions"].item() == 7
     assert batch["intervene_flags"].shape[-1] == _WINDOW * _ACTION_DIM
     assert batch["forward_inputs"]["observation/image"].shape == (1, 3, 8, 8)
+    assert batch["forward_inputs"]["observation/state"].shape == (1, _ACTION_DIM)
+    assert batch["forward_inputs"]["observation/prev_state"].shape == (
+        1,
+        _ACTION_DIM,
+    )
+    assert batch["forward_inputs"]["tokenized_prompt"].shape == (1, 6)
+    assert batch["forward_inputs"]["tokenized_prompt_mask"].shape == (1, 6)
     assert batch["forward_inputs"]["human_action_mask"].shape == (1, _WINDOW)
     assert "model_action" not in batch["forward_inputs"]
     assert "chains" not in batch["forward_inputs"]
