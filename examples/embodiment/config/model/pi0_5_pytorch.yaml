@@ -11,8 +11,9 @@ precision: bf16
 is_lora: False
 lora_rank: 32
 
-# Action and chunk settings (BEHAVIOR pi05). `num_action_chunks` is the Pi0
-# action_horizon.
+# Environment execution chunk. The model prediction horizon defaults to this
+# value below, but an experiment may override `openpi.action_horizon` when the
+# checkpoint predicts a longer sequence than the environment executes.
 num_action_chunks: 32
 action_dim: 23
 use_proprio: True
@@ -41,6 +42,7 @@ openpi:
   # selector for eval repack and the SFT dataloader registry.
   config_name: "pi05_behavior"
   num_images_in_input: 3
+  action_horizon: ${..num_action_chunks}
   action_chunk: ${..num_action_chunks}
   num_steps: ${..num_steps}
   action_env_dim: ${..action_dim}

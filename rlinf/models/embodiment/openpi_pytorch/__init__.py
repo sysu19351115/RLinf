@@ -22,6 +22,24 @@ from rlinf.utils.logging import get_logger
 logger = get_logger()
 
 
+def _resolve_action_horizon(cfg: Any) -> int:
+    """Resolve the model prediction horizon independently from env execution."""
+    from omegaconf import OmegaConf
+
+    action_horizon = int(
+        OmegaConf.select(
+            cfg,
+            "openpi.action_horizon",
+            default=cfg.num_action_chunks,
+        )
+    )
+    if action_horizon <= 0:
+        raise ValueError(
+            f"actor.model.openpi.action_horizon must be positive, got {action_horizon}."
+        )
+    return action_horizon
+
+
 def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
     """Build an OpenPI PyTorch Pi0.5 model from ``actor.model`` config.
 
@@ -57,7 +75,7 @@ def get_model(cfg: Any, torch_dtype: Any = None) -> Any:
 
     pi0_kwargs = {
         "pi05": True,
-        "action_horizon": int(cfg.num_action_chunks),
+        "action_horizon": _resolve_action_horizon(cfg),
         "action_dim": int(model_cfg.model_action_dim),
         "paligemma_variant": str(model_cfg.paligemma_variant),
         "action_expert_variant": str(model_cfg.action_expert_variant),

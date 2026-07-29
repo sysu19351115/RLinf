@@ -1,0 +1,232 @@
+defaults:
+  - env/realworld_dobot@env.train
+  - env/realworld_dobot@env.eval
+  - model/pi0_5_pytorch@actor.model
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - _self_
+  - override hydra/job_logging: stdout
+
+# Dobot CR5AF + self-contained pi0.5 PyTorch + Async PPO — 2 nodes.
+# rank 0 (cloud GPU): actor; rank 1 (robot GPU): rollout + env.
+#
+# Launch on the head (cloud GPU) node:
+#   python examples/embodiment/train_async.py \
+#     --config-name dobot_async_ppo_pi05_pytorch
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    actor:
+      node_group: cloud
+      placement: 0
+    rollout:
+      node_group: robot
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: cloud
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      hardware:
+        type: Dobot
+        configs:
+          - ip: "192.168.5.1"
+            speed: 5
+            action_mode: "cartesian"
+            state_mode: "pose"
+            gripper_port: "/dev/ttyACM0"
+            camera_serials:
+              - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
+            camera_type: "opencv"
+            camera_resolution: [1920, 1080]
+            camera_fps: 30
+            camera_fourcc: "MJPG"
+            node_rank: 1
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: rlinf
+    experiment_name: "dobot-pi05-pytorch-pose-async-ppo"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 8000
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 5
+
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  normalize_advantages: True
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+  staleness_threshold: 1
+  behave_weight_threshold: 2
+
+  reward_type: chunk_level
+  logprob_type: chunk_level
+  entropy_type: chunk_level
+  update_epoch: 2
+
+  adv_type: gae
+  loss_type: decoupled_actor_critic
+  loss_agg_func: "token-mean"
+  kl_beta: 0.0
+  entropy_bonus: 0.005
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 0.2
+  huber_delta: 10.0
+
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  filter_rewards: False
+  rewards_lower_bound: 0.0
+  rewards_upper_bound: 1.0
+
+env:
+  group_name: "EnvGroup"
+
+  train:
+    rollout_epoch: 2
+    ignore_terminations: False
+    total_num_envs: 1
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    override_cfg:
+      is_dummy: False
+      use_dense_reward: False
+      use_reward_model: True
+      reward_mode: terminal
+      reward_image_key: "cam_left_wrist"
+      reward_worker_node_rank: 0
+      reward_worker_hardware_rank: 0
+      reward_worker_node_group: "cloud"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "human"
+          human_reward_url: "http://127.0.0.1:12345"
+          timeout: 600.0
+          server_wait_timeout: 60.0
+          default_reward: 0.0
+          task_description: "pick up the plug and plug it into the socket"
+      max_num_steps: 500
+      action_mode: "cartesian"
+      state_mode: "pose"
+
+  eval:
+    rollout_epoch: 1
+    total_num_envs: 1
+    max_episode_steps: 500
+    max_steps_per_rollout_epoch: 500
+    override_cfg:
+      is_dummy: False
+      use_dense_reward: False
+      use_reward_model: True
+      reward_mode: terminal
+      reward_image_key: "cam_left_wrist"
+      reward_worker_node_rank: 0
+      reward_worker_hardware_rank: 0
+      reward_worker_node_group: "cloud"
+      reward_worker_cfg:
+        use_reward_model: True
+        model:
+          model_type: "human"
+          human_reward_url: "http://127.0.0.1:12345"
+          timeout: 600.0
+          server_wait_timeout: 60.0
+          default_reward: 0.0
+          task_description: "pick up the plug and plug it into the socket"
+      max_num_steps: 500
+      action_mode: "cartesian"
+      state_mode: "pose"
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 10
+  global_batch_size: 100
+  seed: 0
+  enable_offload: False
+
+  model:
+    model_path: "/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new"
+    model_type: "openpi_pytorch"
+    precision: bf16
+    add_value_head: True
+    num_action_chunks: 10
+    action_dim: 8
+    num_steps: 4
+    openpi:
+      task: rl
+      config_name: "pi05_dobot_pose"
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      action_horizon: 50
+      num_images_in_input: 2
+      joint_logprob: False
+      value_after_vlm: True
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+      train_expert_only: True
+      noise_method: "flow_sde"
+      noise_level: 0.4
+      ignore_last: True
+      action_chunk: ${..num_action_chunks}
+      num_steps: ${..num_steps}
+      action_env_dim: ${..action_dim}
+    openpi_data:
+      repo_id: ""
+      norm_stats_path: "/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json"
+
+  optim:
+    lr: 7.91e-6
+    value_lr: 1.55e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-05
+    clip_grad: 1.0
+    critic_warmup_steps: 2
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    use_orig_params: True
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+  reward_mode: terminal
+
+critic:
+  use_critic_model: False
