@@ -61,6 +61,18 @@ def get_model_weights_id(versions: torch.Tensor) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, name_bytes.hex()))
 
 
+def extract_valid_versions(versions: torch.Tensor) -> torch.Tensor:
+    """Return non-negative version entries, excluding padding markers (-1).
+
+    Padding chunks use version ``-1`` to signal "not produced by a real
+    policy".  Staleness and priority computations must ignore these entries;
+    only the :class:`PriorityStore` metric may optionally report the count
+    of padding entries for diagnostics.
+    """
+    flat = versions.reshape(-1)
+    return flat[flat >= 0]
+
+
 @dataclass(kw_only=True)
 class EnvOutput:
     """Environment output for a single chunk step."""

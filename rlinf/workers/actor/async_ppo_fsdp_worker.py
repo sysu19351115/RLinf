@@ -23,7 +23,11 @@ import torch
 
 from rlinf.algorithms.registry import calculate_adv_and_returns, policy_loss
 from rlinf.config import SupportedModel
-from rlinf.data.embodied_io_struct import Trajectory, convert_trajectories_to_batch
+from rlinf.data.embodied_io_struct import (
+    Trajectory,
+    convert_trajectories_to_batch,
+    extract_valid_versions,
+)
 from rlinf.data.priority_store import PriorityStore
 from rlinf.scheduler import Worker
 from rlinf.utils.distributed import all_reduce_dict, masked_normalization
@@ -103,7 +107,10 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
                 f"recv trajectory versions.shape={trajectory.versions.shape} "
                 f"input_channel.qsize={input_channel.qsize()}"
             )
-            if trajectory.versions.min() < self.version - self.cfg.algorithm.get(
+            valid_versions = extract_valid_versions(trajectory.versions)
+            if valid_versions.numel() == 0:
+                continue
+            if valid_versions.min() < self.version - self.cfg.algorithm.get(
                 "staleness_threshold", None
             ):
                 continue
@@ -114,17 +121,20 @@ class AsyncPPOEmbodiedFSDPActor(EmbodiedFSDPActor):
         while True:
             try:
                 traj: Trajectory = self._recv_queue.get_nowait()
+                valid_versions = extract_valid_versions(traj.versions)
                 self.log_info(
                     f"drain traj versions.shape={traj.versions.shape} "
-                    f"versions.min={traj.versions.min()} version={self.version} "
+                    f"versions.min={valid_versions.min()} version={self.version} "
                     f"recv_queue.size={self._recv_queue.qsize()}"
                 )
-                if traj.versions.min() < self.version - self.cfg.algorithm.get(
+                if valid_versions.numel() == 0:
+                    continue
+                if valid_versions.min() < self.version - self.cfg.algorithm.get(
                     "staleness_threshold", None
                 ):
                     continue
-                min_v = float(traj.versions.min().item())
-                mean_v = float(traj.versions.float().mean().item())
+                min_v = float(valid_versions.min().item())
+                mean_v = float(valid_versions.float().mean().item())
                 self.rollout_store.add((min_v, mean_v), traj)
                 self.log_info(f"rollout_store size={len(self.rollout_store)}")
             except queue.Empty:

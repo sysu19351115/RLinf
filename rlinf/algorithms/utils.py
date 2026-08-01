@@ -307,14 +307,17 @@ def preprocess_loss_inputs(
 
     bsz = logprobs.shape[0]
     proximal_logprobs = kwargs.get("proximal_logprobs", None)
+    # versions is [bsz, 1] (one scalar per sample); normalize to [bsz] so
+    # expand_to_target_dim can broadcast it regardless of logprob_type.
+    if versions is not None:
+        versions = versions.reshape(bsz)
+
     if logprob_type == "token_level":
         # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz, num_action_chunks, action_dim]
         logprobs = logprobs.reshape(bsz, -1, single_action_dim)
         old_logprobs = old_logprobs.reshape(bsz, -1, single_action_dim)
         if proximal_logprobs is not None:
             proximal_logprobs = proximal_logprobs.reshape(bsz, -1, single_action_dim)
-        if versions is not None:
-            versions = versions.reshape(bsz, -1, single_action_dim)
         if kwargs.get("loss_type") == "opd":
             assert advantages.shape == logprobs.shape, (
                 f"OPD advantages shape {advantages.shape} must match "
@@ -335,8 +338,6 @@ def preprocess_loss_inputs(
             proximal_logprobs = proximal_logprobs.reshape(
                 bsz, -1, single_action_dim
             ).sum(dim=-1)
-        if versions is not None:
-            versions = versions.reshape(bsz, -1, single_action_dim)[..., 0]
 
     elif logprob_type == "chunk_level":
         # logprobs, old_logprobs: [bsz, num_action_chunks, action_dim] -> [bsz]
@@ -346,8 +347,6 @@ def preprocess_loss_inputs(
             proximal_logprobs = proximal_logprobs.reshape(
                 bsz, -1, single_action_dim
             ).sum(dim=[1, 2])
-        if versions is not None:
-            versions = versions.reshape(bsz, -1, single_action_dim)[:, 0, 0]
 
     target_shape = logprobs.shape
     advantages = expand_to_target_dim(advantages, target_shape)

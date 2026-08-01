@@ -1,188 +1,197 @@
-# 示例6：Dobot CR5AF + PI0.5 + PPO Pose 异步训练
+# Dobot CR5AF + PI0.5 + PPO 真机复现
 
-双节点真机训练流程：
+本文只包含当前双节点真机训练的必要步骤。拓扑如下：
 
 ```text
-cloud（rank 0，GPU）：actor 训练
-robot（rank 1，GPU）：rollout 推理 + env worker + Dobot
+cloud  192.168.3.223（RLINF_NODE_RANK=0）：Actor 训练
+robot  192.168.3.224（RLINF_NODE_RANK=1）：PI0.5 rollout + Dobot 环境
 ```
 
-配置文件：`examples/embodiment/config/dobot_async_ppo_pi05_newtorch.yaml`
+使用配置：
 
-> 真机运行前必须清空工作空间、确认急停可用，并由操作人员全程监护。
+```text
+examples/embodiment/config/dobot_async_ppo_pi05_newtorch.yaml
+```
 
-## 1. 环境准备
+> 真机运行必须有人全程监护，保证工作空间无人员和障碍物、硬件急停可用。训练和 reset 只允许 ServoJ/ServoP；不要运行任何 MoveJ/MovJ 归位命令，也不要给 `verify_env.py` 传 `--home-joints`。
 
-两台机器都需要 GPU 环境、相同版本的代码和 PyTorch。
+## 1. 两节点代码与模型
 
-**两节点分别执行：**
+两节点分别执行：
 
 ```bash
 cd /home/zylab/project/RLinf
-git submodule update --init --recursive
-
-sudo bash requirements/embodied/sys_deps.sh nvidia
-bash requirements/install_local.sh embodied \
-  --model openpi \
-  --env dobot \
-  --force \
-  --no-root
-
 source .venv/bin/activate
-uv pip install -e .
-```
-
-确认两端版本一致：
-
-```bash
 git rev-parse HEAD
 git submodule status third_party/dobot_zhiyu
 ```
 
-## 2. 模型准备
-
-两节点都需要 PI0.5 pose checkpoint（8 维 `[x,y,z,qw,qx,qy,qz,gripper]`）：
+两端必须使用相同的 RLinf 提交和 submodule 版本。当前训练使用的模型目录也必须在两端存在：
 
 ```bash
-test -f checkpoints/pi05_dobot_t265_pose_train_800_torch/model.safetensors
-test -f checkpoints/pi05_dobot_t265_pose_train_800_torch/assets/dobot_cf5af_t265_pose/norm_stats.json
+test -f /data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/config.json
+test -f /data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/model.safetensors
+test -f /data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json
 ```
 
-从 cloud 同步到 robot：
-
-```bash
-rsync -avP checkpoints/pi05_dobot_t265_pose_train_800_torch/ \
-  zylab@<robot-ip>:/home/zylab/project/RLinf/checkpoints/pi05_dobot_t265_pose_train_800_torch/
-```
-
-## 3. Robot 节点硬件配置
-
-检查设备连通性：
-
-```bash
-ls -l /dev/ttyACM*                          # 夹爪串口
-ls -l /dev/v4l/by-id/                        # USB 相机（用 index0，不用 index1）
-nc -vz 192.168.5.1 29999 && nc -vz 192.168.5.1 30004  # Dobot 控制器
-```
-
-若串口/相机无权限：
-
-```bash
-sudo usermod -aG dialout,video "$USER"
-# 重新登录生效
-```
-
-填写 `examples/embodiment/config/dobot_async_ppo_pi05_newtorch.yaml` 中
-`cluster.node_groups` 的 robot hardware 配置：
+配置中的下面两个路径必须与上述目录一致：
 
 ```yaml
-hardware:
-  type: Dobot
-  configs:
-    - ip: "192.168.5.1"
-      speed: 5
-      action_mode: "cartesian"
-      state_mode: "pose"
-      gripper_port: "/dev/ttyACM0"
-      camera_serials:
-        - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
-      camera_type: "opencv"
-      camera_resolution: [1920, 1080]
-      camera_fps: 30
-      camera_fourcc: "MJPG"
-      node_rank: 1
+actor:
+  model:
+    model_path: /data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new
+    openpi_data:
+      norm_stats_path: /data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json
 ```
 
-填写 `examples/embodiment/config/env/realworld_dobot.yaml` 中的 `init_params`：
+## 2. 修改唯一的 Dobot 配置入口
+
+只修改 `dobot_async_ppo_pi05_newtorch.yaml` 顶部的 `dobot:` 段，不要再同时修改公共 `env/realworld_dobot.yaml`：
 
 ```yaml
-init_params:
-  ip: "192.168.5.1"
+dobot:
+  ip: "192.168.5.2"
+  speed: 5
   gripper_port: "/dev/ttyACM0"
   camera_serials:
-    - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
+    - "/dev/video0"
   camera_type: "opencv"
-  camera_resolution: [1920, 1080]
+  camera_resolution: [640, 480]
   camera_fps: 30
   camera_fourcc: "MJPG"
-  enable_high_camera: false
-  task_description: "pick up the plug and plug it into the socket"
-  initial_joint_pos: [<j1_rad>, <j2_rad>, <j3_rad>, <j4_rad>, <j5_rad>, <j6_rad>, <gripper_0_to_1>]
+
+  action_mode: "cartesian"
+  state_mode: "pose"
+  gripper_relative_threshold: 0.2
+
+  # [j1..j6 rad, gripper norm]；必须是现场确认过的安全 reset 位姿
+  initial_joint_pos: [-5.87, -0.799, -2.175, 1.89, 1.424, 0.621, 0.9]
+
+  max_num_steps: 1000
+  max_episode_steps: 1000
+  max_steps_per_rollout_epoch: 1000
+  total_num_envs: 1
+  ignore_terminations: false
 ```
 
-> `enable_high_camera: false` 时唯一的相机命名为 `cam_left_wrist`（策略输入槽）。
->
-> `camera_fourcc: "MJPG"` 是 1080p 采集所必需的（YUYV 在 1080p 下仅约 5 FPS）。
->
-> `initial_joint_pos` 前 6 维是弧度，最后一维是夹爪归一化位置，不要保留占位值。
+本项目不绑定相机序列号，直接使用当前枚举出的 `/dev/videoN`。每次插拔或更换
+USB 口后先确认编号；当前为 `/dev/video0`，如果编号变化，要同时更新上面的
+`dobot.camera_serials`：
 
-## 4. 键盘人工稀疏奖励
-
-评分键由 robot 节点上的物理键盘监听，不再启动 HTTP 人工奖励服务：
-
-| 按键 | 含义 | 生效时机 |
-|---|---|---|
-| Enter | 成功，reward=1 | 当前 10-action chunk 完整执行后 |
-| Backspace | 失败，reward=0 | 当前 10-action chunk 完整执行后 |
-| Esc | 安全停止，不是失败标签 | 立即 |
-
-Enter/Backspace 是评分键，不是急停键。按下后，当前 chunk 最多还会运动约
-0.33 秒（30 Hz、10 actions）；其后的 chunk 不再调用机器人，也不再执行
-OpenPI rollout 推理。系统只发送固定形状的轻量 padding 消息，待本轮 rollout
-协议结束后，在下一次 bootstrap 开始 ServoJ reset。
-
-Esc、键盘断连、监听器异常和控制器拒绝会立即 hold/truncate，并把整条
-trajectory 标为不可训练。合法的 Backspace 与 episode timeout 虽然 reward
-同为 0，仍是有效训练标签。
-
-配置必须保持：
-
-```yaml
-env:
-  train:
-    auto_reset: false
-    ignore_terminations: false
-    terminal_padding:
-      enabled: true
-    override_cfg:
-      use_reward_model: false
-      reward_mode: none
-    use_keyboard_intervention: true
-    keyboard_intervention:
-      allow_motion_intervention: false
-      episode_control_mode: online_chunk_boundary
-      safe_model_handoff: false
-      done_key: Key.enter
-      abort_key: Key.backspace
-      quit_keys: [Key.esc]
-
-algorithm:
-  adv_type: gae
-  group_size: 1
-  reward_label_validity:
-    enabled: true
+```bash
+ls -l /dev/video*
 ```
 
-reset 只使用现有 ServoJ minimum-jerk 路径，禁止 MoveJ。
+必须保持以下训练契约：
 
-当前 terminal padding 是显式启用的单环境 Dobot 协议。每个 env worker 的每个
-pipeline stage 必须恰好只有一个环境；多环境配置会在启动时直接拒绝，而不会用
-`dones.any()` 提前停止同 stage 的其他环境。其他 embodied 算法默认不启用该协议。
+```text
+action_mode=cartesian，state_mode=pose，action_dim=8
+num_action_chunks=10，joint_logprob=false
+total_num_envs=1，auto_reset=false，terminal_padding.enabled=true
+adv_type=gae，group_size=1，reward_label_validity.enabled=true
+gripper_relative_threshold=0.2
+```
 
-`reward_label_validity` 当前只支持 GAE 且 `group_size=1`。这是为了确保无效安全
-终止不会进入 GRPO 等算法的分组 reward 均值和标准差；不满足条件的配置会在
-worker 初始化时直接报错。
+当前一个 episode 为 `1000 / 10 = 100` 个 chunk，`rollout_epoch=2`，所以每轮产生 200 个 chunk；它能被 `global_batch_size=100` 整除。
 
-## 5. 启动 Ray 集群
+## 3. Robot 节点运行前检查
 
-假设 cloud IP 为 `192.168.3.223`、robot IP 为 `192.168.3.224`、网卡为 `enp130s0`（用 `ip addr` 确认实际值）。
-
-**Cloud 节点（rank 0）：**
+在 robot `192.168.3.224` 执行：
 
 ```bash
 cd /home/zylab/project/RLinf
 source .venv/bin/activate
 
+ls -l /dev/ttyACM0
+ls -l /dev/video*
+ls -l /dev/input/by-id/*-event-kbd /dev/input/event*
+test -r /dev/ttyACM0 && test -w /dev/ttyACM0
+test -r /dev/video0 && test -w /dev/video0
+nc -vz 192.168.5.2 29999
+nc -vz 192.168.5.2 30004
+df -h / /home
+```
+
+键盘奖励监听使用 Linux `evdev`，不依赖桌面终端，所以不需要设置 `DISPLAY`、
+`XAUTHORITY` 或 `PYNPUT_BACKEND`。找到物理键盘对应的 event 设备后进行验证：
+
+```bash
+# 将 eventX 替换为上一步识别出的物理键盘；也可以填写实际的 by-id 路径
+export RLINF_KEYBOARD_DEVICE=/dev/input/eventX
+test -r "$RLINF_KEYBOARD_DEVICE"
+
+RLINF_KEYBOARD_DEVICE="$RLINF_KEYBOARD_DEVICE" .venv/bin/python - <<'PY'
+from rlinf.envs.realworld.common.keyboard.keyboard_listener import KeyboardListener
+
+listener = KeyboardListener()
+print(f"keyboard ready: path={listener.device.path}, name={listener.device.name!r}")
+PY
+```
+
+如果没有 `/dev/input/by-id/*-event-kbd`，可从 `/dev/input/event*` 中选择实际键盘，
+但插拔后编号可能变化。`zylab` 必须属于 `input` 组，并对目标设备有读权限。
+如果有多个 keyboard-capable 设备而没有设置 `RLINF_KEYBOARD_DEVICE`，Env worker
+会拒绝启动，防止监听到错误的键盘。
+
+相机只读验证，不连接机械臂：
+
+```bash
+.venv/bin/python rlinf/envs/realworld/dobot/verify_env.py \
+  --camera-only \
+  --camera-serial /dev/video0 \
+  --camera-resolution 640 480 \
+  --camera-fps 30 \
+  --camera-fourcc MJPG
+```
+
+机械臂只连接并读取反馈，不运动、不控制夹爪：
+
+```bash
+.venv/bin/python rlinf/envs/realworld/dobot/verify_env.py \
+  --ip 192.168.5.2 \
+  --skip-motion \
+  --skip-gripper \
+  --skip-camera
+```
+
+现场再次确认 `initial_joint_pos` 的 reset 路径不会碰撞。不要使用验证脚本的 `--home-joints`。
+
+根分区和结果目录必须有足够空间。当前配置每 5 个 global step 保存一次大模型 checkpoint；空间不足时应先清理磁盘或提高 `runner.save_interval`，不能带着满盘状态启动。
+
+## 4. 运行回归门禁
+
+在 cloud 节点执行；这些测试不连接真机：
+
+```bash
+cd /home/zylab/project/RLinf
+source .venv/bin/activate
+
+.venv/bin/python -m pytest -q \
+  tests/unit_tests/test_versions_shape.py \
+  tests/unit_tests/test_dobot_async_ppo_pi05_pytorch_config.py \
+  tests/unit_tests/test_dobot_hg_dagger_envworker.py \
+  tests/unit_tests/test_dobot_reward_and_dummy.py
+```
+
+预期结果为全部通过。以下任一错误都不能进入真机训练：
+
+```text
+versions reshape RuntimeError
+terminal padding / staleness 测试失败
+Hydra 配置无法 resolve
+相机、夹爪串口或 checkpoint 不存在
+磁盘空间不足
+```
+
+## 5. 启动双节点 Ray
+
+如果 IP 或网卡已改变，先用 `ip -br -4 addr` 确认。当前两端通信网卡为 `enp130s0`。
+
+Cloud 节点：
+
+```bash
+cd /home/zylab/project/RLinf
+source .venv/bin/activate
 export RLINF_NODE_RANK=0
 export RLINF_COMM_NET_DEVICES=enp130s0
 
@@ -193,131 +202,90 @@ ray start --head \
   --disable-usage-stats
 ```
 
-**Robot 节点（rank 1）：**
+Robot 节点：
+
+```bash
+cd /home/zylab/project/RLinf
+source .venv/bin/activate
+export RLINF_NODE_RANK=1
+export RLINF_COMM_NET_DEVICES=enp130s0
+# 必须替换为第 3 节已经验证通过的同一设备路径
+export RLINF_KEYBOARD_DEVICE=/dev/input/eventX
+test -r "$RLINF_KEYBOARD_DEVICE"
+
+ray stop
+ray start \
+  --address=192.168.3.223:6379 \
+  --node-ip-address=192.168.3.224 \
+  --disable-usage-stats
+```
+
+回到 cloud 确认两个节点均为 alive：
+
+```bash
+ray status
+```
+
+## 6. 启动真机 PPO
+
+确保 robot 上的物理键盘监听可用，操作员手边有硬件急停。在 cloud 节点执行：
 
 ```bash
 cd /home/zylab/project/RLinf
 source .venv/bin/activate
 
-export RLINF_NODE_RANK=1
-export RLINF_COMM_NET_DEVICES=enp130s0
-
-ray stop
-ray start \
-  --address='192.168.3.223:6379' \
-  --node-ip-address=192.168.3.224 \
-  --disable-usage-stats
-```
-
-在 cloud 节点验证集群：
-
-```bash
-ray status
-```
-
-应看到两个节点均为 alive。
-
-## 6. Dummy 验证
-
-按第 5 节启动两个 Ray 节点后在 cloud 节点执行：
-
-```bash
-python examples/embodiment/train_async.py \
-  --config-name dobot_async_ppo_pi05_newtorch \
-  env.train.override_cfg.is_dummy=True \
-  env.train.use_intervention_in_dummy=True \
-  env.eval.override_cfg.is_dummy=True \
-  env.eval.use_intervention_in_dummy=True
-```
-
-Dummy 模式不连接 Dobot、不需要评分服务。内置 dummy keyboard listener 不会自动
-产生 Enter/Backspace；自动化评分测试需要注入 fake listener。通过标准：actor
-在 cloud 启动、rollout 和 dummy env 在 robot 启动、checkpoint 成功加载、完成
-至少一次训练交互。完成后 `Ctrl+C` 停止。
-
-## 7. 硬件验证
-
-在 robot 节点执行以下验证，确认设备可用后再进入真机训练。详见
-`rlinf/envs/realworld/dobot/verify_env.py --help` 了解完整参数。
-
-```bash
-source .venv/bin/activate
-
-# 1. 相机（不连接机械臂）
-python rlinf/envs/realworld/dobot/verify_env.py --camera-only
-
-# 2. Dobot 连接 + 读取反馈（不发送运动命令）
-python rlinf/envs/realworld/dobot/verify_env.py \
-  --ip 192.168.5.1 --speed 5 --skip-gripper --skip-motion
-
-# 3. 小幅 Servo 运动（确认工作空间和急停后由现场人员执行）
-python rlinf/envs/realworld/dobot/verify_env.py \
-  --ip 192.168.5.1 --speed 5 --skip-gripper --frames 5 --step-s 0.5
-```
-
-第 2 步会输出 6 维关节弧度值，可作为 `initial_joint_pos` 填入配置。
-
-## 8. 真机训练
-
-确认：两个 Ray 节点 alive、robot 键盘可用、硬件验证通过、`is_dummy: False`、
-`action_mode: cartesian`、`state_mode: pose`。
-
-在 cloud 节点启动：
-
-```bash
-python examples/embodiment/train_async.py \
+.venv/bin/python examples/embodiment/train_async.py \
   --config-name dobot_async_ppo_pi05_newtorch
 ```
 
-任务成功时按 Enter，任务失败时按 Backspace；紧急情况按 Esc 或硬件急停。评分
-生效后机械臂不会执行新的 action chunk。逻辑 padding 不需要等待机器人运动或
-模型推理，但固定数量的进程间消息仍需完成，因此 reset 不是评分后立即发生。
+键盘语义：
 
-查看 TensorBoard：
+| 按键 | 含义 | 行为 |
+|---|---|---|
+| Enter | 成功，reward=1 | 当前 10-action chunk 执行完后结束 episode |
+| Backspace | 正常失败，reward=0 | 当前 chunk 执行完后结束 episode |
+| Esc | 安全停止，不是失败标签 | 立即 hold/truncate |
+| 硬件急停 | 紧急停止 | 任何危险情况优先使用 |
 
-```bash
-tensorboard --logdir ../results
-```
+Enter/Backspace 不是急停。当前 chunk 最多继续约 `10 / 30 ≈ 0.33` 秒；之后不应再出现新的机器人运动或 rollout 推理。剩余位置只进行逻辑 padding，随后下一次 bootstrap 使用 ServoJ minimum-jerk reset。
 
-停止集群（两节点分别执行）：`ray stop`
+## 7. 首轮必须确认的结果
 
-## 9. 常见问题
+第一次运行不要无人值守。至少确认：
 
-### Robot 节点没有加入 Ray
+1. Actor 在 cloud、Rollout 和 Env 在 robot 启动，模型与 norm stats 加载成功。
+2. 相机画面、pose state 和 8 维动作没有 shape/NaN 错误。
+3. 按 Enter 或 Backspace 后只完成当前 chunk，之后保持静止并进入 reset。
+4. 提前终止的数据没有因为 padding version `-1` 被整体丢弃。
+5. Actor 完成首个 PPO update，`global_step` 持续增长，没有 `versions.reshape` 错误。
+6. policy loss、value loss、grad norm 均为有限值。
 
-```bash
-echo "$RLINF_NODE_RANK"    # cloud=0, robot=1
-echo "$RLINF_COMM_NET_DEVICES"
-ray status
-```
-
-### 按 Enter/Backspace 后没有立刻 reset
-
-评分会在当前 chunk 边界生效，之后系统以 padding fast path 补齐本 rollout 的
-固定通信轮数，再在下一 bootstrap reset。可查看：
+重点观察：
 
 ```text
 rollout/valid_chunks
 rollout/padded_chunks
 rollout/padding_fraction
-rollout/padding_fast_path_count
-rollout/reward_label_valid
 rollout/terminal_to_reset_latency_s
+rollout/reward_label_valid
+train/actor/policy_loss
+train/critic/value_loss
+train/actor/grad_norm
 ```
 
-如果评分后仍听到或看到新一段机械臂运动，应立即按 Esc/急停并停止训练；这是
-异常行为，不应解释为正常 padding。
-
-### 相机打开失败 / device busy
+TensorBoard：
 
 ```bash
-fuser /dev/video6
+cd /home/zylab/project/RLinf
+tensorboard --logdir ../results
 ```
 
-确认无其他进程占用，`camera_type: opencv`、`camera_fourcc: MJPG`。
+如果评分后机器人继续执行新的 chunk、出现 MoveJ、loss/grad 为 NaN、Actor 长时间等待 rollout，立即按 Esc/硬件急停并停止任务，保留两节点日志后排查。
 
-### Pose 观测单元测试
+## 8. 正常停止
+
+先按 Esc 让机器人安全 hold，再在 cloud 训练终端按 `Ctrl+C`。最后两节点分别执行：
 
 ```bash
-PYTHONPATH=. pytest -q tests/unit_tests/test_dobot_reward_and_dummy.py
+ray stop
 ```

@@ -16,7 +16,7 @@
 import torch
 from sortedcontainers import SortedList
 
-from rlinf.data.embodied_io_struct import Trajectory
+from rlinf.data.embodied_io_struct import Trajectory, extract_valid_versions
 
 
 class PriorityStore:
@@ -75,7 +75,7 @@ class PriorityStore:
         for _, _, data in self.sl:
             if data.versions is None:
                 continue
-            flat = torch.round(data.versions.reshape(-1)).to(torch.int64)
+            flat = torch.round(extract_valid_versions(data.versions)).to(torch.int64)
             uniq, cnt = torch.unique(flat, return_counts=True)
             for v, c in zip(uniq.tolist(), cnt.tolist()):
                 counts[v] = counts.get(v, 0) + c

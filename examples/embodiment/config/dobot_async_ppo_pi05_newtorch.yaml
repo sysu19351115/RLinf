@@ -14,6 +14,33 @@ defaults:
 #   python examples/embodiment/train_async.py \
 #     --config-name dobot_async_ppo_pi05_newtorch
 
+dobot:
+  # ── Hardware connection ──
+  ip: "192.168.5.2"
+  speed: 5
+  gripper_port: "/dev/ttyACM0"
+  camera_serials:
+    - "/dev/video0"
+  camera_type: "opencv"
+  camera_resolution: [640, 480]
+  camera_fps: 30
+  camera_fourcc: "MJPG"
+
+  # ── Motion control mode ──
+  action_mode: "cartesian"
+  state_mode: "pose"
+  gripper_relative_threshold: 0.2         # latch gripper to fully open/closed
+
+  # ── Reset pose [j1..j6 rad, gripper norm] ──
+  initial_joint_pos: [-5.87, -0.799, -2.175, 1.89, 1.424, 0.621, 0.9]
+
+  # ── Episode semantics ──
+  max_num_steps: 1000
+  max_episode_steps: 1000
+  max_steps_per_rollout_epoch: 1000
+  total_num_envs: 1
+  ignore_terminations: False
+
 cluster:
   num_nodes: 2
   component_placement:
@@ -34,17 +61,16 @@ cluster:
       hardware:
         type: Dobot
         configs:
-          - ip: "192.168.5.1"
-            speed: 5
-            action_mode: "cartesian"
-            state_mode: "pose"
-            gripper_port: "/dev/ttyACM0"
-            camera_serials:
-              - "/dev/v4l/by-id/usb-RYS_CAMERA071101_2026071101-video-index0"
-            camera_type: "opencv"
-            camera_resolution: [1920, 1080]
-            camera_fps: 30
-            camera_fourcc: "MJPG"
+          - ip: ${dobot.ip}
+            speed: ${dobot.speed}
+            action_mode: ${dobot.action_mode}
+            state_mode: ${dobot.state_mode}
+            gripper_port: ${dobot.gripper_port}
+            camera_serials: ${dobot.camera_serials}
+            camera_type: ${dobot.camera_type}
+            camera_resolution: ${dobot.camera_resolution}
+            camera_fps: ${dobot.camera_fps}
+            camera_fourcc: ${dobot.camera_fourcc}
             node_rank: 1
 
 runner:
@@ -103,10 +129,10 @@ env:
 
   train:
     rollout_epoch: 2
-    ignore_terminations: False
-    total_num_envs: 1
-    max_episode_steps: 500
-    max_steps_per_rollout_epoch: 500
+    ignore_terminations: ${dobot.ignore_terminations}
+    total_num_envs: ${dobot.total_num_envs}
+    max_episode_steps: ${dobot.max_episode_steps}
+    max_steps_per_rollout_epoch: ${dobot.max_steps_per_rollout_epoch}
     terminal_padding:
       enabled: True
     override_cfg:
@@ -114,9 +140,11 @@ env:
       use_dense_reward: False
       use_reward_model: False
       reward_mode: none
-      max_num_steps: 500
-      action_mode: "cartesian"
-      state_mode: "pose"
+      max_num_steps: ${dobot.max_num_steps}
+      action_mode: ${dobot.action_mode}
+      state_mode: ${dobot.state_mode}
+      initial_joint_pos: ${dobot.initial_joint_pos}
+      gripper_relative_threshold: ${dobot.gripper_relative_threshold}
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: False
@@ -129,10 +157,10 @@ env:
   eval:
     rollout_epoch: 1
     auto_reset: False
-    ignore_terminations: False
-    total_num_envs: 1
-    max_episode_steps: 500
-    max_steps_per_rollout_epoch: 500
+    ignore_terminations: ${dobot.ignore_terminations}
+    total_num_envs: ${dobot.total_num_envs}
+    max_episode_steps: ${dobot.max_episode_steps}
+    max_steps_per_rollout_epoch: ${dobot.max_steps_per_rollout_epoch}
     terminal_padding:
       enabled: True
     override_cfg:
@@ -140,9 +168,11 @@ env:
       use_dense_reward: False
       use_reward_model: False
       reward_mode: none
-      max_num_steps: 500
-      action_mode: "cartesian"
-      state_mode: "pose"
+      max_num_steps: ${dobot.max_num_steps}
+      action_mode: ${dobot.action_mode}
+      state_mode: ${dobot.state_mode}
+      initial_joint_pos: ${dobot.initial_joint_pos}
+      gripper_relative_threshold: ${dobot.gripper_relative_threshold}
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: False
