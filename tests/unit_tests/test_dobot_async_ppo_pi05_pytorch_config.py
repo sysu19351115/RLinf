@@ -64,8 +64,12 @@ def test_dobot_openpi_pytorch_async_ppo_config_is_resolvable(monkeypatch):
 
     assert cfg.rollout.model.model_path == model.model_path
     assert cfg.rollout.model.precision == model.precision
-    assert cfg.actor.fsdp_config.use_orig_params is True
+    assert cfg.actor.fsdp_config.strategy == "fsdp"
     assert cfg.actor.fsdp_config.sharding_strategy == "no_shard"
+    assert cfg.actor.fsdp_config.use_orig_params is True
+    assert cfg.actor.fsdp_config.ignore_frozen_params is True
+    assert cfg.actor.model.openpi.train_expert_only is True
+    assert cfg.actor.optim.critic_warmup_steps == 2
     assert cfg.algorithm.loss_type == "decoupled_actor_critic"
     assert cfg.algorithm.reward_type == "chunk_level"
     assert cfg.algorithm.logprob_type == "chunk_level"
@@ -98,3 +102,12 @@ def test_dobot_openpi_pytorch_async_ppo_config_is_resolvable(monkeypatch):
         assert env_cfg.max_steps_per_rollout_epoch % model.num_action_chunks == 0
 
     assert validate_reward_label_validity_config(cfg)
+
+
+def test_fsdp_ignore_frozen_params_is_opt_in(monkeypatch):
+    monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
+    # Direct Hydra group composition namespaces the config under its
+    # directory package, so load the group YAML directly to assert the
+    # public default stays opt-in for all non-Dobot FSDP users.
+    cfg = OmegaConf.load(_CONFIG_DIR / "hybrid_engines" / "fsdp.yaml")
+    assert cfg.ignore_frozen_params is False

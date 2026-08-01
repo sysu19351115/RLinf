@@ -33,3 +33,4 @@ datasets/
 tmp/
 .zcode/
 huggingface/
+docs/plans/

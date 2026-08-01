@@ -26,7 +26,7 @@ from torch.distributed.fsdp import (
 from torch.optim import Optimizer
 
 from rlinf.config import torch_dtype_from_precision
-from rlinf.hybrid_engines.fsdp import FSDP, CPUOffload
+from rlinf.hybrid_engines.fsdp import FSDP, CPUOffload, ShardingStrategy
 from rlinf.hybrid_engines.fsdp.strategy.base import FSDPStrategyBase
 from rlinf.hybrid_engines.fsdp.utils import (
     FSDPVersion,
@@ -38,6 +38,63 @@ from rlinf.hybrid_engines.fsdp.utils import (
 )
 from rlinf.scheduler import Worker
 from rlinf.utils.utils import clear_memory
+
+
+def _resolve_ignored_states(
+    model: nn.Module,
+    fsdp_config,
+    sharding_strategy: ShardingStrategy,
+) -> list[nn.Parameter] | None:
+    """Resolve parameters FSDP1 should ignore when frozen-param isolation is on.
+
+    When ``ignore_frozen_params`` is enabled the FSDP FlatParameter may only
+    contain uniformly trainable parameters, so every ``requires_grad=False``
+    parameter is excluded through ``ignored_states``. This keeps frozen
+    embedding/VLM parameters in the original module and full state dict while
+    leaving optimizer and weight-sync parameter names intact.
+
+    Args:
+        model: The module to inspect before FSDP wrapping.
+        fsdp_config: The actor FSDP config (DictConfig-compatible mapping).
+        sharding_strategy: The resolved FSDP sharding strategy.
+
+    Returns:
+        The frozen parameters, or None when the feature is disabled.
+
+    Raises:
+        ValueError: If the feature is enabled with an unsupported sharding
+            strategy, without ``use_orig_params=True``, or when the model has
+            no frozen or no trainable parameters.
+    """
+    if not fsdp_config.get("ignore_frozen_params", False):
+        return None
+
+    if sharding_strategy != ShardingStrategy.NO_SHARD:
+        raise ValueError(
+            "FSDP1 ignore_frozen_params currently supports "
+            "sharding_strategy=no_shard only"
+        )
+    if not fsdp_config.get("use_orig_params", False):
+        raise ValueError(
+            "FSDP1 ignore_frozen_params requires use_orig_params=True "
+            "to preserve PPO optimizer and weight-sync parameter names"
+        )
+
+    frozen_parameters = [
+        parameter for parameter in model.parameters() if not parameter.requires_grad
+    ]
+    trainable_parameters = [
+        parameter for parameter in model.parameters() if parameter.requires_grad
+    ]
+
+    if not frozen_parameters:
+        raise ValueError(
+            "ignore_frozen_params=True but the model has no frozen parameters"
+        )
+    if not trainable_parameters:
+        raise ValueError("FSDP actor model has no trainable parameters")
+
+    return frozen_parameters
 
 
 class FSDPStrategy(FSDPStrategyBase):
@@ -157,6 +214,33 @@ class FSDPStrategy(FSDPStrategyBase):
             self.cfg.fsdp_config.sharding_strategy
         )
 
+        ignored_states = _resolve_ignored_states(
+            model,
+            self.cfg.fsdp_config,
+            sharding_strategy,
+        )
+
+        if ignored_states is not None and self.world_size != 1:
+            # Frozen parameters excluded via ignored_states are not covered by
+            # FSDP's sync_module_states, and non-rank-0 actors may hold
+            # meta/uninitialized tensors. Only single-actor-GPU NO_SHARD is
+            # supported for now.
+            raise ValueError(
+                "ignore_frozen_params currently supports actor world_size=1 only"
+            )
+
+        if ignored_states is not None:
+            # FSDP1 moves only the parameters it manages via ``device_id``;
+            # ignored frozen parameters would stay on CPU and break the first
+            # forward. Move them to the compute device explicitly.
+            compute_device = torch.device(
+                f"{Worker.torch_device_type}:{int(os.environ['LOCAL_RANK'])}"
+            )
+            for parameter in ignored_states:
+                parameter.data = parameter.data.to(
+                    device=compute_device, non_blocking=True
+                )
+
         auto_wrap_policy = get_fsdp_wrap_policy(
             module=model,
             config=self.cfg.fsdp_config,
@@ -169,6 +253,26 @@ class FSDPStrategy(FSDPStrategyBase):
         )
 
         cpu_offload = CPUOffload(offload_params=self.cfg.fsdp_config.cpu_offload)
+
+        if ignored_states is not None and self.logger is not None:
+            frozen_numel = sum(parameter.numel() for parameter in ignored_states)
+            frozen_bytes = sum(
+                parameter.numel() * parameter.element_size()
+                for parameter in ignored_states
+            )
+            trainable_numel = sum(
+                parameter.numel()
+                for parameter in model.parameters()
+                if parameter.requires_grad
+            )
+            self.logger.info(
+                "[FSDP] Ignoring %d frozen parameter tensors "
+                "(%d elements, %.2f GiB); managing %d trainable elements",
+                len(ignored_states),
+                frozen_numel,
+                frozen_bytes / (1024**3),
+                trainable_numel,
+            )
 
         fsdp_model = FSDP(
             module=model,
@@ -183,6 +287,7 @@ class FSDPStrategy(FSDPStrategyBase):
             backward_prefetch=backward_prefetch,
             limit_all_gathers=self.cfg.fsdp_config.limit_all_gathers,
             use_orig_params=self.cfg.fsdp_config.use_orig_params,
+            ignored_states=ignored_states,
             cpu_offload=cpu_offload,
         )
         return fsdp_model

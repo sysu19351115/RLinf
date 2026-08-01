@@ -92,6 +92,37 @@ adv_type=gae，group_size=1，reward_label_validity.enabled=true
 gripper_relative_threshold=0.2
 ```
 
+### FSDP 冻结参数契约
+
+`actor.fsdp_config` 必须保持以下取值，不得改回 `use_orig_params=False`：
+
+```yaml
+strategy: "fsdp"
+sharding_strategy: "no_shard"
+use_orig_params: True
+ignore_frozen_params: True
+```
+
+该组合下 FSDP 只管理可训练参数：`train_expert_only` 冻结的 VLM expert 与
+大 embedding 通过 `ignored_states` 排除出 FlatParameter，但它们仍保留在原始
+模型、完整 state dict 和首次权重同步中；增量 PatchWeightSyncer 同步只更新
+action expert、投影层和 value head。
+
+出现以下两类错误时，先核对日志中的 `[FSDP] Ignoring ... frozen parameter
+tensors (... GiB); managing ... trainable elements`，再按根因处理：
+
+```text
+Must flatten tensors with uniform requires_grad
+embedding writeback shape [257152, 2048]
+```
+
+- `Must flatten tensors with uniform requires_grad`：冻结与可训练参数混入了同一
+  FlatParameter，通常是 `use_orig_params=False` 导致。禁止把
+  `use_orig_params` 改回 `False`；应确认 `ignore_frozen_params: True` 生效。
+- `embedding writeback shape [257152, 2048]`：冻结大 embedding 仍被 FSDP 管理，
+  original-parameter writeback 失败。该修复只作用于 FSDP1
+  `sharding_strategy=no_shard`，不要只靠切换 `strategy: fsdp2` 规避。
+
 当前一个 episode 为 `1000 / 10 = 100` 个 chunk，`rollout_epoch=2`，所以每轮产生 200 个 chunk；它能被 `global_batch_size=100` 整除。
 
 ## 3. Robot 节点运行前检查

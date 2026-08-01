@@ -16,6 +16,7 @@ forward_prefetch: False             # if True, FSDP will explicitly prefetches t
 limit_all_gathers: False            # if True, FSDP will synchronizes CPU threads to limit the number of concurrent all-gathers. Only affects strategies that schedule all-gathers
 backward_prefetch: null             # options are null, 'pre', 'post'. if 'pre', FSDP will prefetch the next upcoming all-gather while computing gradients. if 'post', FSDP will prefetch the next all-gather until current gradient is computed.
 use_orig_params: False              # if True, FSDP will use module's original parameters, it means it will expose nn.Module.named_parameters rather than FlatParameter
+ignore_frozen_params: False         # FSDP1 only: exclude requires_grad=False parameters via ignored_states
 use_liger_kernel: False             # if True, liger_kernel will be used for FSDP, note that currently supported models in RLinf are [qwen2.5, qwen2.5-vl], for more details, see liger_kernel's doc
 
 mixed_precision:            # mixed precision settings for fsdp/fsdp2
