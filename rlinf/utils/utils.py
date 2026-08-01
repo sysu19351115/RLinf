@@ -616,8 +616,12 @@ def warmup_optimizer_state(optimizer: Optimizer) -> None:
                 continue
             all_params.append(p)
             saved_grads[p] = p.grad  # may be None, save as is
-            if p.grad is None:
-                p.grad = zero_grad_like(p)
+            # Always replace with a zero gradient, not only when the current
+            # gradient is None. A leftover real gradient (e.g. rebuilding the
+            # formal optimizer right after a critic-warmup backward) would
+            # otherwise initialize Adam moments from real gradients, polluting
+            # training state even though the step counter is reset below.
+            p.grad = zero_grad_like(p)
 
     # step to create optimizer.state entries
     # use torch.no_grad to avoid any unexpected side effects from custom optimizers

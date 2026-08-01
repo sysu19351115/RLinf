@@ -122,7 +122,11 @@ def compute_decoupled_ppo_actor_loss(
 
     pg_loss = loss_agg_func(pg_loss * behav_weight, behav_mask, loss_mask_ratio)
     if critic_warmup:
-        pg_loss = torch.tensor(0.0, device=pg_loss.device)
+        # Keep the computation graph connected (zero scale) so the FSDP root
+        # handle still receives a zero gradient during critic-only warmup;
+        # a detached constant tensor would leave the root handle without a
+        # backward hook and corrupt FSDP parameter views on the next forward.
+        pg_loss = pg_loss * 0.0
 
     with torch.no_grad():
         clip_fraction = (pg_loss1 < pg_loss2).logical_and(
@@ -280,7 +284,9 @@ def compute_ppo_actor_loss(
     dual_cliped_ratio = torch.where(dual_clip_mask, ratio, 0)
 
     if critic_warmup:
-        policy_loss = torch.tensor(0.0, device=policy_loss.device)
+        # Same graph-connection requirement as the decoupled branch above:
+        # the actor term must stay zero-valued but keep its autograd path.
+        policy_loss = policy_loss * 0.0
 
     # Compile metrics for logging
     loss_mask_for_metrics = loss_mask

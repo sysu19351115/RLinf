@@ -26,7 +26,12 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from rlinf.hybrid_engines.fsdp import ShardingStrategy
+from rlinf.algorithms.losses import (
+    compute_decoupled_ppo_actor_critic_loss,
+    compute_decoupled_ppo_actor_loss,
+    compute_ppo_actor_loss,
+)
+from rlinf.hybrid_engines.fsdp import FSDP, ShardingStrategy
 from rlinf.hybrid_engines.fsdp.fsdp_model_manager import FSDPModelManager
 from rlinf.hybrid_engines.fsdp.strategy import fsdp as fsdp_module
 from rlinf.hybrid_engines.fsdp.strategy.fsdp import (
@@ -35,8 +40,12 @@ from rlinf.hybrid_engines.fsdp.strategy.fsdp import (
 )
 from rlinf.hybrid_engines.fsdp.utils import create_device_mesh
 from rlinf.hybrid_engines.weight_syncer import PatchWeightSyncer
+from rlinf.models.embodiment.modules.value_head import ValueHead
 from rlinf.scheduler import Worker
-from rlinf.utils.utils import collect_param_names_need_sync
+from rlinf.utils.utils import (
+    collect_param_names_need_sync,
+    warmup_optimizer_state,
+)
 
 
 class _TinyMixedTrainabilityModel(nn.Module):
@@ -64,6 +73,42 @@ class _TinyMixedTrainabilityModel(nn.Module):
         x = self.vlm_expert(x)
         x = self.action_expert(x)
         return self.value_head(x)
+
+
+class _TinyAutoWrappedPPOModel(nn.Module):
+    """Tiny PPO actor whose value head matches the real FSDP auto-wrap policy.
+
+    The real ``ValueHead`` class is auto-wrapped as an independent FSDP child
+    (``rlinf/hybrid_engines/fsdp/utils.py``), which is required to reproduce
+    the critic-warmup writeback regression: during critic-only warmup the root
+    FSDP handle (action expert) receives no gradient, and FSDP never restores
+    its original-parameter views before the next forward.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.embedding = nn.Embedding(16, 4)
+        self.vlm_expert = nn.Linear(4, 4)
+        self.action_expert = nn.Linear(4, 4)
+        self.value_head = ValueHead(
+            input_dim=4,
+            hidden_sizes=(4,),
+            output_dim=1,
+            activation="relu",
+            bias_last=True,
+        )
+        for parameter in self.embedding.parameters():
+            parameter.requires_grad = False
+        for parameter in self.vlm_expert.parameters():
+            parameter.requires_grad = False
+
+    def forward(self, tokens, features):
+        prefix = self.embedding(tokens) + features
+        prefix = self.vlm_expert(prefix)
+        return {
+            "logprobs": self.action_expert(prefix),
+            "values": self.value_head(prefix.detach()),
+        }
 
 
 def _fsdp_cfg(ignore_frozen_params: bool, use_orig_params: bool):
@@ -318,11 +363,78 @@ def _wrapped_tiny_actor():
     return model, wrapped, strategy
 
 
+def _wrapped_tiny_auto_wrapped_ppo_actor():
+    torch.manual_seed(0)
+    model = _TinyAutoWrappedPPOModel().to(dtype=torch.bfloat16)
+    cfg = _strategy_cfg(ignore_frozen_params=True, use_orig_params=True)
+    strategy = FSDPStrategy(cfg=cfg, world_size=1)
+    wrapped = strategy.wrap_model(model, create_device_mesh(1))
+    return model, wrapped, strategy, cfg
+
+
+def _tiny_inputs():
+    tokens = torch.randint(0, 16, (2, 8), device="cuda")
+    features = torch.randn(2, 8, 4, device="cuda", dtype=torch.bfloat16)
+    return tokens, features
+
+
+def _manager_for_optimizer_test(cfg):
+    if "optim" not in cfg:
+        cfg.optim = OmegaConf.create(
+            {
+                "lr": 0.1,
+                "value_lr": 0.1,
+                "adam_beta1": 0.9,
+                "adam_beta2": 0.95,
+            }
+        )
+    manager = object.__new__(FSDPModelManager)
+    manager._cfg = cfg
+    manager._logger = logging.getLogger("test_fsdp_ignore_frozen_params")
+    return manager
+
+
+def _policy_loss(wrapped, tokens, features, critic_warmup):
+    """Build the real decoupled actor+critic loss for the tiny PPO actor."""
+    output = wrapped(tokens, features)
+    logprobs = output["logprobs"].float()
+    values = output["values"].float()
+    loss_mask = torch.ones_like(values, dtype=torch.bool)
+    advantages = (
+        torch.zeros_like(logprobs)
+        if critic_warmup
+        else torch.randn_like(logprobs) * 0.01
+    )
+    loss, _ = compute_decoupled_ppo_actor_critic_loss(
+        logprobs=logprobs,
+        old_logprobs=logprobs.detach(),
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        clip_ratio_c=3.0,
+        advantages=advantages,
+        values=values,
+        returns=torch.zeros_like(values),
+        prev_values=values.detach(),
+        value_clip=0.2,
+        huber_delta=10.0,
+        loss_mask=loss_mask,
+        critic_warmup=critic_warmup,
+    )
+    return loss
+
+
+def _run_critic_step(wrapped, optimizer, tokens, features):
+    optimizer.zero_grad(set_to_none=True)
+    loss = _policy_loss(wrapped, tokens, features, critic_warmup=True)
+    loss.backward()
+    optimizer.step()
+    return loss.detach()
+
+
 def test_mixed_trainability_fsdp_forward_backward(fsdp_single_rank):
     model, wrapped, _ = _wrapped_tiny_actor()
 
-    tokens = torch.randint(0, 16, (2, 8), device="cuda")
-    features = torch.randn(2, 8, 4, device="cuda", dtype=torch.bfloat16)
+    tokens, features = _tiny_inputs()
 
     for _ in range(2):
         wrapped.zero_grad(set_to_none=True)
@@ -362,28 +474,18 @@ def test_full_state_dict_keeps_frozen_parameters(fsdp_single_rank):
 
 
 def test_critic_warmup_parameter_grouping(fsdp_single_rank):
-    model, wrapped, _ = _wrapped_tiny_actor()
-    cfg = _strategy_cfg(ignore_frozen_params=True, use_orig_params=True)
-    cfg.optim = OmegaConf.create(
-        {
-            "lr": 1e-4,
-            "value_lr": 1e-3,
-            "adam_beta1": 0.9,
-            "adam_beta2": 0.95,
-        }
-    )
-
-    manager = object.__new__(FSDPModelManager)
-    manager._cfg = cfg
-    manager._logger = logging.getLogger("test_fsdp_ignore_frozen_params")
-    manager.store_requires_grad_param_name = []
+    model, wrapped, _, cfg = _wrapped_tiny_auto_wrapped_ppo_actor()
+    manager = _manager_for_optimizer_test(cfg)
 
     warmup_optimizer = manager.build_optimizer(
         wrapped,
         enable_critic_warmup=True,
     )
-    assert _optimizer_contains(warmup_optimizer, model.value_head.weight)
-    assert not model.action_expert.weight.requires_grad
+    assert model.action_expert.weight.requires_grad
+    assert not _optimizer_contains(warmup_optimizer, model.action_expert.weight)
+    assert _optimizer_contains(warmup_optimizer, model.value_head.mlp[0].weight)
+    assert not model.embedding.weight.requires_grad
+    assert not model.vlm_expert.weight.requires_grad
 
     regular_optimizer = manager.build_optimizer(
         wrapped,
@@ -391,7 +493,7 @@ def test_critic_warmup_parameter_grouping(fsdp_single_rank):
     )
     assert model.action_expert.weight.requires_grad
     assert _optimizer_contains(regular_optimizer, model.action_expert.weight)
-    assert _optimizer_contains(regular_optimizer, model.value_head.weight)
+    assert _optimizer_contains(regular_optimizer, model.value_head.mlp[0].weight)
 
 
 def test_collect_param_names_need_sync_excludes_frozen_params():
@@ -592,3 +694,248 @@ def test_checkpoint_round_trip_with_frozen_fsdp(fsdp_single_rank, tmp_path):
     assert len(optimizer2.state) > 0
     assert scheduler2.last_epoch == scheduler.last_epoch
     assert scheduler2.last_epoch == 1
+
+
+def test_critic_warmup_actor_losses_keep_graph_connected():
+    logprobs = torch.randn(2, 8, 4, requires_grad=True)
+    old_logprobs = torch.randn(2, 8, 4)
+    advantages = torch.randn(2, 8, 4)
+    loss_mask = torch.ones(2, 8, 4, dtype=torch.bool)
+
+    decoupled_loss, _ = compute_decoupled_ppo_actor_loss(
+        logprobs=logprobs,
+        old_logprobs=old_logprobs,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        clip_ratio_c=3.0,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        critic_warmup=True,
+    )
+    assert float(decoupled_loss) == 0.0
+    assert decoupled_loss.requires_grad
+    assert decoupled_loss.grad_fn is not None
+
+    ppo_loss, _ = compute_ppo_actor_loss(
+        logprobs=logprobs,
+        old_logprobs=old_logprobs,
+        clip_ratio_low=0.2,
+        clip_ratio_high=0.2,
+        clip_ratio_c=3.0,
+        advantages=advantages,
+        loss_mask=loss_mask,
+        critic_warmup=True,
+    )
+    assert float(ppo_loss) == 0.0
+    assert ppo_loss.requires_grad
+    assert ppo_loss.grad_fn is not None
+
+
+def test_warmup_optimizer_state_ignores_leftover_gradients():
+    parameter = nn.Parameter(torch.randn(4, 4))
+    optimizer = torch.optim.AdamW([parameter], lr=0.1)
+    parameter.grad = torch.randn(4, 4)
+    original_value = parameter.detach().clone()
+    original_grad = parameter.grad.detach().clone()
+
+    warmup_optimizer_state(optimizer)
+
+    torch.testing.assert_close(parameter, original_value)
+    torch.testing.assert_close(parameter.grad, original_grad)
+    state = optimizer.state[parameter]
+    torch.testing.assert_close(
+        state["exp_avg"],
+        torch.zeros_like(state["exp_avg"]),
+    )
+    torch.testing.assert_close(
+        state["exp_avg_sq"],
+        torch.zeros_like(state["exp_avg_sq"]),
+    )
+    assert state["step"] == 0
+
+
+def test_critic_warmup_transition_preserves_fsdp_parameter_views(
+    fsdp_single_rank,
+):
+    model, wrapped, strategy, cfg = _wrapped_tiny_auto_wrapped_ppo_actor()
+    assert any(
+        module is not wrapped and isinstance(module, FSDP)
+        for module in wrapped.modules()
+    )
+    manager = _manager_for_optimizer_test(cfg)
+    warmup_optimizer = manager.build_optimizer(
+        wrapped,
+        enable_critic_warmup=True,
+    )
+    assert _optimizer_contains(warmup_optimizer, model.value_head.mlp[0].weight)
+    assert not _optimizer_contains(warmup_optimizer, model.action_expert.weight)
+
+    tokens, features = _tiny_inputs()
+    action_before = model.action_expert.weight.detach().clone()
+    value_before = model.value_head.mlp[0].weight.detach().clone()
+    torch.cuda.reset_peak_memory_stats()
+
+    # Two full critic-only warmup steps. The actor term stays graph-connected
+    # with a zero scale (matching the fixed losses), so the root FSDP handle
+    # participates in backward with zero gradients and its parameter views
+    # survive into the next forward.
+    for _ in range(2):
+        _run_critic_step(wrapped, warmup_optimizer, tokens, features)
+    peak_warmup = torch.cuda.max_memory_allocated()
+
+    assert isinstance(model.action_expert.weight, nn.Parameter)
+    torch.testing.assert_close(model.action_expert.weight, action_before)
+    assert not torch.equal(model.value_head.mlp[0].weight, value_before)
+    assert model.action_expert.weight.grad is not None
+    assert torch.count_nonzero(model.action_expert.weight.grad) == 0
+
+    # Formal optimizer rebuild: action expert and value head, without any
+    # requires_grad mutation.
+    regular_optimizer = manager.build_optimizer(
+        wrapped,
+        enable_critic_warmup=False,
+    )
+    peak_rebuild = torch.cuda.max_memory_allocated()
+    assert _optimizer_contains(regular_optimizer, model.action_expert.weight)
+    assert _optimizer_contains(regular_optimizer, model.value_head.mlp[0].weight)
+
+    # Adam moments must be initialized from zeros, not from the real gradients
+    # still attached to the value head after the last warmup step.
+    for group in regular_optimizer.param_groups:
+        for parameter in group["params"]:
+            state = regular_optimizer.state[parameter]
+            assert torch.count_nonzero(state["exp_avg"]) == 0
+            assert torch.count_nonzero(state["exp_avg_sq"]) == 0
+
+    # First normal PPO step (third forward) must update the action expert.
+    regular_optimizer.zero_grad(set_to_none=True)
+    loss = _policy_loss(wrapped, tokens, features, critic_warmup=False)
+    loss.backward()
+    regular_optimizer.step()
+    assert (
+        torch.count_nonzero(
+            model.action_expert.weight.to(torch.float32)
+            - action_before.to(torch.float32)
+        )
+        > 0
+    )
+
+    # One weight-sync round trip after the first PPO step.
+    state_dict = strategy.get_model_state_dict(
+        wrapped,
+        cpu_offload=False,
+        full_state_dict=True,
+    )
+    rollout = _TinyAutoWrappedPPOModel().to(
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    sender = _patch_syncer(init_sync_enabled=True)
+    receiver = _patch_syncer(init_sync_enabled=True)
+    transport = _Transport()
+    # Production collects sync names before FSDP wrapping; a fresh unwrapped
+    # model yields the same clean names without the FSDP ``_fsdp_wrapped_module``
+    # prefixes introduced on wrapped submodules.
+    sync_names = collect_param_names_need_sync(_TinyAutoWrappedPPOModel())
+
+    async def _sync_once():
+        await asyncio.gather(
+            sender.init_sender(
+                state_dict,
+                sync_names,
+                transport.sender_send,
+                transport.sender_recv,
+            ),
+            receiver.init_receiver(
+                rollout.state_dict(),
+                transport.receiver_recv,
+                transport.receiver_send,
+            ),
+        )
+        await sender.sync(
+            state_dict,
+            transport.sender_send,
+            version=1,
+        )
+        return await receiver.apply(rollout, transport.receiver_recv)
+
+    assert asyncio.run(_sync_once()) == 1
+    torch.testing.assert_close(
+        rollout.action_expert.weight,
+        model.action_expert.weight.to(torch.bfloat16),
+    )
+
+    # Record per-phase peak memory for the full warmup -> PPO transition and
+    # keep it inside a sane budget for the tiny model. This catches gross
+    # regressions such as per-step gradient copies, not the 0.81 GiB
+    # production-scale duplication (guarded by the optimizer-step test).
+    peak_ppo = torch.cuda.max_memory_allocated()
+    assert peak_warmup > 0
+    assert peak_rebuild > 0
+    assert peak_ppo > 0
+    assert peak_ppo <= 1024**3
+
+
+def test_optimizer_step_rebuilds_formal_optimizer_after_warmup(fsdp_single_rank):
+    model, wrapped, strategy, cfg = _wrapped_tiny_auto_wrapped_ppo_actor()
+    manager = _manager_for_optimizer_test(cfg)
+    cfg.optim.total_training_steps = 10
+    cfg.optim.clip_grad = 1.0
+    manager._strategy = strategy
+    manager.model = wrapped
+    manager.optimizer = manager.build_optimizer(
+        wrapped,
+        enable_critic_warmup=True,
+    )
+    manager.critic_warmup_steps = 2
+    manager.optimizer_steps = 0
+    manager.grad_scaler = manager.build_grad_scaler(False)
+    manager.lr_scheduler = manager.build_lr_scheduler(
+        manager.optimizer,
+        cfg.optim,
+    )
+
+    tokens, features = _tiny_inputs()
+    action_before = model.action_expert.weight.detach().clone()
+
+    # Two full critic-only warmup steps driven through the production entry
+    # point (unscale -> clip -> step -> optional formal optimizer rebuild).
+    for _ in range(2):
+        manager.optimizer.zero_grad(set_to_none=True)
+        loss = _policy_loss(wrapped, tokens, features, critic_warmup=True)
+        loss.backward()
+        manager.optimizer_step()
+
+    # The second optimizer_step must have rebuilt the formal optimizer and
+    # cleared leftover gradients instead of keeping duplicate zero-gradient
+    # copies alive (the 0.81 GiB production-scale transient).
+    assert manager.critic_warmup_steps == 0
+    assert _optimizer_contains(manager.optimizer, model.action_expert.weight)
+    assert _optimizer_contains(manager.optimizer, model.value_head.mlp[0].weight)
+    torch.testing.assert_close(model.action_expert.weight, action_before)
+    assert all(
+        parameter.grad is None
+        for parameter in wrapped.parameters()
+        if parameter.requires_grad
+    )
+    for group in manager.optimizer.param_groups:
+        for parameter in group["params"]:
+            state = manager.optimizer.state[parameter]
+            assert torch.count_nonzero(state["exp_avg"]) == 0
+            assert torch.count_nonzero(state["exp_avg_sq"]) == 0
+
+    # First normal PPO step through the same entry point updates the action
+    # expert, and a subsequent forward keeps the FSDP views valid.
+    manager.optimizer.zero_grad(set_to_none=True)
+    loss = _policy_loss(wrapped, tokens, features, critic_warmup=False)
+    loss.backward()
+    manager.optimizer_step()
+    assert (
+        torch.count_nonzero(
+            model.action_expert.weight.to(torch.float32)
+            - action_before.to(torch.float32)
+        )
+        > 0
+    )
+    output = wrapped(tokens, features)
+    assert output["logprobs"].shape == (2, 8, 4)

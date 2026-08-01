@@ -114,6 +114,7 @@ tensors (... GiB); managing ... trainable elements`，再按根因处理：
 ```text
 Must flatten tensors with uniform requires_grad
 embedding writeback shape [257152, 2048]
+Expected [2097152] but got [2048, 1024]
 ```
 
 - `Must flatten tensors with uniform requires_grad`：冻结与可训练参数混入了同一
@@ -122,6 +123,13 @@ embedding writeback shape [257152, 2048]
 - `embedding writeback shape [257152, 2048]`：冻结大 embedding 仍被 FSDP 管理，
   original-parameter writeback 失败。该修复只作用于 FSDP1
   `sharding_strategy=no_shard`，不要只靠切换 `strategy: fsdp2` 规避。
+- `Expected [2097152] but got [2048, 1024]`：`[2048, 1024]` 是 action expert
+  `llm.layers.*.attn.q_proj.1.weight` 的二维原始权重，`2097152 == 2048 * 1024`
+  元素数量一致，属于 FSDP storage/view 错误而非数据维度错误。critic warmup
+  阶段 loss 只有 value 项且 actor 项被常数 0 切断计算图时，根 FSDP handle 在
+  backward 中没有梯度，参数视图不会恢复，下一次 forward 的 writeback 即崩溃。
+  FSDP 包装完成后禁止切换 `requires_grad`；临时 `critic_warmup_steps=0` 只用于
+  诊断，不能作为长期修复。
 
 当前一个 episode 为 `1000 / 10 = 100` 个 chunk，`rollout_epoch=2`，所以每轮产生 200 个 chunk；它能被 `global_batch_size=100` 整除。
 

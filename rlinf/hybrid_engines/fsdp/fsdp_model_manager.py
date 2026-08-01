@@ -82,7 +82,6 @@ class FSDPModelManager:
             "critic_warmup_steps", None
         ) and self._cfg.model.get("add_value_head", False):
             self.critic_warmup_steps = self._cfg.optim.critic_warmup_steps
-        self.store_requires_grad_param_name = []
 
         if cfg.get("tokenizer", {}).get("tokenizer_model", None) is not None:
             self.tokenizer = hf_tokenizer(cfg.tokenizer.tokenizer_model)
@@ -439,6 +438,14 @@ class FSDPModelManager:
         if self.critic_warmup_steps > 0:
             lr_list = [0.0 for _ in self.optimizer.param_groups]
             if self.optimizer_steps >= self.critic_warmup_steps:
+                # Free leftover gradients (including the zero actor gradients
+                # produced by the graph-connected warmup loss) before building
+                # the formal optimizer. warmup_optimizer_state() temporarily
+                # allocates a zero gradient per parameter, and keeping the old
+                # gradients alive would double that peak (roughly 0.81 GiB at
+                # production scale). zero_grad() on the whole model is required
+                # because the critic-only optimizer does not own actor params.
+                self.model.zero_grad(set_to_none=True)
                 self.optimizer = self.build_optimizer(model=self.model)
                 self.critic_warmup_steps = 0
                 self.lr_scheduler = self.build_lr_scheduler(
@@ -511,22 +518,23 @@ class FSDPModelManager:
         if enable_critic_warmup:
             self._logger.info("[FSDP] Enable critic warmup for value head.")
             for name, param in model.named_parameters():
-                if param.requires_grad:
-                    self.store_requires_grad_param_name.append(name)
-                    if "value_head" in name or "model.value_head" in name:
-                        params_critic.append(param)
-                        continue
-                    param.requires_grad = False
-
+                if not param.requires_grad:
+                    continue
+                if "value_head" in name or "model.value_head" in name:
+                    params_critic.append(param)
+            if not params_critic:
+                raise ValueError(
+                    "critic warmup is enabled but no trainable "
+                    "value_head parameters were found"
+                )
         else:
             for name, param in model.named_parameters():
-                if name in self.store_requires_grad_param_name:
-                    param.requires_grad = True
-                if param.requires_grad:
-                    if "value_head" in name or "model.value_head" in name:
-                        params_critic.append(param)
-                    else:
-                        params_actor.append(param)
+                if not param.requires_grad:
+                    continue
+                if "value_head" in name or "model.value_head" in name:
+                    params_critic.append(param)
+                else:
+                    params_actor.append(param)
 
         param_groups = []
         if len(params_actor) > 0:
