@@ -202,7 +202,7 @@ actor:
   enable_offload: False
 
   model:
-    model_path: "/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new"
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new}
     model_type: "openpi_pytorch"
     precision: bf16
     add_value_head: True
@@ -231,7 +231,7 @@ actor:
       action_env_dim: ${..action_dim}
     openpi_data:
       repo_id: ""
-      norm_stats_path: "/data/checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json"
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json}
 
   optim:
     lr: 7.91e-6
