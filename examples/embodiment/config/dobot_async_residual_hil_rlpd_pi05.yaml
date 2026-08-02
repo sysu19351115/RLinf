@@ -33,6 +33,10 @@ dobot:
   camera_resolution: [640, 480]
   camera_fps: 30
   camera_fourcc: "MJPG"
+  # SDK servo debug: prints target/current/delta for the first 30 ServoP/J
+  # calls and logs rejected commands with their values. Flip to true to
+  # diagnose "平滑后末端位置与当前仍相差 ... cm" jump-guard trips.
+  debug_servo: true
 
   action_mode: "cartesian"
   state_mode: "pose"
@@ -167,6 +171,7 @@ env:
       state_mode: ${dobot.state_mode}
       initial_joint_pos: ${dobot.initial_joint_pos}
       gripper_relative_threshold: ${dobot.gripper_relative_threshold}
+      debug_servo: ${dobot.debug_servo}
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: True
@@ -199,6 +204,7 @@ env:
       state_mode: ${dobot.state_mode}
       initial_joint_pos: ${dobot.initial_joint_pos}
       gripper_relative_threshold: ${dobot.gripper_relative_threshold}
+      debug_servo: ${dobot.debug_servo}
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: False

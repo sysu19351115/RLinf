@@ -78,8 +78,27 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
         return scale
 
     def _predict_rollout_actions(self, env_obs, **kwargs):
+        import time
+
         self._last_env_obs = env_obs
-        return super()._predict_rollout_actions(env_obs, **kwargs)
+        t0 = time.perf_counter()
+        actions = super()._predict_rollout_actions(env_obs, **kwargs)
+        elapsed = time.perf_counter() - t0
+        self._predict_count = getattr(self, "_predict_count", 0) + 1
+        self._predict_time_ema = (
+            elapsed
+            if not hasattr(self, "_predict_time_ema")
+            else 0.8 * self._predict_time_ema + 0.2 * elapsed
+        )
+        if self._predict_count % 10 == 0:
+            self._logger.info(
+                "[ResidualHIL] rollout prediction: last=%.2fs ema=%.2fs "
+                "(chunk count=%d)",
+                elapsed,
+                self._predict_time_ema,
+                self._predict_count,
+            )
+        return actions
 
     def _build_rollout_result(
         self,

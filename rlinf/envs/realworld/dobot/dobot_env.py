@@ -147,6 +147,10 @@ class DobotRobotConfig:
     step_frequency: float = 30.0
     """Maximum environment steps per second (Dobot servo rate)."""
 
+    debug_servo: bool = False
+    """Print every servo command's target/current/delta in the SDK (first 30
+    calls + rejections) to diagnose jump-guard trips."""
+
     initial_joint_pos: list[float] = field(
         default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5]
     )
@@ -531,6 +535,7 @@ class DobotEnv(gym.Env):
             gripper_open_deg=self.config.gripper_open_deg,
             enable_ft_sensor=self.config.enable_ft_sensor,
             payload=self.config.payload,
+            debug_servo=self.config.debug_servo,
         )
 
     def _setup_reward_worker(self):
@@ -728,10 +733,15 @@ class DobotEnv(gym.Env):
             ).wait()[0]
             if not accepted:
                 self._servo_rejected_count += 1
-                if self._servo_rejected_count % 30 == 0:
+                if (
+                    self._servo_rejected_count == 1
+                    or self._servo_rejected_count % 30 == 0
+                ):
                     self._logger.warning(
-                        "Dobot servo rejected "
-                        f"{self._servo_rejected_count} consecutive frames"
+                        "[Dobot] servo command rejected "
+                        f"{self._servo_rejected_count} consecutive frames; "
+                        "commanded="
+                        f"{np.array2string(executed_action, precision=4, suppress_small=True)}"
                     )
             else:
                 self._servo_rejected_count = 0
