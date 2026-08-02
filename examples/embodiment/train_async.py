@@ -73,6 +73,14 @@ def main(cfg) -> None:
 
         runner_cls = AsyncPPOEmbodiedRunner
         actor_worker_cls = AsyncPPOEmbodiedFSDPActor
+    elif cfg.algorithm.loss_type == "residual_hil_rlpd":
+        from rlinf.runners.async_embodied_runner import AsyncEmbodiedRunner
+        from rlinf.workers.actor.fsdp_residual_hil_rlpd_policy_worker import (
+            AsyncResidualHilRLPDWorker,
+        )
+
+        runner_cls = AsyncEmbodiedRunner
+        actor_worker_cls = AsyncResidualHilRLPDWorker
     else:
         raise ValueError(
             f"Unsupported loss type {cfg.algorithm.loss_type} for async embodied runner"
@@ -83,7 +91,15 @@ def main(cfg) -> None:
     )
     # Create rollout worker group
     rollout_placement = component_placement.get_strategy("rollout")
-    rollout_group = AsyncMultiStepRolloutWorker.create_group(cfg).launch(
+    if cfg.algorithm.loss_type == "residual_hil_rlpd":
+        from rlinf.workers.rollout.hf.residual_hil_rollout_worker import (
+            ResidualHILRolloutWorker,
+        )
+
+        rollout_worker_cls = ResidualHILRolloutWorker
+    else:
+        rollout_worker_cls = AsyncMultiStepRolloutWorker
+    rollout_group = rollout_worker_cls.create_group(cfg).launch(
         cluster, name=cfg.rollout.group_name, placement_strategy=rollout_placement
     )
 

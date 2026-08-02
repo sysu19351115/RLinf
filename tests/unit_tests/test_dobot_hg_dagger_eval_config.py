@@ -48,10 +48,11 @@ class _Listener:
 
 def _compose_eval(monkeypatch):
     monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
-    monkeypatch.setenv("DOBOT_HG_DAGGER_MODEL_PATH", "/tmp/base_model")
+    monkeypatch.setenv("DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH", "/tmp/base_model")
     monkeypatch.setenv("DOBOT_HG_DAGGER_NORM_STATS_PATH", "/tmp/norm.json")
     monkeypatch.setenv("DOBOT_HG_DAGGER_EVAL_CHECKPOINT", "/tmp/checkpoint.pt")
     monkeypatch.setenv("DOBOT_HG_DAGGER_EVAL_CHECKPOINT_ID", "hgdagger-step-0040")
+    monkeypatch.setenv("DOBOT_HG_DAGGER_LR", "1e-6")
     with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
         cfg = compose(config_name="dobot_hg_dagger_eval")
     OmegaConf.resolve(cfg)
@@ -78,8 +79,9 @@ def test_eval_config_is_standalone_autonomous_and_single_robot(monkeypatch):
 
 def test_eval_checkpoint_identity_is_required(monkeypatch):
     monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
-    monkeypatch.setenv("DOBOT_HG_DAGGER_MODEL_PATH", "/tmp/base_model")
+    monkeypatch.setenv("DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH", "/tmp/base_model")
     monkeypatch.setenv("DOBOT_HG_DAGGER_NORM_STATS_PATH", "/tmp/norm.json")
+    monkeypatch.setenv("DOBOT_HG_DAGGER_LR", "1e-6")
     monkeypatch.delenv("DOBOT_HG_DAGGER_EVAL_CHECKPOINT", raising=False)
     monkeypatch.delenv("DOBOT_HG_DAGGER_EVAL_CHECKPOINT_ID", raising=False)
     with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):

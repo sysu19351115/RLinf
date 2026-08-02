@@ -320,6 +320,7 @@ class RolloutResult:
     intervene_flags: torch.Tensor = None  # [B, num_action_chunks]
     forward_inputs: dict[str, torch.Tensor] = field(default_factory=dict)
     versions: torch.Tensor = None  # [B, 1]
+    audit_info: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.actions is not None:
@@ -360,6 +361,28 @@ class RolloutResult:
         merged_bootstrap_values = _merge_optional_tensor("bootstrap_values")
         merged_intervene_flags = _merge_optional_tensor("intervene_flags")
         merged_versions = _merge_optional_tensor("versions")
+        merged_audit_info = {}
+        audited_shards = [
+            rollout_result
+            for rollout_result in rollout_results
+            if getattr(rollout_result, "audit_info", None)
+        ]
+        if len(audited_shards) > 1:
+            raise ValueError(
+                "residual_hil_rlpd: merge_rollout_results received multiple "
+                "audited shards; the algorithm supports a single env only"
+            )
+        if audited_shards and (
+            merged_actions is None or int(merged_actions.shape[0]) != 1
+        ):
+            raise ValueError(
+                "residual_hil_rlpd: an audited rollout must have batch size 1 "
+                "(single env); got batch size "
+                f"{None if merged_actions is None else int(merged_actions.shape[0])}"
+            )
+        for rollout_result in rollout_results:
+            if getattr(rollout_result, "audit_info", None):
+                merged_audit_info = rollout_result.audit_info
 
         forward_inputs_list = [
             rollout_result.forward_inputs for rollout_result in rollout_results
@@ -377,6 +400,7 @@ class RolloutResult:
             intervene_flags=merged_intervene_flags,
             forward_inputs=merged_forward_inputs,
             versions=merged_versions,
+            audit_info=merged_audit_info,
         )
 
 

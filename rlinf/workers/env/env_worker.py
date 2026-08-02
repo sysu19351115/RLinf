@@ -64,6 +64,21 @@ class EnvWorker(Worker):
         Worker.__init__(self)
 
         self.cfg = cfg
+        self.residual_hil_rlpd_mode = (
+            str(self.cfg.algorithm.get("loss_type", "")) == "residual_hil_rlpd"
+        )
+        self._run_id = str(cfg.get("run_id", ""))
+        self._pending_residual_transitions = []
+        self._residual_pending_ctx = None
+        self._residual_chunk_counter = 0
+        # P2-4/P2-5 fail-closed state: gripper inhibit after human takeover /
+        # rejection, and independent safety-barrier hold after a violation.
+        self._residual_gripper_inhibit_remaining = 0
+        self._residual_gripper_suppressed_mask: np.ndarray | None = None
+        self._residual_safety_hold_remaining = 0
+        self._residual_safety_violations = 0
+        self._residual_safety_barrier = None
+        self._residual_safety_violated_chunk = False
         self.train_video_cnt = 0
         self.eval_video_cnt = 0
         self.should_stop = False
@@ -79,6 +94,11 @@ class EnvWorker(Worker):
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.stage_num = self.cfg.rollout.pipeline_stage_num
+        if self.residual_hil_rlpd_mode and self.stage_num != 1:
+            raise ValueError(
+                "residual_hil_rlpd supports a single pipeline stage "
+                f"(single env), got pipeline_stage_num={self.stage_num}"
+            )
         self._terminal_end_monotonic: list[float | None] = [None] * self.stage_num
         self._terminal_to_reset_latency_s: list[float] = []
         self.reward_label_validity_enabled = validate_reward_label_validity_config(cfg)
@@ -149,6 +169,16 @@ class EnvWorker(Worker):
                 self.cfg.env.train.total_num_envs // self._world_size // self.stage_num
             )
             self.train_batch_size = self.cfg.env.train.total_num_envs // self.stage_num
+            if self.residual_hil_rlpd_mode and (
+                self.train_num_envs_per_stage != 1
+                or self.train_batch_size != 1
+            ):
+                raise ValueError(
+                    "residual_hil_rlpd supports a single env per stage "
+                    f"(single env), got train_num_envs_per_stage="
+                    f"{self.train_num_envs_per_stage}, train_batch_size="
+                    f"{self.train_batch_size}"
+                )
             self._validate_terminal_padding_contract(
                 mode="train",
                 env_cfg=train_env_cfg,
@@ -528,7 +558,10 @@ class EnvWorker(Worker):
 
     @Worker.timer("env_interact_step")
     def env_interact_step(
-        self, chunk_actions: torch.Tensor, stage_id: int
+        self,
+        chunk_actions: torch.Tensor,
+        stage_id: int,
+        gripper_bypass_mask: np.ndarray | None = None,
     ) -> tuple[EnvOutput, dict[str, Any], dict[str, Any]]:
         """
         This function is used to interact with the environment.
@@ -552,7 +585,10 @@ class EnvWorker(Worker):
         env_info = {}
 
         obs_list, chunk_rewards, chunk_terminations, chunk_truncations, infos_list = (
-            self.env_list[stage_id].chunk_step(chunk_actions)
+            self.env_list[stage_id].chunk_step(
+                chunk_actions,
+                gripper_bypass_mask=gripper_bypass_mask,
+            )
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
@@ -628,6 +664,283 @@ class EnvWorker(Worker):
             "infos_list": infos_list,
         }
         return env_output, env_info, chunk_step_payload
+
+    def _finalize_residual_transition(
+        self,
+        rollout_result: Any,
+        env_output: EnvOutput,
+        stage_id: int,
+        *,
+        chunk_start_obs: dict[str, Any],
+        next_nominal: np.ndarray | None = None,
+        safety_violated: bool = False,
+    ):
+        """Build one residual chunk transition from real executed feedback."""
+        from rlinf.algorithms.residual_hil_rlpd.action_codec import ResidualCodec
+        from rlinf.algorithms.residual_hil_rlpd.finalizer import (
+            ChunkEnvFeedback,
+            finalize_chunk_transition,
+        )
+        from rlinf.algorithms.residual_hil_rlpd.fingerprint import (
+            compute_base_fingerprint,
+        )
+        from rlinf.algorithms.residual_hil_rlpd.rollout import (
+            RolloutChunkAudit,
+        )
+        from rlinf.algorithms.residual_hil_rlpd.transition import (
+            SOURCE_ONLINE,
+            SOURCE_ONLINE_INTERVENTION,
+        )
+
+        feedback_data = (env_output.env_infos or {}).get("residual_feedback")
+        if feedback_data is None:
+            return None
+        if safety_violated:
+            # P2-5: the chunk was replaced with nominal before execution; the
+            # violating residual must never enter replay.
+            self._logger.warning(
+                "[ResidualHIL] rejecting transition for safety-violated chunk "
+                f"{self._residual_chunk_counter}"
+            )
+            return None
+        audit_data = getattr(rollout_result, "audit_info", None)
+        if not audit_data:
+            raise RuntimeError("residual_hil_rlpd rollout result is missing audit_info")
+        audit_dict = audit_data[-1] if isinstance(audit_data, list) else audit_data
+        sampled_gripper_mode = np.asarray(
+            audit_dict["sampled_gripper_mode"], dtype=np.int64
+        )
+        # P2-4: if the env worker suppressed the model gripper override this
+        # chunk (human takeover / safety hold), the *training label* must match
+        # the executed command (KEEP), not the raw model sample.
+        suppressed_mask = getattr(self, "_residual_gripper_suppressed_mask", None)
+        if suppressed_mask is not None and suppressed_mask.size == sampled_gripper_mode.size:
+            sampled_gripper_mode = sampled_gripper_mode.copy()
+            sampled_gripper_mode[suppressed_mask] = 0  # KEEP_NOMINAL
+        audit = RolloutChunkAudit(
+            nominal_actions=np.asarray(audit_dict["nominal_actions"], dtype=np.float32),
+            sampled_arm_residual=np.asarray(
+                audit_dict["sampled_arm_residual"], dtype=np.float32
+            ),
+            sampled_gripper_mode=sampled_gripper_mode,
+            commanded_actions=np.asarray(
+                audit_dict["commanded_actions"], dtype=np.float32
+            ),
+            gripper_bypass_mask=np.asarray(
+                audit_dict["gripper_bypass_mask"], dtype=bool
+            ),
+            policy_version=int(audit_dict.get("policy_version", 0)),
+        )
+        feedback = ChunkEnvFeedback(
+            executed_actions=np.asarray(
+                feedback_data["executed_actions"], dtype=np.float32
+            ),
+            executed_action_mask=np.asarray(
+                feedback_data["executed_action_mask"], dtype=bool
+            ),
+            gripper_bypass_mask=np.asarray(
+                feedback_data["gripper_bypass_mask"], dtype=bool
+            ),
+            human_intervention_mask=np.asarray(
+                feedback_data["human_intervention_mask"], dtype=bool
+            ),
+            handoff_hold_mask=np.asarray(
+                feedback_data["handoff_hold_mask"], dtype=bool
+            ),
+            rewards=np.asarray(feedback_data["rewards"], dtype=np.float32),
+            terminations=np.asarray(feedback_data["terminations"], dtype=bool),
+            truncations=np.asarray(feedback_data["truncations"], dtype=bool),
+            reward_label_valid=bool(
+                np.all(feedback_data.get("reward_label_valid", np.array([False])))
+            ),
+        )
+        rlpd_cfg = self.cfg.algorithm.residual_hil_rlpd
+        codec = ResidualCodec(
+            translation_scale_m=tuple(rlpd_cfg.translation_data_limit_m),
+            rotation_scale_deg=tuple(rlpd_cfg.rotation_data_limit_deg),
+        )
+        source = (
+            SOURCE_ONLINE_INTERVENTION
+            if feedback.human_intervention_mask.any()
+            else SOURCE_ONLINE
+        )
+        transition, valid, _ = finalize_chunk_transition(
+            curr_obs=chunk_start_obs,
+            next_obs=env_output.final_obs or env_output.obs,
+            audit=audit,
+            feedback=feedback,
+            codec=codec,
+            source=source,
+            base_fingerprint=compute_base_fingerprint(
+                str(self.cfg.actor.model.base_policy.get("model_path", "")),
+                norm_stats_path=str(
+                    self.cfg.actor.model.get("openpi_data", {}).get(
+                        "norm_stats_path", None
+                    )
+                ),
+                codec=codec,
+            ),
+            episode_id=int(
+                np.asarray(
+                    (env_output.env_infos or {}).get("episode_id", [stage_id])
+                ).reshape(-1)[0]
+            ),
+            chunk_id=self._residual_chunk_counter,
+            gamma=float(self.cfg.algorithm.gamma),
+            next_nominal_actions=next_nominal,
+        )
+        return transition if valid else None
+
+    def _residual_safety_check(
+        self,
+        rollout_result: Any,
+        nominal_actions: np.ndarray | None,
+        bypass_mask: np.ndarray | None,
+    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+        """P2-5 pre-execution safety barrier for one chunk.
+
+        Checks the *commanded* chunk (nominal + residual) against the
+        independent safety limits before ``env_interact_step``.  On violation:
+        the chunk is replaced with nominal in-place (never executed as-is), a
+        configurable hold is entered, and the transition is marked invalid at
+        finalization.
+
+        Returns:
+            ``(bypass_mask, suppressed_mask)`` where ``suppressed_mask`` is
+            non-None when the chunk's gripper label must be forced to KEEP.
+        """
+        if nominal_actions is None or nominal_actions.size == 0:
+            return bypass_mask, None
+        from rlinf.algorithms.residual_hil_rlpd.safety import (
+            ResidualSafetyBarrier,
+            SafetyLimits,
+        )
+
+        if self._residual_safety_barrier is None:
+            self._residual_safety_barrier = ResidualSafetyBarrier(
+                SafetyLimits.from_config(
+                    self.cfg.algorithm.residual_hil_rlpd
+                )
+            )
+        commanded_np = rollout_result.actions.detach().cpu().float().numpy()
+        if commanded_np.ndim == 3:
+            commanded_np = commanded_np[0]
+        violations = self._residual_safety_barrier.check_chunk(
+            nominal_actions, commanded_np
+        )
+        if not violations:
+            return bypass_mask, None
+        self._residual_safety_violations += 1
+        self._residual_safety_violated_chunk = True
+        self._residual_safety_hold_remaining = int(
+            self.cfg.algorithm.residual_hil_rlpd.get("safety_hold_chunks", 3)
+        )
+        rollout_result.actions[..., :7] = torch.as_tensor(
+            nominal_actions[..., :7],
+            device=rollout_result.actions.device,
+        )
+        rollout_result.actions[..., 7] = torch.as_tensor(
+            nominal_actions[..., 7],
+            device=rollout_result.actions.device,
+        )
+        bypass_mask = np.zeros_like(bypass_mask)
+        suppressed_mask = np.ones(nominal_actions.shape[0], dtype=bool)
+        self._logger.warning(
+            "[ResidualHIL] pre-execution safety violations on chunk "
+            f"{self._residual_chunk_counter}: "
+            f"{[v.code for v in violations][:4]}; chunk replaced with "
+            f"nominal and {self._residual_safety_hold_remaining}-chunk "
+            "hold entered"
+        )
+        return bypass_mask, suppressed_mask
+
+    def _residual_observe_chunk(
+        self,
+        rollout_result: Any,
+        env_output: EnvOutput,
+        chunk_start_obs: dict[str, Any],
+        stage_id: int,
+    ) -> None:
+        """Defer building chunk k until chunk k+1's nominal is known."""
+        feedback_data = (env_output.env_infos or {}).get("residual_feedback")
+        if feedback_data is None:
+            return
+        # P2-4: human takeover, handoff hold or controller rejection disables
+        # model gripper override for the next ``gripper_debounce_chunks``.
+        human = np.asarray(
+            feedback_data.get("human_intervention_mask", []), dtype=bool
+        )
+        handoff = np.asarray(
+            feedback_data.get("handoff_hold_mask", []), dtype=bool
+        )
+        accepted = np.asarray(
+            feedback_data.get("executed_action_mask", []), dtype=bool
+        )
+        rejected = accepted.size > 0 and not bool(accepted.all())
+        if bool(human.any()) or bool(handoff.any()) or rejected:
+            debounce = int(
+                self.cfg.algorithm.residual_hil_rlpd.get(
+                    "gripper_debounce_chunks", 2
+                )
+            )
+            self._residual_gripper_inhibit_remaining = max(
+                self._residual_gripper_inhibit_remaining, debounce
+            )
+        safety_violated = bool(self._residual_safety_violated_chunk)
+        self._residual_safety_violated_chunk = False
+        ctx = (
+            rollout_result,
+            env_output,
+            chunk_start_obs,
+            stage_id,
+            safety_violated,
+        )
+        if self._residual_pending_ctx is not None:
+            previous = self._residual_pending_ctx
+            self._residual_pending_ctx = ctx
+            next_nominal = self._audit_nominal_actions(rollout_result)
+            self._finalize_and_enqueue(previous, next_nominal=next_nominal)
+        else:
+            self._residual_pending_ctx = ctx
+        # A terminated chunk ends the episode: hemisphere tracking restarts.
+        if self._residual_safety_barrier is not None and (
+            bool(np.asarray(feedback_data.get("terminations", [])).any())
+            or bool(np.asarray(feedback_data.get("truncations", [])).any())
+        ):
+            self._residual_safety_barrier.reset_tracking()
+
+    @staticmethod
+    def _audit_nominal_actions(rollout_result: Any) -> np.ndarray | None:
+        audit_data = getattr(rollout_result, "audit_info", None)
+        if not audit_data:
+            return None
+        audit_dict = audit_data[-1] if isinstance(audit_data, list) else audit_data
+        return np.asarray(audit_dict.get("nominal_actions", []), dtype=np.float32)
+
+    def _finalize_and_enqueue(
+        self,
+        ctx,
+        *,
+        next_nominal: np.ndarray | None,
+    ) -> None:
+        rollout_result, env_output, chunk_start_obs, stage_id, safety_violated = ctx
+        transition = self._finalize_residual_transition(
+            rollout_result,
+            env_output,
+            stage_id,
+            chunk_start_obs=chunk_start_obs,
+            next_nominal=next_nominal,
+            safety_violated=safety_violated,
+        )
+        self._residual_chunk_counter += 1
+        if transition is not None:
+            self._pending_residual_transitions.append(transition)
+
+    def _flush_residual_pending(self) -> None:
+        if self._residual_pending_ctx is not None:
+            ctx = self._residual_pending_ctx
+            self._residual_pending_ctx = None
+            self._finalize_and_enqueue(ctx, next_nominal=None)
 
     @staticmethod
     def _extract_operator_metrics(infos: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -1563,9 +1876,95 @@ class EnvWorker(Worker):
                         terminal_ended_this_step = False
                     else:
                         terminal_ended_this_step = False
-                        env_output, env_info, chunk_step_payload = (
-                            self.env_interact_step(rollout_result.actions, stage_id)
+                        chunk_start_obs = env_output.obs
+                        bypass_mask = None
+                        suppressed_mask = None
+                        nominal_actions = None
+                        if getattr(self, "residual_hil_rlpd_mode", False):
+                            audit_data = getattr(rollout_result, "audit_info", None)
+                            if audit_data:
+                                audit_dict = (
+                                    audit_data[-1]
+                                    if isinstance(audit_data, list)
+                                    else audit_data
+                                )
+                                bypass_mask = np.asarray(
+                                    audit_dict.get("gripper_bypass_mask", []),
+                                    dtype=bool,
+                                )
+                                nominal_actions = np.asarray(
+                                    audit_dict.get("nominal_actions", []),
+                                    dtype=np.float32,
+                                )
+                            else:
+                                nominal_actions = None
+                            force_safety_hold = (
+                                self._residual_safety_hold_remaining > 0
+                            )
+                            if force_safety_hold:
+                                self._residual_safety_hold_remaining -= 1
+                            suppress_gripper = (
+                                self._residual_gripper_inhibit_remaining > 0
+                            )
+                            if suppress_gripper:
+                                self._residual_gripper_inhibit_remaining -= 1
+                            if (
+                                nominal_actions is not None
+                                and nominal_actions.size > 0
+                                and (force_safety_hold or suppress_gripper)
+                            ):
+                                # P2-4: after a human takeover / rejection the
+                                # model gripper override is suppressed for the
+                                # debounce window (executed command -> KEEP).
+                                # P2-5: after a safety violation the whole
+                                # residual is held at nominal.
+                                if force_safety_hold:
+                                    rollout_result.actions[..., :7] = torch.as_tensor(
+                                        nominal_actions[..., :7],
+                                        device=rollout_result.actions.device,
+                                    )
+                                if force_safety_hold or suppress_gripper:
+                                    rollout_result.actions[..., 7] = torch.as_tensor(
+                                        nominal_actions[..., 7],
+                                        device=rollout_result.actions.device,
+                                    )
+                                bypass_mask = np.zeros_like(bypass_mask)
+                                suppressed_mask = np.ones(
+                                    nominal_actions.shape[0], dtype=bool
+                                )
+                            self._residual_gripper_suppressed_mask = suppressed_mask
+                        # P2-5: independent safety barrier runs *before* the
+                        # chunk reaches the servo.  On violation the chunk is
+                        # replaced with nominal here (never executed as-is),
+                        # a hold is entered, and the transition is marked
+                        # invalid at finalization.
+                        bypass_mask, barrier_suppressed = (
+                            self._residual_safety_check(
+                                rollout_result, nominal_actions, bypass_mask
+                            )
                         )
+                        if barrier_suppressed is not None:
+                            suppressed_mask = barrier_suppressed
+                            self._residual_gripper_suppressed_mask = (
+                                suppressed_mask
+                            )
+                        env_step_kwargs = {}
+                        if bypass_mask is not None:
+                            env_step_kwargs["gripper_bypass_mask"] = bypass_mask
+                        env_output, env_info, chunk_step_payload = (
+                            self.env_interact_step(
+                                rollout_result.actions,
+                                stage_id,
+                                **env_step_kwargs,
+                            )
+                        )
+                        if getattr(self, "residual_hil_rlpd_mode", False):
+                            self._residual_observe_chunk(
+                                rollout_result,
+                                env_output,
+                                chunk_start_obs,
+                                stage_id,
+                            )
                         stage_rollout = self.rollout_results[stage_id]
                         if isinstance(stage_rollout, EmbodiedLerobotRolloutResult):
                             stage_rollout.append_chunk_episode_data(
@@ -1713,6 +2112,33 @@ class EnvWorker(Worker):
                         self.rollout_results[stage_id], actor_channel
                     )
 
+        if getattr(self, "residual_hil_rlpd_mode", False):
+            self._flush_residual_pending()
+
+        if (
+            getattr(self, "residual_hil_rlpd_mode", False)
+            and self._pending_residual_transitions
+            and actor_channel is not None
+        ):
+            from rlinf.algorithms.residual_hil_rlpd.messages import (
+                build_transition_message,
+            )
+
+            for transition in self._pending_residual_transitions:
+                self.send_to(
+                    group_name=self.cfg.actor.group_name,
+                    channel=actor_channel,
+                    data=build_transition_message(
+                        transition,
+                        policy_version=int(
+                            np.asarray(transition.policy_version).reshape(-1)[0]
+                        ),
+                        run_id=self._run_id,
+                        sender_rank=int(getattr(self, "_rank", 0)),
+                    ),
+                )
+            self._pending_residual_transitions.clear()
+
         if train_terminal_padding_enabled:
             total_chunks = valid_chunks + padded_chunks
             env_metrics["rollout/valid_chunks"].append(
@@ -1727,6 +2153,22 @@ class EnvWorker(Worker):
             env_metrics["rollout/padding_fraction"].append(
                 torch.tensor(
                     [padded_chunks / total_chunks if total_chunks else 0.0],
+                    dtype=torch.float32,
+                )
+            )
+
+        if getattr(self, "residual_hil_rlpd_mode", False):
+            env_metrics["residual/safety_violations"].append(
+                torch.tensor(
+                    [self._residual_safety_violations], dtype=torch.float32
+                )
+            )
+            env_metrics["residual/chunk_counter"].append(
+                torch.tensor([self._residual_chunk_counter], dtype=torch.float32)
+            )
+            env_metrics["residual/gripper_inhibit_remaining"].append(
+                torch.tensor(
+                    [self._residual_gripper_inhibit_remaining],
                     dtype=torch.float32,
                 )
             )

@@ -1,0 +1,315 @@
+defaults:
+  - env/realworld_dobot@env.train
+  - env/realworld_dobot@env.eval
+  - hybrid_engines/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - _self_
+  - override hydra/job_logging: stdout
+
+weight_syncer:
+  init_sync:
+    enabled: True
+
+# Run identity for cross-process message validation (P2-6): every worker must
+# agree on the same run_id or messages are rejected. Set RLINF_RUN_ID for a
+# long training run; the default is a fixed string so the strict checks are
+# active even when the env var is unset.
+run_id: ${oc.env:RLINF_RUN_ID, "dobot-residual-hil-rlpd"}
+
+# Dobot + frozen Pi0.5 + Residual HIL-RLPD — 2 nodes.
+# rank 0 (cloud GPU): residual learner; rank 1 (robot GPU): rollout + env.
+#
+# Launch on the head (cloud GPU) node:
+#   python examples/embodiment/train_async.py \
+#     --config-name dobot_async_residual_hil_rlpd_pi05
+
+dobot:
+  ip: "192.168.5.2"
+  speed: 5
+  gripper_port: "/dev/ttyACM0"
+  camera_serials:
+    - "/dev/video0"
+  camera_type: "opencv"
+  camera_resolution: [640, 480]
+  camera_fps: 30
+  camera_fourcc: "MJPG"
+
+  action_mode: "cartesian"
+  state_mode: "pose"
+  gripper_relative_threshold: 0.2
+
+  initial_joint_pos: [-5.87, -0.799, -2.175, 1.89, 1.424, 0.621, 0.9]
+
+  max_num_steps: 1000
+  max_episode_steps: 1000
+  max_steps_per_rollout_epoch: 1000
+  total_num_envs: 1
+  ignore_terminations: False
+
+cluster:
+  num_nodes: 2
+  component_placement:
+    actor:
+      node_group: cloud
+      placement: 0
+    rollout:
+      node_group: robot
+      placement: 0
+    env:
+      node_group: robot
+      placement: 0
+  node_groups:
+    - label: cloud
+      node_ranks: 0
+    - label: robot
+      node_ranks: 1
+      hardware:
+        type: Dobot
+        configs:
+          - ip: ${dobot.ip}
+            speed: ${dobot.speed}
+            action_mode: ${dobot.action_mode}
+            state_mode: ${dobot.state_mode}
+            gripper_port: ${dobot.gripper_port}
+            camera_serials: ${dobot.camera_serials}
+            camera_type: ${dobot.camera_type}
+            camera_resolution: ${dobot.camera_resolution}
+            camera_fps: ${dobot.camera_fps}
+            camera_fourcc: ${dobot.camera_fourcc}
+            node_rank: 1
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "${project_path:results}/${now:%Y%m%d-%H%M%S}"
+    project_name: rlinf
+    experiment_name: "dobot-pi05-residual-hil-rlpd"
+    logger_backends: ["tensorboard"]
+
+  max_epochs: 8000
+  max_steps: -1
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 10
+  checkpoint_keep_last: 3
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  loss_type: residual_hil_rlpd
+  adv_type: embodied_sac
+  gamma: 0.99
+  reward_type: chunk_level
+  reward_label_validity:
+    enabled: False
+  residual_hil_rlpd:
+    translation_data_limit_m: [0.10, 0.10, 0.10]
+    rotation_data_limit_deg: [30.0, 30.0, 30.0]
+    translation_policy_limit_m: [0.010, 0.010, 0.010]
+    rotation_policy_limit_deg: [5.0, 5.0, 5.0]
+    demo_ratio: 0.5
+    min_demo_size: 1
+    utd_ratio: 0.1
+    max_update_backlog: 500
+    critic_only_updates: 500
+    residual_scale_ramp_updates: 2000
+    base_only_collect_steps: 100
+    num_q_heads: 10
+    num_q_sample: 2
+    backup_entropy: False
+    alpha_arm_init: 0.1
+    alpha_gripper_init: 0.05
+    # P2-1: replay capacity (transition + byte budgets; images are the bulk).
+    max_online_transitions: 20000
+    max_demo_transitions: 5000
+    max_online_bytes: 40000000000
+    max_demo_bytes: 10000000000
+    memory_high_watermark: 0.9
+    # P2-3: policy staleness bounds.
+    policy_lag_warn_threshold: 50
+    policy_lag_reject_threshold: 500
+    # P2-4: gripper enable / debounce (independent of arm residual scale).
+    gripper_enable_after_updates: 1500
+    gripper_max_switches_per_chunk: 2
+    gripper_min_hold_steps: 5
+    gripper_debounce_chunks: 2
+    # P2-5: independent safety barrier limits.
+    safety_workspace_min_m: [-0.35, -0.55, 0.02]
+    safety_workspace_max_m: [0.60, 0.55, 0.75]
+    safety_max_translation_delta_m: 0.02
+    safety_max_rotation_delta_deg: 10.0
+    safety_hold_chunks: 3
+
+env:
+  group_name: "EnvGroup"
+
+  train:
+    rollout_epoch: 2
+    auto_reset: False
+    collect_residual_feedback: True
+    ignore_terminations: ${dobot.ignore_terminations}
+    total_num_envs: ${dobot.total_num_envs}
+    max_episode_steps: ${dobot.max_episode_steps}
+    max_steps_per_rollout_epoch: ${dobot.max_steps_per_rollout_epoch}
+    terminal_padding:
+      enabled: True
+    override_cfg:
+      is_dummy: False
+      use_dense_reward: False
+      use_reward_model: False
+      reward_mode: none
+      max_num_steps: ${dobot.max_num_steps}
+      action_mode: ${dobot.action_mode}
+      state_mode: ${dobot.state_mode}
+      initial_joint_pos: ${dobot.initial_joint_pos}
+      gripper_relative_threshold: ${dobot.gripper_relative_threshold}
+    use_keyboard_intervention: True
+    keyboard_intervention:
+      allow_motion_intervention: True
+      episode_control_mode: "online_chunk_boundary"
+      safe_model_handoff: True
+      wait_for_start_on_reset: True
+      start_key: "y"
+      start_gate_timeout_s: 600.0
+      done_key: "Key.enter"
+      abort_key: "Key.backspace"
+      quit_keys: ["Key.esc"]
+
+  eval:
+    rollout_epoch: 1
+    auto_reset: False
+    collect_residual_feedback: True
+    ignore_terminations: ${dobot.ignore_terminations}
+    total_num_envs: ${dobot.total_num_envs}
+    max_episode_steps: ${dobot.max_episode_steps}
+    max_steps_per_rollout_epoch: ${dobot.max_steps_per_rollout_epoch}
+    terminal_padding:
+      enabled: True
+    override_cfg:
+      is_dummy: False
+      use_dense_reward: False
+      use_reward_model: False
+      reward_mode: none
+      max_num_steps: ${dobot.max_num_steps}
+      action_mode: ${dobot.action_mode}
+      state_mode: ${dobot.state_mode}
+      initial_joint_pos: ${dobot.initial_joint_pos}
+      gripper_relative_threshold: ${dobot.gripper_relative_threshold}
+    use_keyboard_intervention: True
+    keyboard_intervention:
+      allow_motion_intervention: False
+      episode_control_mode: "online_chunk_boundary"
+      safe_model_handoff: True
+      wait_for_start_on_reset: True
+      start_key: "y"
+      start_gate_timeout_s: 600.0
+      done_key: "Key.enter"
+      abort_key: "Key.backspace"
+      quit_keys: ["Key.esc"]
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  recompute_logprobs: False
+  enable_offload: False
+  pipeline_stage_num: 1
+  collect_transitions: True
+
+  model:
+    model_type: "residual_dobot_policy"
+    precision: bf16
+    is_lora: False
+    lora_rank: 32
+    add_value_head: True
+    use_proprio: True
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new}
+    action_dim: 8
+    num_steps: 4
+    num_action_chunks: 10
+    openpi:
+      task: rl
+      config_name: "pi05_dobot_pose"
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      action_horizon: 50
+      action_chunk: 10
+      action_env_dim: 8
+      num_steps: 4
+      num_images_in_input: 2
+      joint_logprob: False
+      value_after_vlm: True
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+      train_expert_only: True
+      noise_method: "flow_sde"
+      noise_level: 0.4
+      ignore_last: True
+    openpi_data:
+      repo_id: ""
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json}
+    base_policy:
+      model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new}
+      trainable: False
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 64
+  global_batch_size: 64
+  seed: 0
+  enable_offload: False
+
+  model:
+    model_type: "residual_dobot_policy"
+    precision: bf16
+    is_lora: False
+    lora_rank: 32
+    add_value_head: True
+    use_proprio: True
+    model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new}
+    action_dim: 8
+    num_steps: 4
+    num_action_chunks: 10
+    openpi:
+      task: rl
+      config_name: "pi05_dobot_pose"
+      model_action_dim: 32
+      paligemma_variant: "gemma_2b"
+      action_expert_variant: "gemma_300m"
+      max_token_len: 200
+      action_horizon: 50
+      action_chunk: 10
+      action_env_dim: 8
+      num_steps: 4
+      num_images_in_input: 2
+      joint_logprob: False
+      value_after_vlm: True
+      value_vlm_mode: "mean_token"
+      detach_critic_input: True
+      train_expert_only: True
+      noise_method: "flow_sde"
+      noise_level: 0.4
+      ignore_last: True
+    openpi_data:
+      repo_id: ""
+      norm_stats_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new/dobot_cf5af_t265_pose_multiobject_800_trimmed/norm_stats.json}
+    base_policy:
+      model_path: ${project_path:checkpoints/pi05_dobot_t265_pose_multiobject_800/40000_new}
+      trainable: False
+
+  optim:
+    lr: 3.0e-4
+    value_lr: 3.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-05
+    clip_grad: 1.0
+
+reward:
+  use_reward_model: False
+  reward_mode: none
+
+critic:
+  use_critic_model: False

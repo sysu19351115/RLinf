@@ -22,7 +22,10 @@ import pytest
 
 from rlinf.utils.checkpoint_utils import (
     prune_old_checkpoints,
+    sha256_file,
     verify_checkpoint_files,
+    verify_checkpoint_manifest,
+    write_checkpoint_manifest,
     write_completed_marker,
 )
 
@@ -117,3 +120,70 @@ def test_prune_ignores_non_step_dirs_and_keep_all(tmp_path):
 
     assert removed == [str(checkpoints_dir / "global_step_1")]
     assert (checkpoints_dir / "other_dir").exists()
+
+
+def test_manifest_round_trip_verifies(tmp_path):
+    checkpoint_dir = tmp_path / "ckpt"
+    checkpoint_dir.mkdir()
+    target = checkpoint_dir / "payload.pt"
+    target.write_bytes(b"0123456789" * 10)
+    manifest_path = write_checkpoint_manifest(
+        str(checkpoint_dir),
+        step=3,
+        files={"payload.pt": str(target)},
+        extra={"replay_transitions": {"online": 4, "demo": 2}},
+    )
+    assert os.path.exists(manifest_path)
+    manifest = verify_checkpoint_manifest(str(checkpoint_dir))
+    assert manifest["global_step"] == 3
+    assert manifest["files"]["payload.pt"]["sha256"] == sha256_file(str(target))
+    assert manifest["extra"]["replay_transitions"]["online"] == 4
+
+
+def test_manifest_detects_tampered_file(tmp_path):
+    checkpoint_dir = tmp_path / "ckpt"
+    checkpoint_dir.mkdir()
+    target = checkpoint_dir / "payload.pt"
+    target.write_bytes(b"original")
+    write_checkpoint_manifest(
+        str(checkpoint_dir),
+        step=1,
+        files={"payload.pt": str(target)},
+    )
+    target.write_bytes(b"TAMPERED")  # same length -> size check passes
+    with pytest.raises(RuntimeError, match="hash mismatch"):
+        verify_checkpoint_manifest(str(checkpoint_dir))
+
+
+def test_manifest_detects_missing_file(tmp_path):
+    checkpoint_dir = tmp_path / "ckpt"
+    checkpoint_dir.mkdir()
+    target = checkpoint_dir / "payload.pt"
+    target.write_bytes(b"data")
+    write_checkpoint_manifest(
+        str(checkpoint_dir),
+        step=1,
+        files={"payload.pt": str(target)},
+    )
+    target.unlink()
+    with pytest.raises(RuntimeError, match="file missing"):
+        verify_checkpoint_manifest(str(checkpoint_dir))
+
+
+def test_manifest_rejects_unknown_files(tmp_path):
+    checkpoint_dir = tmp_path / "ckpt"
+    checkpoint_dir.mkdir()
+    target = checkpoint_dir / "payload.pt"
+    target.write_bytes(b"data")
+    write_checkpoint_manifest(
+        str(checkpoint_dir),
+        step=1,
+        files={"payload.pt": str(target)},
+    )
+    (checkpoint_dir / "unexpected.bin").write_bytes(b"x")
+    with pytest.raises(RuntimeError, match="unknown file"):
+        verify_checkpoint_manifest(
+            str(checkpoint_dir), reject_unknown_files=True
+        )
+    # Without the strict flag the extra file is tolerated.
+    verify_checkpoint_manifest(str(checkpoint_dir))

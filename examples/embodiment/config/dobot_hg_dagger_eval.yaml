@@ -1,5 +1,5 @@
 defaults:
-  - dobot_hg_dagger_openpi
+  - dobot_hg_dagger_openpi_pytorch
   - _self_
 
 # Standalone, label-only autonomous evaluation for a Dobot HG-DAgger

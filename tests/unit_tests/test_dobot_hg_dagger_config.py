@@ -28,7 +28,7 @@ from rlinf.utils import omega_resolver  # noqa: F401
 _CONFIG_DIR = Path(__file__).resolve().parents[2] / "examples" / "embodiment" / "config"
 _REQUIRED_OVERRIDES = [
     "actor.model.model_path=/tmp/dobot_model",
-    "actor.model.openpi_data.norm_stats_path=/tmp/dobot_norm_stats.json",
+    "actor.model.openpi.norm_stats_path=/tmp/dobot_norm_stats.json",
     "actor.optim.lr=1e-6",
 ]
 
@@ -66,7 +66,7 @@ def _assert_algorithm_and_safety_contract(cfg: DictConfig) -> None:
     assert cfg.env.train.keyboard_intervention.handoff_max_rotation_jump_deg == 2.0
     assert cfg.env.train.data_collection.enabled is False
 
-    assert cfg.actor.model.model_type == "openpi"
+    assert cfg.actor.model.model_type == "openpi_pytorch"
     assert cfg.actor.model.action_dim == 8
     assert cfg.actor.model.num_action_chunks == 10
     assert cfg.actor.model.openpi.config_name == "pi05_dobot_pose"
@@ -96,7 +96,7 @@ def _assert_algorithm_and_safety_contract(cfg: DictConfig) -> None:
 
 
 def test_single_node_config_is_safe_and_resolvable(monkeypatch):
-    cfg = _compose("dobot_hg_dagger_openpi", monkeypatch)
+    cfg = _compose("dobot_hg_dagger_openpi_pytorch", monkeypatch)
 
     _assert_algorithm_and_safety_contract(cfg)
     assert cfg.cluster.num_nodes == 1
@@ -107,8 +107,8 @@ def test_single_node_config_is_safe_and_resolvable(monkeypatch):
 
 
 def test_two_node_config_changes_only_deployment(monkeypatch):
-    single = _compose("dobot_hg_dagger_openpi", monkeypatch)
-    two_node = _compose("dobot_hg_dagger_openpi_2node", monkeypatch)
+    single = _compose("dobot_hg_dagger_openpi_pytorch", monkeypatch)
+    two_node = _compose("dobot_hg_dagger_openpi_pytorch_2node", monkeypatch)
 
     _assert_algorithm_and_safety_contract(two_node)
     assert two_node.cluster.num_nodes == 2
@@ -117,19 +117,45 @@ def test_two_node_config_changes_only_deployment(monkeypatch):
     assert two_node.cluster.component_placement.env.node_group == "robot"
     assert two_node.cluster.node_groups[1].hardware.configs[0].node_rank == 1
 
+    def _strip_deployment_fields(container):
+        """Remove physical/deployment-only fields: per-robot joint home,
+        per-node precision and FSDP strategy tuning."""
+
+        def strip(node):
+            if isinstance(node, dict):
+                node.pop("fsdp_config", None)
+                node.pop("precision", None)
+                for value in node.values():
+                    strip(value)
+            elif isinstance(node, list):
+                for value in node:
+                    strip(value)
+
+        strip(container)
+        return container
+
     for key in ("algorithm", "env", "rollout", "actor", "reward", "critic"):
-        assert OmegaConf.to_container(
-            two_node[key], resolve=True
-        ) == OmegaConf.to_container(single[key], resolve=True)
+        single_container = OmegaConf.to_container(single[key], resolve=True)
+        two_node_container = OmegaConf.to_container(two_node[key], resolve=True)
+        if key == "env":
+            for container in (single_container, two_node_container):
+                container["train"]["override_cfg"].pop(
+                    "initial_joint_pos", None
+                )
+        if key in ("env", "rollout", "actor"):
+            _strip_deployment_fields(single_container)
+            _strip_deployment_fields(two_node_container)
+        assert two_node_container == single_container
 
 
 def test_required_training_values_fail_closed(monkeypatch):
     monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
     monkeypatch.delenv("DOBOT_HG_DAGGER_MODEL_PATH", raising=False)
+    monkeypatch.delenv("DOBOT_HG_DAGGER_PYTORCH_MODEL_PATH", raising=False)
     monkeypatch.delenv("DOBOT_HG_DAGGER_NORM_STATS_PATH", raising=False)
     monkeypatch.delenv("DOBOT_HG_DAGGER_LR", raising=False)
     with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
-        cfg = compose(config_name="dobot_hg_dagger_openpi")
+        cfg = compose(config_name="dobot_hg_dagger_openpi_pytorch")
 
     with pytest.raises(InterpolationResolutionError):
         OmegaConf.resolve(cfg)

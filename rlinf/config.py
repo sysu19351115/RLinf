@@ -87,6 +87,9 @@ SupportedModel.OPENVLA = SupportedModel.register("openvla", force=True)
 SupportedModel.OPENVLA_OFT = SupportedModel.register("openvla_oft", force=True)
 SupportedModel.OPENPI = SupportedModel.register("openpi", force=True)
 SupportedModel.OPENPI_PYTORCH = SupportedModel.register("openpi_pytorch", force=True)
+SupportedModel.RESIDUAL_DOBOT_POLICY = SupportedModel.register(
+    "residual_dobot_policy", force=True
+)
 SupportedModel.STARVLA = SupportedModel.register("starvla", force=True)
 SupportedModel.MLP_POLICY = SupportedModel.register("mlp_policy", force=True)
 SupportedModel.RLT_MLP_POLICY = SupportedModel.register("rlt_mlp_policy", force=True)
@@ -120,6 +123,7 @@ EMBODIED_MODEL = set(
         SupportedModel.OPENVLA_OFT,
         SupportedModel.OPENPI,
         SupportedModel.OPENPI_PYTORCH,
+        SupportedModel.RESIDUAL_DOBOT_POLICY,
         SupportedModel.STARVLA,
         SupportedModel.MLP_POLICY,
         SupportedModel.RLT_MLP_POLICY,
@@ -1403,6 +1407,12 @@ def validate_cfg(cfg: DictConfig) -> DictConfig:
     )
     if cfg.runner.task_type == "embodied":
         cfg = validate_embodied_cfg(cfg)
+        if str(cfg.algorithm.get("loss_type", "")) == "residual_hil_rlpd":
+            from rlinf.algorithms.residual_hil_rlpd.config import (
+                validate_residual_hil_rlpd_config,
+            )
+
+            validate_residual_hil_rlpd_config(cfg)
     elif cfg.runner.task_type == "embodied_eval":
         with open_dict(cfg):
             cfg.runner.only_eval = True

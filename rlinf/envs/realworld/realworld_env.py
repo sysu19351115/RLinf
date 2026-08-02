@@ -31,6 +31,47 @@ from rlinf.envs.utils import to_tensor
 from rlinf.scheduler import WorkerInfo
 
 
+def _stack_residual_feedback(
+    steps: list[dict[str, np.ndarray]],
+    chunk_size: int,
+    action_dim: int,
+) -> dict[str, np.ndarray]:
+    """Pad per-step residual feedback into fixed-size chunk arrays."""
+    executed = np.zeros((chunk_size, action_dim), dtype=np.float32)
+    accepted = np.zeros(chunk_size, dtype=bool)
+    human = np.zeros(chunk_size, dtype=bool)
+    handoff = np.zeros(chunk_size, dtype=bool)
+    bypass = np.zeros(chunk_size, dtype=bool)
+    rewards = np.zeros(chunk_size, dtype=np.float32)
+    terms = np.zeros(chunk_size, dtype=bool)
+    truncs = np.zeros(chunk_size, dtype=bool)
+    label_valid = np.ones(chunk_size, dtype=bool)
+    k = min(len(steps), chunk_size)
+    for i in range(k):
+        step = steps[i]
+        action = np.asarray(step["executed_action"]).reshape(-1)
+        executed[i, : min(action_dim, action.shape[0])] = action[:action_dim]
+        accepted[i] = bool(step["action_command_accepted"])
+        human[i] = bool(step["human_intervention"])
+        handoff[i] = bool(step["handoff_hold"])
+        bypass[i] = bool(step["gripper_bypass"])
+        rewards[i] = float(step["reward"])
+        terms[i] = bool(step["termination"])
+        truncs[i] = bool(step["truncation"])
+        label_valid[i] = bool(step["reward_label_valid"])
+    return {
+        "executed_actions": executed,
+        "executed_action_mask": accepted,
+        "human_intervention_mask": human,
+        "handoff_hold_mask": handoff,
+        "gripper_bypass_mask": bypass,
+        "rewards": rewards,
+        "terminations": terms,
+        "truncations": truncs,
+        "reward_label_valid": label_valid,
+    }
+
+
 class RealWorldEnv(gym.Env):
     def __init__(self, cfg, num_envs, seed_offset, total_num_processes, worker_info):
         assert num_envs == 1, (
@@ -366,7 +407,7 @@ class RealWorldEnv(gym.Env):
             infos,
         )
 
-    def chunk_step(self, chunk_actions):
+    def chunk_step(self, chunk_actions, gripper_bypass_mask: np.ndarray | None = None):
         # chunk_actions: [num_envs, chunk_step, action_dim]
         chunk_size = chunk_actions.shape[1]
         obs_list = []
@@ -389,18 +430,56 @@ class RealWorldEnv(gym.Env):
         controller_rejection_detected = False
         handoff_requested = False
         handoff_rejection_detected = False
+        collect_feedback = bool(getattr(self.cfg, "collect_residual_feedback", False))
+        residual_feedback_steps: list[dict[str, np.ndarray]] = []
         for i in range(chunk_size):
             if self.chunk_boundary_episode_control:
                 # The vector environment owns the real action-chunk shape.
                 # Tell the keyboard wrapper whether this is the final action
                 # instead of duplicating num_action_chunks in wrapper config.
                 self.env.call("set_chunk_boundary", i == chunk_size - 1)
+            if gripper_bypass_mask is not None:
+                self.env.call("set_gripper_bypass", bool(gripper_bypass_mask[i]))
             actions = chunk_actions[:, i]
             extracted_obs, step_reward, terminations, truncations, infos = self.step(
                 actions, auto_reset=False
             )
             obs_list.append(extracted_obs)
             infos_list.append(infos)
+            if collect_feedback:
+                residual_feedback_steps.append(
+                    {
+                        "executed_action": np.asarray(
+                            infos.get(
+                                "executed_action",
+                                np.asarray(actions, dtype=np.float32),
+                            ),
+                            dtype=np.float32,
+                        ),
+                        "action_command_accepted": np.asarray(
+                            infos.get("action_command_accepted", True),
+                            dtype=bool,
+                        ).reshape(-1)[0],
+                        "human_intervention": np.asarray(
+                            infos.get("intervene_flag", False),
+                            dtype=bool,
+                        ).reshape(-1)[0],
+                        "handoff_hold": np.asarray(
+                            infos.get("handoff_hold", False),
+                            dtype=bool,
+                        ).reshape(-1)[0],
+                        "gripper_bypass": np.asarray(
+                            infos.get("gripper_bypass", False),
+                            dtype=bool,
+                        ).reshape(-1)[0],
+                        "reward": float(step_reward),
+                        "termination": bool(terminations),
+                        "truncation": bool(truncations),
+                        "reward_label_valid": bool(
+                            infos.get("reward_label_valid", True)
+                        ),
+                    }
+                )
             if chunk_episode_id is None:
                 chunk_episode_id = torch.as_tensor(
                     infos["episode_id"], dtype=torch.int64
@@ -485,6 +564,13 @@ class RealWorldEnv(gym.Env):
                 break
 
         executed_steps = len(chunk_rewards)
+        if collect_feedback and residual_feedback_steps:
+            feedback = _stack_residual_feedback(
+                residual_feedback_steps,
+                chunk_size,
+                action_dim=chunk_actions.shape[-1],
+            )
+            infos_list[-1]["residual_feedback"] = feedback
         if stopped_early:
             skipped_steps = chunk_size - executed_steps
             terminal_obs = obs_list[-1]

@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import glob
+import hashlib
+import json
 import os
 import re
 import shutil
@@ -98,6 +100,97 @@ def write_completed_marker(actor_save_path: str, step: int) -> str:
     with open(marker_path, "w", encoding="utf-8") as f:
         f.write(f"global_step={step}\nsaved_at={time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     return marker_path
+
+
+def sha256_file(path: str, chunk_size: int = 1 << 20) -> str:
+    """Content SHA-256 of one file (used by the checkpoint manifest)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            block = f.read(chunk_size)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def write_checkpoint_manifest(
+    checkpoint_dir: str,
+    *,
+    step: int,
+    files: dict[str, str],
+    extra: dict | None = None,
+) -> str:
+    """Write ``manifest.json`` with per-file SHA-256 and byte sizes (P2-7)."""
+    manifest: dict = {
+        "schema_version": 1,
+        "global_step": int(step),
+        "files": {},
+        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    for rel_path, abs_path in files.items():
+        if not os.path.isfile(abs_path):
+            raise RuntimeError(
+                f"manifest file missing during save: {abs_path}"
+            )
+        manifest["files"][rel_path] = {
+            "sha256": sha256_file(abs_path),
+            "bytes": os.path.getsize(abs_path),
+        }
+    if extra:
+        manifest["extra"] = extra
+    path = os.path.join(checkpoint_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, sort_keys=True)
+    return path
+
+
+def verify_checkpoint_manifest(
+    checkpoint_dir: str, *, reject_unknown_files: bool = False
+) -> dict:
+    """Verify ``manifest.json`` hashes/sizes; rejects missing or corrupt files.
+
+    Args:
+        checkpoint_dir: Absolute checkpoint directory.
+        reject_unknown_files: When True, any file not listed in the manifest
+            (besides ``manifest.json`` and ``COMPLETED``) is rejected, so a
+            tampered/partial directory cannot silently restore extra state.
+    """
+    manifest_path = os.path.join(checkpoint_dir, "manifest.json")
+    if not os.path.isfile(manifest_path):
+        raise RuntimeError(
+            f"checkpoint {checkpoint_dir} is missing manifest.json"
+        )
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
+    if int(manifest.get("schema_version", 0)) != 1:
+        raise RuntimeError("unsupported checkpoint manifest schema_version")
+    for rel_path, meta in manifest.get("files", {}).items():
+        full = os.path.join(checkpoint_dir, rel_path)
+        if not os.path.isfile(full):
+            raise RuntimeError(
+                f"checkpoint file missing: {rel_path}"
+            )
+        if int(meta["bytes"]) != os.path.getsize(full):
+            raise RuntimeError(
+                f"checkpoint file size mismatch: {rel_path}"
+            )
+        if str(meta["sha256"]) != sha256_file(full):
+            raise RuntimeError(
+                f"checkpoint file hash mismatch: {rel_path}"
+            )
+    if reject_unknown_files:
+        expected = set(manifest.get("files", {})) | {"manifest.json", "COMPLETED"}
+        for root, _dirs, files in os.walk(checkpoint_dir):
+            for name in files:
+                rel = os.path.relpath(
+                    os.path.join(root, name), checkpoint_dir
+                )
+                if rel not in expected:
+                    raise RuntimeError(
+                        f"checkpoint contains unknown file: {rel}"
+                    )
+    return manifest
 
 
 def prune_old_checkpoints(

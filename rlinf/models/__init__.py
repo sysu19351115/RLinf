@@ -66,6 +66,27 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_residual_dobot_policy(cfg: DictConfig, torch_dtype):
+        from omegaconf import OmegaConf
+
+        from rlinf.models.embodiment.residual_dobot_policy import (
+            ResidualBasePolicyWrapper,
+        )
+
+        base_cfg = OmegaConf.to_container(cfg, resolve=True)
+        base_cfg["model_type"] = "openpi_pytorch"
+        base_cfg["model_path"] = base_cfg["base_policy"]["model_path"]
+        base_cfg.pop("base_policy", None)
+        base_cfg = OmegaConf.create(base_cfg)
+        base_model = _build_openpi_pytorch(base_cfg, torch_dtype)
+        # Invariant 7: the Pi0.5 base is fully frozen, never trained/synced.
+        base_model.requires_grad_(False)
+        if any(parameter.requires_grad for parameter in base_model.parameters()):
+            raise RuntimeError(
+                "residual_hil_rlpd base policy must be fully frozen after build"
+            )
+        return ResidualBasePolicyWrapper(base_model)
+
     def _build_dexbotic_pi(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.dexbotic_pi import get_model
 
@@ -155,6 +176,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.OPENVLA_OFT.value,
         _build_openvla_oft,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.RESIDUAL_DOBOT_POLICY.value,
+        _build_residual_dobot_policy,
         category="embodied",
         force=True,
     )

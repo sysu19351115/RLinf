@@ -714,6 +714,7 @@ class DobotEnv(gym.Env):
                 },
             )
 
+        bypass_active = bool(self._skip_gripper_binarizer)
         executed_action = self._prepare_executed_action(action)
 
         is_gripper_effective = False
@@ -755,6 +756,7 @@ class DobotEnv(gym.Env):
         info = {
             "executed_action": executed_action.copy(),
             "action_command_accepted": bool(accepted),
+            "gripper_bypass": bool(bypass_active),
         }
         if not accepted:
             info["action_rejection_reason"] = "safety_guard"
