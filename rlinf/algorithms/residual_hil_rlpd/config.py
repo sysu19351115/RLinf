@@ -190,7 +190,23 @@ def validate_residual_hil_rlpd_config(cfg: Any) -> None:
         raise ValueError(
             "residual_hil_rlpd requires an algorithm.residual_hil_rlpd block"
         )
+    # The workspace box is robot/calibration-specific; it is required whenever
+    # the check is active.  Operators may consciously disable just this check
+    # (the SDK-side per-step jump guard and policy limits remain active) with
+    # ``safety_workspace_check_enabled: False``.
+    workspace_check_enabled = bool(
+        _get(
+            cfg,
+            "algorithm.residual_hil_rlpd.safety_workspace_check_enabled",
+            True,
+        )
+    )
     for key in _REQUIRED_RLPD_KEYS:
+        if (
+            not workspace_check_enabled
+            and key in {"safety_workspace_min_m", "safety_workspace_max_m"}
+        ):
+            continue
         _require(cfg, f"algorithm.residual_hil_rlpd.{key}", "explicit YAML value")
 
     trans_data = _require_vector(
@@ -288,17 +304,18 @@ def validate_residual_hil_rlpd_config(cfg: Any) -> None:
         )
 
     # ── Safety barrier limits (P2-5) ──
-    ws_min = _require_vector(
-        cfg, "algorithm.residual_hil_rlpd.safety_workspace_min_m", 3
-    )
-    ws_max = _require_vector(
-        cfg, "algorithm.residual_hil_rlpd.safety_workspace_max_m", 3
-    )
-    if any(a >= b for a, b in zip(ws_min, ws_max)):
-        raise ValueError(
-            "safety_workspace_min_m must be strictly below safety_workspace_max_m "
-            "on every axis"
+    if workspace_check_enabled:
+        ws_min = _require_vector(
+            cfg, "algorithm.residual_hil_rlpd.safety_workspace_min_m", 3
         )
+        ws_max = _require_vector(
+            cfg, "algorithm.residual_hil_rlpd.safety_workspace_max_m", 3
+        )
+        if any(a >= b for a, b in zip(ws_min, ws_max)):
+            raise ValueError(
+                "safety_workspace_min_m must be strictly below "
+                "safety_workspace_max_m on every axis"
+            )
     if float(
         _get(cfg, "algorithm.residual_hil_rlpd.safety_max_translation_delta_m", 0.02)
     ) <= 0.0 or float(

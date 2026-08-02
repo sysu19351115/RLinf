@@ -41,20 +41,29 @@ VIOLATION_QUATERNION_FLIP = "quaternion_hemisphere_flip"
 class SafetyLimits:
     """Physical limits independent of the policy design limits."""
 
-    workspace_min_m: np.ndarray  # [3]
-    workspace_max_m: np.ndarray  # [3]
+    workspace_min_m: np.ndarray | None  # [3]; None disables the box check
+    workspace_max_m: np.ndarray | None  # [3]
     max_translation_delta_m: float
     max_rotation_delta_deg: float
 
     @classmethod
     def from_config(cls, rlpd_cfg: Any) -> "SafetyLimits":
-        return cls(
-            workspace_min_m=np.asarray(
+        workspace_check_enabled = bool(
+            getattr(rlpd_cfg, "safety_workspace_check_enabled", True)
+        )
+        if workspace_check_enabled:
+            workspace_min = np.asarray(
                 list(rlpd_cfg.safety_workspace_min_m), dtype=np.float64
-            ),
-            workspace_max_m=np.asarray(
+            )
+            workspace_max = np.asarray(
                 list(rlpd_cfg.safety_workspace_max_m), dtype=np.float64
-            ),
+            )
+        else:
+            workspace_min = None
+            workspace_max = None
+        return cls(
+            workspace_min_m=workspace_min,
+            workspace_max_m=workspace_max,
             max_translation_delta_m=float(
                 rlpd_cfg.safety_max_translation_delta_m
             ),
@@ -129,8 +138,12 @@ class ResidualSafetyBarrier:
                     )
                 )
             pos = commanded[i, :3]
-            if np.any(pos < self.limits.workspace_min_m - 1e-6) or np.any(
-                pos > self.limits.workspace_max_m + 1e-6
+            if (
+                self.limits.workspace_min_m is not None
+                and (
+                    np.any(pos < self.limits.workspace_min_m - 1e-6)
+                    or np.any(pos > self.limits.workspace_max_m + 1e-6)
+                )
             ):
                 violations.append(
                     SafetyViolation(

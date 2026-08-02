@@ -61,6 +61,27 @@ def test_workspace_violation_detected():
     assert barrier.violation_count == 1
 
 
+def test_workspace_check_can_be_disabled_explicitly():
+    """Operators may disable the calibration-specific box check with
+    ``safety_workspace_check_enabled: False``; the remaining barrier checks
+    (translation/rotation delta, quaternion) stay active."""
+    disabled_limits = SafetyLimits(
+        workspace_min_m=None,
+        workspace_max_m=None,
+        max_translation_delta_m=0.02,
+        max_rotation_delta_deg=10.0,
+    )
+    barrier = ResidualSafetyBarrier(disabled_limits)
+    nominal = np.stack([_pose([0.1, 0.1, 0.2], [1.0, 0.0, 0.0, 0.0])])
+    commanded = nominal.copy()
+    commanded[0, 0] = 10.0  # far outside any plausible box
+    violations = barrier.check_chunk(nominal, commanded)
+    assert all(v.code != VIOLATION_WORKSPACE for v in violations)
+
+    # The translation-delta guard still fires for the same chunk.
+    assert any(v.code == VIOLATION_TRANSLATION_DELTA for v in violations)
+
+
 def test_translation_delta_violation_detected():
     barrier = ResidualSafetyBarrier(_limits())
     nominal = np.stack([_pose([0.1, 0.1, 0.2], [1.0, 0.0, 0.0, 0.0])])

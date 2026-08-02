@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 from rlinf.algorithms.residual_hil_rlpd import validate_residual_hil_rlpd_config
 from rlinf.config import normalize_runner_paths
@@ -45,3 +45,30 @@ def test_residual_hil_rlpd_example_config_is_valid(monkeypatch):
     assert cfg.env.train.keyboard_intervention.safe_model_handoff is True
     assert cfg.env.eval.keyboard_intervention.allow_motion_intervention is False
     assert os.path.isabs(cfg.runner.logger.log_path)
+
+
+def test_workspace_check_can_be_opted_out_explicitly(monkeypatch):
+    """``safety_workspace_check_enabled: False`` makes the calibration-specific
+    workspace box optional; without the explicit opt-out the keys stay
+    mandatory."""
+    monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
+    with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
+        cfg = compose(config_name="dobot_async_residual_hil_rlpd_pi05")
+    OmegaConf.resolve(cfg)
+    normalize_runner_paths(cfg)
+    rlpd = cfg.algorithm.residual_hil_rlpd
+
+    # The example config opts out of the calibration-specific box check, so
+    # the workspace keys may be absent.
+    assert rlpd.safety_workspace_check_enabled is False
+    validate_residual_hil_rlpd_config(cfg)
+
+    # Re-enabling the check without the keys must fail loudly.
+    with open_dict(rlpd):
+        rlpd.safety_workspace_check_enabled = True
+    try:
+        validate_residual_hil_rlpd_config(cfg)
+    except ValueError as exc:
+        assert "safety_workspace_min_m" in str(exc)
+    else:
+        raise AssertionError("workspace box must be required when check is on")
