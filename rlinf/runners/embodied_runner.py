@@ -24,6 +24,11 @@ from omegaconf.dictconfig import DictConfig
 
 from rlinf.scheduler import Channel
 from rlinf.scheduler import WorkerGroupFuncResult as Handle
+from rlinf.utils.checkpoint_utils import (
+    prune_old_checkpoints,
+    verify_checkpoint_files,
+    write_completed_marker,
+)
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.logging import get_logger
 from rlinf.utils.metric_logger import MetricLogger
@@ -198,6 +203,11 @@ class EmbodiedRunner:
         assert os.path.exists(actor_checkpoint_path), (
             f"resume_dir {actor_checkpoint_path} does not exist."
         )
+        if not os.path.exists(os.path.join(actor_checkpoint_path, "COMPLETED")):
+            raise RuntimeError(
+                f"resume_dir {resume_dir} is missing the COMPLETED marker; "
+                "refusing to load a possibly half-written checkpoint."
+            )
         self.actor.load_checkpoint(actor_checkpoint_path).wait()
         self.global_step = int(resume_dir.split("global_step_")[-1])
 
@@ -681,6 +691,27 @@ class EmbodiedRunner:
         actor_save_path = os.path.join(base_output_dir, "actor")
         os.makedirs(actor_save_path, exist_ok=True)
         self.actor.save_checkpoint(actor_save_path, self.global_step).wait()
+        # Verify the actor actually wrote complete files (relative paths used
+        # to resolve against the Ray worker cwd and silently land elsewhere),
+        # then mark the checkpoint as completed before any retention pruning.
+        verify_checkpoint_files(
+            actor_save_path,
+            require_full_weights=bool(
+                (self.cfg.actor.get("fsdp_config") or {}).get(
+                    "save_full_model_weights", True
+                )
+            ),
+        )
+        write_completed_marker(actor_save_path, self.global_step)
+        removed = prune_old_checkpoints(
+            os.path.dirname(base_output_dir),
+            keep_last=int(self.cfg.runner.get("checkpoint_keep_last", 0)),
+        )
+        if removed:
+            self.logger.info(
+                "[Checkpoint] Pruned old checkpoints: %s",
+                ", ".join(removed),
+            )
 
     def set_max_steps(self):
         self.num_steps_per_epoch = 1

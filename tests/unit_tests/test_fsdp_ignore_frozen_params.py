@@ -754,6 +754,28 @@ def test_warmup_optimizer_state_ignores_leftover_gradients():
     assert state["step"] == 0
 
 
+def test_checkpoint_paths_must_be_absolute():
+    manager = object.__new__(FSDPModelManager)
+    with pytest.raises(ValueError, match="must be absolute"):
+        manager.save_checkpoint("relative/checkpoint")
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        FSDPStrategy.save_checkpoint(
+            model=None,
+            optimizers=None,
+            lr_schedulers=None,
+            save_path="relative/checkpoint",
+        )
+
+    with pytest.raises(ValueError, match="must be absolute"):
+        FSDPStrategy.load_checkpoint(
+            model=None,
+            optimizers=None,
+            lr_schedulers=None,
+            load_path="relative/checkpoint",
+        )
+
+
 def test_critic_warmup_transition_preserves_fsdp_parameter_views(
     fsdp_single_rank,
 ):

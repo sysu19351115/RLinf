@@ -207,6 +207,12 @@ class FSDPStrategyBase(ABC):
             save_full_model_weights (bool): Whether to save full model weights.
             checkpoint_format (str): "dcp" or "local_shard".
         """
+        if not os.path.isabs(save_path):
+            raise ValueError(
+                "Checkpoint path must be absolute; relative paths resolve "
+                "differently in the driver and Ray worker processes. "
+                f"Got: {save_path!r}"
+            )
         clear_memory()
         torch.distributed.barrier()
         opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
@@ -291,6 +297,12 @@ class FSDPStrategyBase(ABC):
             load_path (str): The path to load the checkpoint from.
             checkpoint_format (str): "dcp" or "local_shard".
         """
+        if not os.path.isabs(load_path):
+            raise ValueError(
+                "Checkpoint path must be absolute; relative paths resolve "
+                "differently in the driver and Ray worker processes. "
+                f"Got: {load_path!r}"
+            )
         opts = StateDictOptions(full_state_dict=False, cpu_offload=True)
         training_state = Checkpoint(
             model=model,

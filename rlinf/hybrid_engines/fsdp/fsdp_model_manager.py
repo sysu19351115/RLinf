@@ -352,6 +352,12 @@ class FSDPModelManager:
         Args:
             save_path: the directory to save checkpoint.
         """
+        if not os.path.isabs(save_path):
+            raise ValueError(
+                "Checkpoint path must be absolute; relative paths resolve "
+                "differently in the driver and Ray worker processes. "
+                f"Got: {save_path!r}"
+            )
         restore_weight_offload = self.is_weight_offloaded
         restore_optimizer_offload = self.is_optimizer_offloaded
 

@@ -197,6 +197,19 @@ PY
 
 根分区和结果目录必须有足够空间。当前配置每 5 个 global step 保存一次大模型 checkpoint；空间不足时应先清理磁盘或提高 `runner.save_interval`，不能带着满盘状态启动。
 
+### Checkpoint 路径与保留策略
+
+- `runner.logger.log_path` 固定为 `${project_path:results}/${now:%Y%m%d-%H%M%S}`：
+  绝对路径 + 每次启动的时间戳，不同运行写入独立目录，互不覆盖。路径必须在
+  配置初始化阶段转换为绝对路径（`validate_cfg`），因为相对路径在 Driver 与
+  Ray Actor 进程中会按各自 cwd 解析，导致 checkpoint 写到意外目录。
+- 恢复训练时 `runner.resume_dir` 必须是绝对路径，且目标目录必须包含
+  `actor/COMPLETED` 标记；缺失标记会拒绝加载，避免读到半成品 checkpoint。
+- `runner.checkpoint_keep_last: 3`：每次新 checkpoint 验证成功后只保留最近
+  3 个 `global_step_*` 目录，更早的自动删除。
+- 每个完整 checkpoint 约 15 GB（DCP + full weights）。真机调试建议
+  `save_interval` 保持 5~10；正式长训建议提高到 100 以上并配合保留策略。
+
 ## 4. 运行回归门禁
 
 在 cloud 节点执行；这些测试不连接真机：

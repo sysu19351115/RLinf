@@ -1357,6 +1357,8 @@ def validate_coding_online_rl_cfg(cfg: DictConfig) -> DictConfig:
 def validate_cfg(cfg: DictConfig) -> DictConfig:
     OmegaConf.set_struct(cfg, True)
 
+    normalize_runner_paths(cfg)
+
     with open_dict(cfg):
         cfg.runner.per_worker_log = cfg.runner.get("per_worker_log", False)
         cfg.runner.per_worker_log_path = None
@@ -1466,6 +1468,32 @@ def validate_cfg(cfg: DictConfig) -> DictConfig:
             cfg.critic = validate_fsdp_cfg(cfg.critic)
 
     return cfg
+
+
+def normalize_runner_paths(cfg: DictConfig) -> None:
+    """Convert runner log/checkpoint paths to absolute paths.
+
+    Relative paths resolve differently in the driver process and Ray worker
+    processes (each process resolves them against its own cwd), which makes
+    checkpoints land in unexpected directories. This must run before any
+    Cluster/worker is created so every Ray worker receives the same absolute
+    path.
+
+    Args:
+        cfg: The composed Hydra config (mutated in place).
+    """
+    with open_dict(cfg):
+        raw_log_path = cfg.runner.logger.get("log_path", None)
+        if raw_log_path is not None:
+            cfg.runner.logger.log_path = os.path.abspath(
+                os.path.expanduser(str(raw_log_path))
+            )
+        raw_resume_dir = cfg.runner.get("resume_dir", None)
+        if raw_resume_dir is not None:
+            cfg.runner.resume_dir = os.path.abspath(
+                os.path.expanduser(str(raw_resume_dir))
+            )
+        cfg.runner.checkpoint_keep_last = int(cfg.runner.get("checkpoint_keep_last", 0))
 
 
 def build_config(cls, cfg):

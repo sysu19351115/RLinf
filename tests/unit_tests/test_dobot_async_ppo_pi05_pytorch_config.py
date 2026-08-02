@@ -16,11 +16,13 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+from rlinf.config import normalize_runner_paths
 from rlinf.utils import omega_resolver  # noqa: F401
 from rlinf.utils.utils import validate_reward_label_validity_config
 
@@ -111,3 +113,16 @@ def test_fsdp_ignore_frozen_params_is_opt_in(monkeypatch):
     # public default stays opt-in for all non-Dobot FSDP users.
     cfg = OmegaConf.load(_CONFIG_DIR / "hybrid_engines" / "fsdp.yaml")
     assert cfg.ignore_frozen_params is False
+
+
+def test_runner_log_path_is_normalized_to_absolute(monkeypatch):
+    monkeypatch.setenv("EMBODIED_PATH", str(_CONFIG_DIR.parent))
+    with initialize_config_dir(version_base=None, config_dir=str(_CONFIG_DIR)):
+        cfg = compose(config_name="dobot_async_ppo_pi05_newtorch")
+    OmegaConf.resolve(cfg)
+
+    normalize_runner_paths(cfg)
+
+    assert os.path.isabs(cfg.runner.logger.log_path)
+    assert os.path.basename(os.path.dirname(cfg.runner.logger.log_path)) == "results"
+    assert cfg.runner.checkpoint_keep_last == 3

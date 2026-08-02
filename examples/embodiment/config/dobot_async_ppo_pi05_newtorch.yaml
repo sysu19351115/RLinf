@@ -76,7 +76,10 @@ cluster:
 runner:
   task_type: embodied
   logger:
-    log_path: "../results"
+    # Absolute, per-run output root: project_path is the RLinf repo root,
+    # and the Hydra `now` resolver stamps each launch with a unique timestamp
+    # so separate runs never overwrite the same checkpoint directories.
+    log_path: "${project_path:results}/${now:%Y%m%d-%H%M%S}"
     project_name: rlinf
     experiment_name: "dobot-pi05-pytorch-pose-async-ppo"
     logger_backends: ["tensorboard"]
@@ -87,6 +90,7 @@ runner:
   only_eval: False
   val_check_interval: -1
   save_interval: 5
+  checkpoint_keep_last: 3
 
   resume_dir: null
   ckpt_path: null
