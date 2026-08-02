@@ -447,15 +447,28 @@ class RealWorldEnv(gym.Env):
             obs_list.append(extracted_obs)
             infos_list.append(infos)
             if collect_feedback:
+                executed_action_info = infos.get("executed_action", None)
+                if executed_action_info is None:
+                    executed_action_np = np.asarray(actions, dtype=np.float32)
+                else:
+                    # Gymnasium vector-env infos wrap per-env array values in a
+                    # length-1 object array; converting it directly with
+                    # np.asarray(..., dtype=np.float32) fails with "setting an
+                    # array element with a sequence" (numpy >= 1.24), so
+                    # unwrap the single-env value first.
+                    if (
+                        getattr(executed_action_info, "dtype", None)
+                        == np.dtype(object)
+                        and executed_action_info.ndim == 1
+                        and executed_action_info.size == 1
+                    ):
+                        executed_action_info = executed_action_info[0]
+                    executed_action_np = np.asarray(
+                        executed_action_info, dtype=np.float32
+                    )
                 residual_feedback_steps.append(
                     {
-                        "executed_action": np.asarray(
-                            infos.get(
-                                "executed_action",
-                                np.asarray(actions, dtype=np.float32),
-                            ),
-                            dtype=np.float32,
-                        ),
+                        "executed_action": executed_action_np.reshape(-1),
                         "action_command_accepted": np.asarray(
                             infos.get("action_command_accepted", True),
                             dtype=bool,

@@ -16,9 +16,12 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import torch
+from omegaconf import OmegaConf
 
 from rlinf.envs.realworld.dobot.dobot_controller import DobotController
 from rlinf.envs.realworld.dobot.dobot_env import DobotEnv, DobotRobotConfig
+from rlinf.envs.realworld.realworld_env import RealWorldEnv
 
 
 def _dummy_pose_env(max_num_steps: int = 3) -> DobotEnv:
@@ -31,6 +34,67 @@ def _dummy_pose_env(max_num_steps: int = 3) -> DobotEnv:
             step_frequency=10_000.0,
         )
     )
+
+
+def _dummy_realworld_env() -> RealWorldEnv:
+    # Register the gym id used by RealWorldEnv._create_env.
+    from rlinf.envs.realworld.dobot import tasks  # noqa: F401
+
+    cfg = OmegaConf.create(
+        {
+            "seed": 0,
+            "auto_reset": False,
+            "ignore_terminations": False,
+            "group_size": 1,
+            "max_episode_steps": 20,
+            "use_fixed_reset_state_ids": False,
+            "main_image_key": "cam_left_wrist",
+            "use_keyboard_intervention": False,
+            "keyboard_intervention": {},
+            "collect_residual_feedback": True,
+            "override_cfg": {},
+            "video_cfg": {},
+            "init_params": {
+                "id": "DobotPickAndPlaceEnv-v1",
+                "is_dummy": True,
+                "action_mode": "cartesian",
+                "state_mode": "pose",
+                "max_num_steps": 20,
+                "step_frequency": 10_000.0,
+                "camera_serials": [],
+                "gripper_relative_threshold": 0.2,
+                "reward_mode": "none",
+                "task_description": "dummy",
+            },
+        }
+    )
+    return RealWorldEnv(
+        cfg,
+        num_envs=1,
+        seed_offset=0,
+        total_num_processes=1,
+        worker_info=None,
+    )
+
+
+def test_chunk_step_residual_feedback_unwraps_vector_env_info():
+    """Real-machine regression: gymnasium vector-env infos wrap per-env array
+    values (e.g. ``executed_action``) in a length-1 object array, which
+    ``np.asarray(..., dtype=np.float32)`` rejects with "setting an array
+    element with a sequence" (numpy >= 1.24).  Chunked residual feedback must
+    still be collected from the dummy/single-env path."""
+    env = _dummy_realworld_env()
+    env.reset()
+    chunk_actions = torch.zeros(1, 10, 8)
+
+    _, _, _, _, infos_list = env.chunk_step(chunk_actions)
+
+    feedback = infos_list[-1]["residual_feedback"]
+    assert feedback["executed_actions"].shape == (10, 8)
+    np.testing.assert_array_equal(
+        feedback["executed_actions"], chunk_actions.numpy()[0]
+    )
+    env.close()
 
 
 def test_pose_dummy_observation_contains_prev_state():
