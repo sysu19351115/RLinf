@@ -948,6 +948,36 @@ class EnvWorker(Worker):
             self._residual_pending_ctx = None
             self._finalize_and_enqueue(ctx, next_nominal=None)
 
+    def _send_pending_residual_transitions(self, channel) -> None:
+        """Ship pending chunk transitions to the actor via the shared channel.
+
+        Uses a direct ``channel.put`` (same as the trajectory path): the strict
+        message envelope is an atomic payload and ``send_to``'s batch
+        inference rejects it (``infer_batch_size`` cannot infer a batch from
+        the envelope dict, e.g. its ``type`` string).
+        """
+        if not getattr(self, "residual_hil_rlpd_mode", False):
+            return
+        if channel is None or not getattr(self, "_pending_residual_transitions", []):
+            return
+        from rlinf.algorithms.residual_hil_rlpd.messages import (
+            build_transition_message,
+        )
+
+        for transition in self._pending_residual_transitions:
+            channel.put(
+                build_transition_message(
+                    transition,
+                    policy_version=int(
+                        np.asarray(transition.policy_version).reshape(-1)[0]
+                    ),
+                    run_id=getattr(self, "_run_id", ""),
+                    sender_rank=int(getattr(self, "_rank", 0)),
+                ),
+                async_op=True,
+            )
+        self._pending_residual_transitions.clear()
+
     @staticmethod
     def _extract_operator_metrics(infos: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Convert operator-control diagnostics into numeric logger metrics."""
@@ -2126,24 +2156,7 @@ class EnvWorker(Worker):
             and self._pending_residual_transitions
             and actor_channel is not None
         ):
-            from rlinf.algorithms.residual_hil_rlpd.messages import (
-                build_transition_message,
-            )
-
-            for transition in self._pending_residual_transitions:
-                self.send_to(
-                    group_name=self.cfg.actor.group_name,
-                    channel=actor_channel,
-                    data=build_transition_message(
-                        transition,
-                        policy_version=int(
-                            np.asarray(transition.policy_version).reshape(-1)[0]
-                        ),
-                        run_id=self._run_id,
-                        sender_rank=int(getattr(self, "_rank", 0)),
-                    ),
-                )
-            self._pending_residual_transitions.clear()
+            self._send_pending_residual_transitions(actor_channel)
 
         if train_terminal_padding_enabled:
             total_chunks = valid_chunks + padded_chunks

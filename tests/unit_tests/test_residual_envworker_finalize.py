@@ -23,7 +23,10 @@ import torch
 from omegaconf import OmegaConf
 
 from rlinf.algorithms.residual_hil_rlpd.action_codec import ResidualCodec
-from rlinf.algorithms.residual_hil_rlpd.transition import CHUNK_LEN
+from rlinf.algorithms.residual_hil_rlpd.transition import (
+    CHUNK_LEN,
+    ResidualChunkTransition,
+)
 from rlinf.data.embodied_io_struct import EnvOutput
 from rlinf.envs.realworld.realworld_env import _stack_residual_feedback
 from rlinf.workers.env.env_worker import EnvWorker
@@ -139,6 +142,41 @@ def _obs(value: float = 0.0) -> dict[str, np.ndarray]:
         "main_images": np.full((8, 8, 3), value, dtype=np.uint8),
         "prev_states": np.full(8, value, dtype=np.float32),
     }
+
+
+def _dummy_transition() -> ResidualChunkTransition:
+    h = CHUNK_LEN
+    zero8 = np.zeros((h, 8), dtype=np.float32)
+    return ResidualChunkTransition(
+        curr_obs=_obs(0.0),
+        next_obs=_obs(1.0),
+        nominal_actions=zero8.copy(),
+        next_nominal_actions=zero8.copy(),
+        sampled_arm_residual=np.zeros((h, 6), dtype=np.float32),
+        sampled_gripper_mode=np.zeros(h, dtype=np.int64),
+        commanded_actions=zero8.copy(),
+        gripper_bypass_mask=np.zeros(h, dtype=bool),
+        executed_actions=zero8.copy(),
+        actions_arm=np.zeros((h, 6), dtype=np.float32),
+        actions_gripper=np.zeros((h, 3), dtype=np.float32),
+        rewards=np.zeros(h, dtype=np.float32),
+        executed_action_mask=np.ones(h, dtype=bool),
+        human_intervention_mask=np.zeros(h, dtype=bool),
+        handoff_hold_mask=np.zeros(h, dtype=bool),
+        terminations=np.zeros(h, dtype=bool),
+        truncations=np.zeros(h, dtype=bool),
+        bootstrap_mask=np.array([True]),
+        discount_steps=np.array([h]),
+        discounted_return=0.0,
+        transition_valid=np.array([True]),
+        reward_label_valid=np.array([True]),
+        source=0,
+        policy_version=np.array([3]),
+        base_fingerprint="base-fp",
+        codec_fingerprint="codec-fp",
+        episode_id=7,
+        chunk_id=120,
+    )
 
 
 class _AuditedRolloutResult:
@@ -461,3 +499,42 @@ def test_env_evaluate_step_forwards_gripper_bypass_mask(monkeypatch):
         gripper_bypass_mask=mask,
     )
     assert captured["mask"] is mask
+
+
+def test_pending_residual_transitions_ship_via_channel_put():
+    """Real-machine regression: the strict transition envelope is an atomic
+    payload; ``send_to``'s batch inference rejects it with
+    'Unsupported payload type for batch-size inference: str'. It must be
+    shipped with a direct ``channel.put`` like the trajectory path."""
+    worker = _make_worker()
+    worker.residual_hil_rlpd_mode = True
+    worker._run_id = "run-1"
+    worker._rank = 0
+    worker._pending_residual_transitions = [_dummy_transition()]
+
+    class _RecordingChannel:
+        def __init__(self):
+            self.items = []
+
+        def put(self, item, **kwargs):
+            self.items.append((item, kwargs))
+
+    channel = _RecordingChannel()
+    worker._send_pending_residual_transitions(channel)
+
+    assert len(channel.items) == 1
+    message, kwargs = channel.items[0]
+    assert kwargs.get("async_op") is True
+    assert message["type"] == "residual_transition"
+    assert int(message["schema_version"]) == 1
+    assert message["run_id"] == "run-1"
+    assert message["sender_rank"] == 0
+    assert message["transition"] is not None
+    assert worker._pending_residual_transitions == []
+
+    # Non-residual workers are no-ops.
+    worker2 = _make_worker()
+    worker2.residual_hil_rlpd_mode = False
+    worker2._pending_residual_transitions = [_dummy_transition()]
+    worker2._send_pending_residual_transitions(_RecordingChannel())
+    assert len(worker2._pending_residual_transitions) == 1
