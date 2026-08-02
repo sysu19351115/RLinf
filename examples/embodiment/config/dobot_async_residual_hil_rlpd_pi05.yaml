@@ -134,8 +134,8 @@ algorithm:
     gripper_min_hold_steps: 5
     gripper_debounce_chunks: 2
     # P2-5: independent safety barrier limits.
-    safety_workspace_min_m: [-1, -1, -1]
-    safety_workspace_max_m: [1, 1, 1]
+    #safety_workspace_min_m: [-1, -1, -1]
+    #safety_workspace_max_m: [1, 1, 1]
     safety_max_translation_delta_m: 0.02
     safety_max_rotation_delta_deg: 10.0
     safety_hold_chunks: 3
