@@ -590,7 +590,7 @@ def test_eval_single_env_terminal_padding_stops_real_env_calls():
     worker.finish_rollout = lambda mode: None
     env_calls = []
 
-    def terminal_eval_step(_actions, _stage_id):
+    def terminal_eval_step(_actions, _stage_id, gripper_bypass_mask=None):
         env_calls.append(True)
         return (
             EnvOutput(

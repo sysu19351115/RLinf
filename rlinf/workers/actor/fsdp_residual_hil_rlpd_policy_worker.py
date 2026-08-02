@@ -171,6 +171,9 @@ class AsyncResidualHilRLPDWorker(Worker):
             "waiting_for_demo": float(self._learner.buffer.waiting_for_demo()),
             "online_size": float(self._learner.buffer.sizes()["online"]),
             "demo_size": float(self._learner.buffer.sizes()["demo"]),
+            "buffer_accepted": float(self._learner.buffer.accepted_count),
+            "buffer_rejected": float(self._learner.buffer.rejected_count),
+            "buffer_duplicate": float(self._learner.buffer.duplicate_count),
             "pending_transitions": float(len(self._pending)),
             "malformed_message_dropped": float(
                 getattr(self, "_malformed_dropped", 0)
@@ -185,6 +188,12 @@ class AsyncResidualHilRLPDWorker(Worker):
                 self._learner.buffer.over_memory_watermark()
             ),
         }
+        reasons = dict(self._learner.buffer.reason_counts)
+        if reasons and reasons != getattr(self, "_last_reject_reasons", None):
+            Worker.logger.warning(
+                "[ResidualHIL] replay reject reasons: %s", reasons
+            )
+            self._last_reject_reasons = reasons
         updates = 0
         while self._learner.can_update() and updates < 20:
             metrics.update(self._learner.update())

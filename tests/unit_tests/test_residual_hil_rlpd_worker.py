@@ -322,6 +322,48 @@ def test_run_training_idle_buffer_returns_empty_metrics():
     worker.stop()
 
 
+def test_base_fingerprint_is_path_independent(tmp_path):
+    """Two nodes mirroring the same frozen checkpoint under different repo
+    roots (actor on /home/tyz/... vs env on /home/zylab/...) must compute the
+    same base fingerprint; otherwise every online transition is rejected with
+    ``base_fingerprint_mismatch`` and training never starts."""
+    from rlinf.algorithms.residual_hil_rlpd.action_codec import ResidualCodec
+    from rlinf.algorithms.residual_hil_rlpd.fingerprint import (
+        compute_base_fingerprint,
+    )
+
+    root_a = tmp_path / "home" / "tyz" / "project" / "RLinf" / "checkpoints" / "base"
+    root_b = (
+        tmp_path / "home" / "zylab" / "project" / "RLinf" / "checkpoints" / "base"
+    )
+    root_a.mkdir(parents=True)
+    root_b.mkdir(parents=True)
+    (root_a / "model.safetensors").write_bytes(b"same-weights-bytes")
+    (root_b / "model.safetensors").write_bytes(b"same-weights-bytes")
+    norm_a = root_a / "norm_stats.json"
+    norm_b = root_b / "norm_stats.json"
+    norm_a.write_text('{"mean": 1.0}')
+    norm_b.write_text('{"mean": 1.0}')
+    codec = ResidualCodec()
+
+    fp_a = compute_base_fingerprint(
+        str(root_a), norm_stats_path=str(norm_a), codec=codec
+    )
+    fp_b = compute_base_fingerprint(
+        str(root_b), norm_stats_path=str(norm_b), codec=codec
+    )
+    assert fp_a == fp_b
+
+    # Different weights content must still change the fingerprint.
+    (root_b / "model.safetensors").write_bytes(b"different-weights-bytes")
+    assert (
+        compute_base_fingerprint(
+            str(root_b), norm_stats_path=str(norm_b), codec=codec
+        )
+        != fp_a
+    )
+
+
 def test_residual_scale_parse_is_fail_closed():
     from rlinf.algorithms.residual_hil_rlpd.messages import build_scale_message
     from rlinf.workers.rollout.hf.residual_hil_rollout_worker import (

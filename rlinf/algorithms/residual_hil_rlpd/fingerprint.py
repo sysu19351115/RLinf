@@ -53,11 +53,18 @@ def compute_base_fingerprint(
     norm_stats_path: str | None = None,
     codec: ResidualCodec | None = None,
 ) -> str:
-    """Composite content fingerprint for the frozen base + codec."""
+    """Composite content fingerprint for the frozen base + codec.
+
+    The payload intentionally contains only *content* hashes (plus the schema
+    version): including the absolute path would make the fingerprint differ
+    across machines that mirror the same checkpoint under different repo roots
+    (e.g. actor on ``/home/tyz/project/RLinf`` vs env on
+    ``/home/zylab/project/RLinf``), rejecting every online transition with
+    ``base_fingerprint_mismatch`` and starving training.
+    """
     payload = "|".join(
         [
             _TRANSITION_SCHEMA_VERSION,
-            os.path.realpath(model_path) if model_path else "no-path",
             _weights_dir_hash(model_path),
             _file_hash(norm_stats_path),
             codec.fingerprint() if codec is not None else "no-codec",

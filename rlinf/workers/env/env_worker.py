@@ -379,6 +379,41 @@ class EnvWorker(Worker):
                 ]
                 self.history_lengths = [{} for _ in range(self.stage_num)]
 
+        if getattr(self, "residual_hil_rlpd_mode", False):
+            # Warm the base-fingerprint cache while the rollout worker is still
+            # loading the frozen base model: hashing the multi-GB checkpoint
+            # once takes ~1.6s, and without this the first two chunks stall
+            # (transition finalization is deferred by one chunk).
+            try:
+                from rlinf.algorithms.residual_hil_rlpd.action_codec import (
+                    ResidualCodec,
+                )
+                from rlinf.algorithms.residual_hil_rlpd.fingerprint import (
+                    compute_base_fingerprint,
+                )
+
+                rlpd_cfg = self.cfg.algorithm.residual_hil_rlpd
+                codec = ResidualCodec(
+                    translation_scale_m=tuple(rlpd_cfg.translation_data_limit_m),
+                    rotation_scale_deg=tuple(rlpd_cfg.rotation_data_limit_deg),
+                )
+                self._base_fingerprint = compute_base_fingerprint(
+                    str(self.cfg.actor.model.base_policy.get("model_path", "")),
+                    norm_stats_path=str(
+                        self.cfg.actor.model.get("openpi_data", {}).get(
+                            "norm_stats_path", None
+                        )
+                    ),
+                    codec=codec,
+                )
+            except Exception:
+                self._logger.warning(
+                    "[ResidualHIL] base fingerprint warmup failed; "
+                    "it will be computed lazily on the first chunk",
+                    exc_info=True,
+                )
+                self._base_fingerprint = None
+
         self._init_env()
 
     def update_env_cfg(self):
