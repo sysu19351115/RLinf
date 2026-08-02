@@ -34,3 +34,4 @@ tmp/
 .zcode/
 huggingface/
 docs/plans/
+results/
