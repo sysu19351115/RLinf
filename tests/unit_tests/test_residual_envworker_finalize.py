@@ -538,3 +538,46 @@ def test_pending_residual_transitions_ship_via_channel_put():
     worker2._pending_residual_transitions = [_dummy_transition()]
     worker2._send_pending_residual_transitions(_RecordingChannel())
     assert len(worker2._pending_residual_transitions) == 1
+
+
+def test_finalize_caches_base_fingerprint(monkeypatch):
+    """Real-machine regression: hashing the frozen base checkpoint directory
+    (multi-GB) on every chunk stalled the robot ~1.6s between chunks. The
+    fingerprint must be computed once per env worker and reused."""
+    from rlinf.algorithms.residual_hil_rlpd import fingerprint as fp_module
+
+    worker = _make_worker()
+    codec = ResidualCodec()
+    rng = np.random.default_rng(7)
+    audit, feedback = _chunk_audit_and_feedback(rng, codec, CHUNK_LEN)
+    env = EnvOutput(
+        obs=_obs(0.0),
+        env_infos={"residual_feedback": feedback, "episode_id": [7]},
+    )
+    rollout = _AuditedRolloutResult(audit, np.zeros((CHUNK_LEN, 8)))
+    calls: list[int] = []
+
+    def fake_fingerprint(*_args, **_kwargs) -> str:
+        calls.append(1)
+        return "fp-cached"
+
+    monkeypatch.setattr(fp_module, "compute_base_fingerprint", fake_fingerprint)
+
+    first = worker._finalize_residual_transition(
+        rollout,
+        env,
+        0,
+        chunk_start_obs=_obs(0.0),
+        next_nominal=audit["nominal_actions"],
+    )
+    second = worker._finalize_residual_transition(
+        rollout,
+        env,
+        0,
+        chunk_start_obs=_obs(0.0),
+        next_nominal=audit["nominal_actions"],
+    )
+
+    assert first is not None and second is not None
+    assert len(calls) == 1
+    assert worker._base_fingerprint == "fp-cached"

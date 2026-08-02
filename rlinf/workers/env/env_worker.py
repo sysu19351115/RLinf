@@ -766,14 +766,11 @@ class EnvWorker(Worker):
             if feedback.human_intervention_mask.any()
             else SOURCE_ONLINE
         )
-        transition, valid, _ = finalize_chunk_transition(
-            curr_obs=chunk_start_obs,
-            next_obs=env_output.final_obs or env_output.obs,
-            audit=audit,
-            feedback=feedback,
-            codec=codec,
-            source=source,
-            base_fingerprint=compute_base_fingerprint(
+        # The frozen base model never changes during a run; hashing its
+        # checkpoint directory (multi-GB) on every chunk stalled the robot
+        # for ~1.6s between chunks. Compute once and cache.
+        if getattr(self, "_base_fingerprint", None) is None:
+            self._base_fingerprint = compute_base_fingerprint(
                 str(self.cfg.actor.model.base_policy.get("model_path", "")),
                 norm_stats_path=str(
                     self.cfg.actor.model.get("openpi_data", {}).get(
@@ -781,7 +778,15 @@ class EnvWorker(Worker):
                     )
                 ),
                 codec=codec,
-            ),
+            )
+        transition, valid, _ = finalize_chunk_transition(
+            curr_obs=chunk_start_obs,
+            next_obs=env_output.final_obs or env_output.obs,
+            audit=audit,
+            feedback=feedback,
+            codec=codec,
+            source=source,
+            base_fingerprint=self._base_fingerprint,
             episode_id=int(
                 np.asarray(
                     (env_output.env_infos or {}).get("episode_id", [stage_id])
