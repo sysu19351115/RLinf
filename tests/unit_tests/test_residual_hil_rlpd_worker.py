@@ -312,6 +312,16 @@ def test_run_training_returns_metrics_dict_contract():
     assert worker.run_training() == {}
 
 
+def test_run_training_idle_buffer_returns_empty_metrics():
+    """Real-machine regression: with no transitions collected yet (e.g. the
+    operator has not pressed 'y' to start the first episode) the runner must
+    skip steps instead of spinning the global step counter."""
+    worker = _make_worker()
+    assert worker.init_worker()
+    assert worker.run_training() == {}
+    worker.stop()
+
+
 def test_residual_scale_parse_is_fail_closed():
     from rlinf.algorithms.residual_hil_rlpd.messages import build_scale_message
     from rlinf.workers.rollout.hf.residual_hil_rollout_worker import (
@@ -602,7 +612,9 @@ def test_env_to_actor_rejects_legacy_envelope():
         }
     )
     time.sleep(0.3)
+    # The malformed message is dropped and the buffer stays empty, so the
+    # runner must see an empty metrics dict (skip the step).
     metrics = worker.run_training()
-    assert metrics["online_size"] == 0
-    assert metrics.get("malformed_message_dropped", 0.0) >= 1.0
+    assert metrics == {}
+    assert getattr(worker, "_malformed_dropped", 0) >= 1
     worker.stop()

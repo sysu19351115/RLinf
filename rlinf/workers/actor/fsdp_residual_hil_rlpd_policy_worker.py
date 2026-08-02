@@ -191,7 +191,11 @@ class AsyncResidualHilRLPDWorker(Worker):
             updates += 1
         metrics["updates"] = float(updates)
         self._last_metrics = metrics
-        return metrics
+        # AsyncEmbodiedRunner skips the step when the metrics dict is empty;
+        # without this the global step counter spins while no training data
+        # exists (e.g. before the operator presses 'y' to start the first
+        # episode), burning weight syncs and checkpoints.
+        return metrics if updates > 0 else {}
 
     def get_policy_version(self):
         return int(self._learner.update_counter) if self._learner else 0

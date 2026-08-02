@@ -215,6 +215,49 @@ def test_rollout_result_split_merge_invariant():
     assert torch.equal(merged.versions, rollout_result.versions)
 
 
+def test_residual_audit_survives_single_env_split_merge():
+    """Real-machine regression: the residual composer returns [1, H, 8]
+    actions and a per-env audit dict; ``_split_rollout_result`` must carry the
+    audit into the shard (the env worker's finalizer needs it) instead of
+    dropping it, and must reject multi-env audit batches."""
+    import numpy as np
+
+    audit = {
+        "nominal_actions": np.zeros((10, 8), dtype=np.float32),
+        "sampled_gripper_mode": np.zeros(10, dtype=np.int64),
+        "commanded_actions": np.zeros((10, 8), dtype=np.float32),
+        "gripper_bypass_mask": np.zeros(10, dtype=bool),
+        "policy_version": 3,
+    }
+    rollout_result = RolloutResult(
+        actions=torch.zeros(1, 10, 8),
+        audit_info=audit,
+    )
+    worker = object.__new__(MultiStepRolloutWorker)
+
+    shards = worker._split_rollout_result(rollout_result, [1])
+    assert len(shards) == 1
+    assert shards[0].actions.shape == (1, 10, 8)
+    assert shards[0].audit_info["policy_version"] == 3
+
+    merged = RolloutResult.merge_rollout_results(shards)
+    assert torch.equal(merged.actions, rollout_result.actions)
+    assert set(merged.audit_info) == set(audit)
+    for key, value in audit.items():
+        if isinstance(value, np.ndarray):
+            np.testing.assert_array_equal(merged.audit_info[key], value)
+        else:
+            assert merged.audit_info[key] == value
+
+    import pytest
+
+    with pytest.raises(ValueError, match="single-env"):
+        worker._split_rollout_result(
+            RolloutResult(actions=torch.zeros(2, 10, 8), audit_info=audit),
+            [1, 1],
+        )
+
+
 def test_merge_env_outputs_with_partial_optional_fields():
     env_output_0 = EnvOutput(
         obs=_make_obs(0, 2),

@@ -1172,12 +1172,27 @@ class MultiStepRolloutWorker(Worker):
                 return tuple(None for _ in sizes)
             return tuple(torch.split(tensor, sizes, dim=0))
 
+        def _split_audit_info(
+            audit: dict[str, Any],
+        ) -> list[dict[str, Any]]:
+            if not audit:
+                return [{} for _ in sizes]
+            # residual_hil_rlpd is single-env only (validated at config and
+            # worker init); audit arrays are already per-env [H, ...].
+            if len(sizes) != 1:
+                raise ValueError(
+                    "residual_hil_rlpd audit only supports single-env batches; "
+                    f"got split sizes {sizes}"
+                )
+            return [audit]
+
         split_actions = _split_optional_tensor(rollout_result.actions)
         split_prev_logprobs = _split_optional_tensor(rollout_result.prev_logprobs)
         split_prev_values = _split_optional_tensor(rollout_result.prev_values)
         split_bootstrap_values = _split_optional_tensor(rollout_result.bootstrap_values)
         split_intervene_flags = _split_optional_tensor(rollout_result.intervene_flags)
         split_versions = _split_optional_tensor(rollout_result.versions)
+        split_audits = _split_audit_info(rollout_result.audit_info)
         split_forward_inputs = (
             [{} for _ in sizes]
             if not rollout_result.forward_inputs
@@ -1200,6 +1215,7 @@ class MultiStepRolloutWorker(Worker):
                 intervene_flags=split_intervene_flags[idx],
                 forward_inputs=split_forward_inputs[idx],
                 versions=split_versions[idx],
+                audit_info=split_audits[idx],
             )
             for idx in range(len(sizes))
         ]

@@ -335,9 +335,13 @@ class Pi05ResidualComposer:
             "gripper_bypass_mask": np.asarray(bypass_out, dtype=bool),
             "policy_version": int(policy_version),
         }
+        # Keep the [B, H, 8] batch dim for the RolloutResult transport
+        # contract (``_split_rollout_result`` splits along the batch dim);
+        # the audit dict intentionally stays per-env [H, ...] for the
+        # env-worker finalizer.
         return (
             torch.as_tensor(
-                commanded_out,
+                commanded,
                 dtype=nominal_actions.dtype,
                 device=nominal_actions.device,
             ),

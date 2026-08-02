@@ -253,9 +253,9 @@ def test_pi05_composer_accepts_real_camera_hwc_uint8():
         nominal, env_obs, residual_scale=0.0, deterministic=True
     )
 
-    assert commanded.shape == (10, 8)
+    assert commanded.shape == (1, 10, 8)
     np.testing.assert_allclose(
-        commanded[:, :7], audit["nominal_actions"][:, :7], atol=1e-6
+        commanded[0, :, :7], audit["nominal_actions"][:, :7], atol=1e-6
     )
 
 
@@ -285,13 +285,13 @@ def test_pi05_composer_enforces_policy_rotation_limit(monkeypatch):
     )
 
     for i in range(10):
-        delta = commanded[i, :3] - nominal[0, i, :3]
+        delta = commanded[0, i, :3] - nominal[0, i, :3]
         assert np.abs(delta).max() <= 0.0101
         # Rotation angle must stay within the 5 deg policy limit.
         from scipy.spatial.transform import Rotation
 
         q_nom = nominal[0, i, 3:7]
-        q_exec = commanded[i, 3:7]
+        q_exec = commanded[0, i, 3:7]
         if np.dot(q_nom, q_exec) < 0:
             q_exec = -q_exec
         angle = (
@@ -330,7 +330,9 @@ def test_pi05_composer_base_only_records_effective_keep(monkeypatch):
 
     assert (audit["sampled_gripper_mode"] == 0).all()
     assert (audit["raw_sampled_gripper_mode"] == 2).all()
-    np.testing.assert_allclose(commanded[:, 7], np.full(10, float(nominal[0, 0, 7])))
+    np.testing.assert_allclose(
+        commanded[0, :, 7], np.full(10, float(nominal[0, 0, 7]))
+    )
 
 
 def test_pi05_composer_gripper_enable_and_rate_limits(monkeypatch):
