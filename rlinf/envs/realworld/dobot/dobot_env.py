@@ -725,12 +725,14 @@ class DobotEnv(gym.Env):
         is_gripper_effective = False
         accepted = True
         if not self.config.is_dummy:
+            t_send = time.perf_counter()
             # Periodic RobotMode health check (throttled to ~1 Hz).
             self._check_robot_health()
 
             accepted = self._controller.send_action(
                 executed_action, action_mode=self.config.action_mode
             ).wait()[0]
+            t_send = time.perf_counter() - t_send
             if not accepted:
                 self._servo_rejected_count += 1
                 if (
@@ -751,9 +753,15 @@ class DobotEnv(gym.Env):
         time.sleep(max(0.0, (1.0 / self.config.step_frequency) - step_time))
 
         if not self.config.is_dummy:
+            t_state = time.perf_counter()
             self._state, self._prev_state = self._read_state_and_prev()
+            t_state = time.perf_counter() - t_state
+        else:
+            t_send = t_state = 0.0
 
+        t_obs = time.perf_counter()
         observation = self._get_observation()
+        t_obs = time.perf_counter() - t_obs
         reward = self._calc_step_reward(observation, is_gripper_effective)
 
         terminated = False
@@ -770,6 +778,21 @@ class DobotEnv(gym.Env):
         }
         if not accepted:
             info["action_rejection_reason"] = "safety_guard"
+        # Per-phase step timing (every 50 steps): pinpoints the ~200ms/step
+        # stall observed as ~4-5 Hz servo rate instead of the configured 30 Hz.
+        self._step_log_count = getattr(self, "_step_log_count", 0) + 1
+        if self._step_log_count % 50 == 0:
+            total_ms = (time.time() - start_time) * 1000.0
+            self._logger.info(
+                "[Dobot] step=%d total=%.0fms send_action=%.0fms "
+                "read_state=%.0fms obs=%.0fms sleep=%.0fms",
+                self._num_steps,
+                total_ms,
+                t_send * 1000.0,
+                t_state * 1000.0,
+                t_obs * 1000.0,
+                max(0.0, (1.0 / self.config.step_frequency) - step_time) * 1000.0,
+            )
         return observation, reward, terminated, truncated, info
 
     @property
