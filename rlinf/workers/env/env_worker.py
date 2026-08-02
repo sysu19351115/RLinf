@@ -1853,6 +1853,8 @@ class EnvWorker(Worker):
                                 reward_model_output.detach().float().reshape(-1).cpu()
                             )
 
+                    if getattr(self, "residual_hil_rlpd_mode", False):
+                        _chunk_t0 = time.monotonic()
                     rollout_result = self.recv_from(
                         group_name=self.cfg.rollout.group_name,
                         channel=input_channel,
@@ -1863,6 +1865,8 @@ class EnvWorker(Worker):
                         infer_batch_size_fn=self._infer_rollout_batch_size,
                         decoupled_mode=self.env_decoupled_mode,
                     )
+                    if getattr(self, "residual_hil_rlpd_mode", False):
+                        _recv_ms = (time.monotonic() - _chunk_t0) * 1000.0
                     rewards = self.compute_bootstrap_rewards(
                         env_output, rollout_result.bootstrap_values, reward_model_output
                     )
@@ -1994,6 +1998,25 @@ class EnvWorker(Worker):
                                 **env_step_kwargs,
                             )
                         )
+                        if getattr(self, "residual_hil_rlpd_mode", False):
+                            _cycle_ms = (time.monotonic() - _chunk_t0) * 1000.0
+                            self._chunk_cycle_count = (
+                                getattr(self, "_chunk_cycle_count", 0) + 1
+                            )
+                            self._chunk_cycle_ema = (
+                                _cycle_ms
+                                if not hasattr(self, "_chunk_cycle_ema")
+                                else 0.8 * self._chunk_cycle_ema + 0.2 * _cycle_ms
+                            )
+                            if self._chunk_cycle_count % 5 == 0:
+                                self._logger.info(
+                                    "[ResidualHIL] env chunk cycle: last=%.0fms "
+                                    "recv_wait=%.0fms ema=%.0fms (chunk=%d)",
+                                    _cycle_ms,
+                                    _recv_ms,
+                                    self._chunk_cycle_ema,
+                                    self._chunk_cycle_count,
+                                )
                         if getattr(self, "residual_hil_rlpd_mode", False):
                             self._residual_observe_chunk(
                                 rollout_result,

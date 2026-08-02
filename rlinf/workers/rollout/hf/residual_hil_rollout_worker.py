@@ -226,6 +226,9 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
 
     async def sync_model_from_actor(self):
         """Feed learner weight patches into the residual actor (not Pi0.5)."""
+        import time
+
+        _sync_t0 = time.perf_counter()
 
         async def recv_func() -> Any:
             return await self.broadcast(
@@ -282,6 +285,11 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
             )
             self._residual_scale = 0.0
             self._gripper_enabled = False
+        self._logger.info(
+            "[ResidualHIL] weight sync completed in %.2fs (version=%s)",
+            time.perf_counter() - _sync_t0,
+            self.version,
+        )
         return True
 
     async def _send_scale_ack(self) -> None:
