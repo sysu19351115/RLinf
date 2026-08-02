@@ -814,6 +814,7 @@ class EnvWorker(Worker):
         if nominal_actions is None or nominal_actions.size == 0:
             return bypass_mask, None
         from rlinf.algorithms.residual_hil_rlpd.safety import (
+            VIOLATION_WORKSPACE,
             ResidualSafetyBarrier,
             SafetyLimits,
         )
@@ -845,12 +846,25 @@ class EnvWorker(Worker):
         )
         bypass_mask = np.zeros_like(bypass_mask)
         suppressed_mask = np.ones(nominal_actions.shape[0], dtype=bool)
+        # Log the actual violating coordinates (and the nominal chunk's xyz
+        # envelope) so the operator can calibrate safety_workspace_min/max_m:
+        # a repeated workspace trip with nominal itself outside the box means
+        # the limits, not the residual, are wrong for this robot/calibration.
+        violation_details = "; ".join(
+            f"{v.code}@{v.step}: {v.detail}" for v in violations[:3]
+        )
+        if any(v.code == VIOLATION_WORKSPACE for v in violations):
+            nominal_xyz = np.asarray(nominal_actions[..., :3], dtype=np.float64)
+            violation_details += (
+                " | nominal xyz range "
+                f"[{nominal_xyz.min(axis=0).tolist()} .. "
+                f"{nominal_xyz.max(axis=0).tolist()}]"
+            )
         self._logger.warning(
             "[ResidualHIL] pre-execution safety violations on chunk "
-            f"{self._residual_chunk_counter}: "
-            f"{[v.code for v in violations][:4]}; chunk replaced with "
-            f"nominal and {self._residual_safety_hold_remaining}-chunk "
-            "hold entered"
+            f"{self._residual_chunk_counter}: {violation_details}; chunk "
+            f"replaced with nominal and "
+            f"{self._residual_safety_hold_remaining}-chunk hold entered"
         )
         return bypass_mask, suppressed_mask
 
