@@ -2009,11 +2009,14 @@ class EnvWorker(Worker):
                                 else 0.8 * self._chunk_cycle_ema + 0.2 * _cycle_ms
                             )
                             if self._chunk_cycle_count % 5 == 0:
+                                _send_ms = getattr(self, "_last_send_obs_ms", -1.0)
                                 self._logger.info(
                                     "[ResidualHIL] env chunk cycle: last=%.0fms "
-                                    "recv_wait=%.0fms ema=%.0fms (chunk=%d)",
+                                    "recv_wait=%.0fms send_obs=%.0fms "
+                                    "ema=%.0fms (chunk=%d)",
                                     _cycle_ms,
                                     _recv_ms,
+                                    _send_ms,
                                     self._chunk_cycle_ema,
                                     self._chunk_cycle_count,
                                 )
@@ -2045,6 +2048,8 @@ class EnvWorker(Worker):
                                 )
                             self.record_env_metrics(env_metrics, env_info)
                     env_batch = env_output.to_dict()
+                    if getattr(self, "residual_hil_rlpd_mode", False):
+                        _send_t0 = time.monotonic()
                     self.send_to(
                         group_name=self.cfg.rollout.group_name,
                         channel=rollout_channel,
@@ -2061,6 +2066,9 @@ class EnvWorker(Worker):
                         route_key=stage_id if not self.env_decoupled_mode else None,
                         decoupled_mode=self.env_decoupled_mode,
                     )
+                    if getattr(self, "residual_hil_rlpd_mode", False):
+                        _send_ms = (time.monotonic() - _send_t0) * 1000.0
+                        self._last_send_obs_ms = _send_ms
                     if (
                         self.collect_transitions
                         and not self.enable_rlt
