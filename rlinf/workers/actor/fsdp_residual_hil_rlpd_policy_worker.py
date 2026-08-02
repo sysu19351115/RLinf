@@ -152,9 +152,16 @@ class AsyncResidualHilRLPDWorker(Worker):
         return True
 
     def run_training(self):
-        """One training tick: ingest pending transitions and run RLPD updates."""
+        """One training tick: ingest pending transitions and run RLPD updates.
+
+        Returns the metrics dict.  ``AsyncEmbodiedRunner`` expects
+        ``actor.run_training()`` to return a metrics dict (an empty dict means
+        no training happened and the runner skips the step); the previous
+        ``(True, metrics)`` tuple crashed ``_aggregate_numeric_metrics`` with
+        ``'tuple' object has no attribute 'items'``.
+        """
         if self._learner is None:
-            return False, self._last_metrics
+            return {}
         with self._lock:
             pending = list(self._pending)
             self._pending.clear()
@@ -184,7 +191,7 @@ class AsyncResidualHilRLPDWorker(Worker):
             updates += 1
         metrics["updates"] = float(updates)
         self._last_metrics = metrics
-        return True, metrics
+        return metrics
 
     def get_policy_version(self):
         return int(self._learner.update_counter) if self._learner else 0

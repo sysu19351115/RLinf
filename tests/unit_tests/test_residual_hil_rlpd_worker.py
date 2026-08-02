@@ -257,8 +257,8 @@ def test_worker_in_process_train_sync_checkpoint(tmp_path):
     worker._pending.append(
         _transition(0, 1, human=True, base_fingerprint=expected_fingerprint)
     )
-    ok, metrics = worker.run_training()
-    assert ok
+    metrics = worker.run_training()
+    assert isinstance(metrics, dict)
     assert metrics["demo_size"] >= 1
     assert worker.get_policy_version() >= 0
 
@@ -301,6 +301,15 @@ def test_worker_in_process_train_sync_checkpoint(tmp_path):
         Worker.__dict__.pop("torch_platform", None)
     else:
         Worker.torch_platform = saved_platform
+
+
+def test_run_training_returns_metrics_dict_contract():
+    """``AsyncEmbodiedRunner`` expects ``run_training`` to return a metrics
+    dict; the previous ``(True, metrics)`` tuple crashed the runner's
+    ``_aggregate_numeric_metrics``.  An uninitialized learner must report an
+    empty dict so the runner skips the step."""
+    worker = _make_worker()
+    assert worker.run_training() == {}
 
 
 def test_residual_scale_parse_is_fail_closed():
@@ -572,8 +581,7 @@ def test_env_to_actor_transition_channel_round_trip():
     )
     channel.put(message)
     time.sleep(0.3)  # let the drain thread pick the message up
-    ok, metrics = worker.run_training()
-    assert ok
+    metrics = worker.run_training()
     assert metrics["online_size"] == 1
     assert metrics["demo_size"] == 1
     assert worker._learner.buffer.sizes()["online"] == 1
@@ -594,8 +602,7 @@ def test_env_to_actor_rejects_legacy_envelope():
         }
     )
     time.sleep(0.3)
-    ok, metrics = worker.run_training()
-    assert ok
+    metrics = worker.run_training()
     assert metrics["online_size"] == 0
     assert metrics.get("malformed_message_dropped", 0.0) >= 1.0
     worker.stop()
