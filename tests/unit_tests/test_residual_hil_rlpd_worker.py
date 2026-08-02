@@ -426,6 +426,116 @@ def test_initial_weight_sync_makes_rollout_equal_learner():
         torch.testing.assert_close(rollout_actor.state_dict()[name], target)
 
 
+def test_actor_syncer_matches_rollout_factory_transport_device():
+    """P0 regression (real-machine startup crash).
+
+    ``AsyncResidualHilRLPDWorker.sync_model_to_rollout`` used to hand-roll its
+    patch syncer from top-level config keys that are not set in the YAML, which
+    defaulted the sender transport to CPU while the rollout receiver's factory
+    (``WeightSyncer.create``) defaulted it to ``Worker.torch_device_type``.
+    The init-sync buckets were therefore shipped on CPU and the receiver
+    crashed with ``RuntimeError: Tensor device type does not match the worker
+    device type``.  The actor must build its syncer from the same factory and
+    transport the state dict on the accelerator.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("requires an accelerator")
+    saved_device_type = getattr(Worker, "torch_device_type", None)
+    saved_platform = getattr(Worker, "torch_platform", None)
+    Worker.torch_device_type = "cuda"
+    Worker.torch_platform = torch.cuda
+
+    from rlinf.hybrid_engines.weight_syncer import WeightSyncer
+    from rlinf.models.embodiment.residual_dobot_policy import ResidualDobotActor
+
+    try:
+        worker = object.__new__(AsyncResidualHilRLPDWorker)
+        worker.weight_syncer = None
+        worker.cfg = OmegaConf.create(
+            {
+                "weight_syncer": {
+                    "type": "patch",
+                    "patch": {
+                        "snapshot_device": "cpu",
+                        "delta_encoding": True,
+                        "compression": "none",
+                        "init_sync": {
+                            "enabled": True,
+                            "prefixes": None,
+                            "bucket_size": 1 << 20,
+                        },
+                    },
+                }
+            }
+        )
+        worker._build_weight_syncer()
+        sender = worker.weight_syncer
+        # Rollout side builds from the same config block via the factory.
+        receiver = WeightSyncer.create(worker.cfg.weight_syncer)
+
+        assert sender.transport_device.type == Worker.torch_device_type
+        assert receiver.transport_device.type == sender.transport_device.type
+
+        torch.manual_seed(0)
+        sender_model = ResidualDobotActor(hidden=32, image_channels=3).to("cuda")
+        torch.manual_seed(1)
+        receiver_model = ResidualDobotActor(hidden=32, image_channels=3).to("cuda")
+
+        class _Transport:
+            def __init__(self):
+                self.a2b = asyncio.Queue()
+                self.b2a = asyncio.Queue()
+
+            async def sender_send(self, value):
+                await self.a2b.put(value)
+
+            async def sender_recv(self):
+                return await self.b2a.get()
+
+            async def receiver_send(self, value):
+                await self.b2a.put(value)
+
+            async def receiver_recv(self):
+                return await self.a2b.get()
+
+        state = {
+            name: value.detach().float()
+            for name, value in sender_model.state_dict().items()
+        }
+        transport = _Transport()
+
+        async def _run():
+            await asyncio.gather(
+                sender.init_sender(
+                    state_dict=state,
+                    param_names_need_sync=list(state.keys()),
+                    send=transport.sender_send,
+                    recv=transport.sender_recv,
+                ),
+                receiver.init_receiver(
+                    state_dict=receiver_model.state_dict(),
+                    recv=transport.receiver_recv,
+                    send=transport.receiver_send,
+                ),
+            )
+            await sender.sync(state, transport.sender_send, version=3)
+            await receiver.apply(receiver_model, transport.receiver_recv)
+
+        asyncio.run(_run())
+
+        for name, target in sender_model.state_dict().items():
+            torch.testing.assert_close(receiver_model.state_dict()[name], target)
+    finally:
+        if saved_device_type is None:
+            Worker.__dict__.pop("torch_device_type", None)
+        else:
+            Worker.torch_device_type = saved_device_type
+        if saved_platform is None:
+            Worker.__dict__.pop("torch_platform", None)
+        else:
+            Worker.torch_platform = saved_platform
+
+
 def test_env_to_actor_transition_channel_round_trip():
     """P0 regression: the env worker's message envelope must survive a real
     Channel and be ingested by the actor worker (strict schema on)."""

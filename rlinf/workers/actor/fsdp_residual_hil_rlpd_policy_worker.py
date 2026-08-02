@@ -192,30 +192,45 @@ class AsyncResidualHilRLPDWorker(Worker):
     def get_residual_scale(self):
         return float(self._learner.residual_scale()) if self._learner else 0.0
 
+    def _build_weight_syncer(self) -> None:
+        """Build the actor's patch syncer from the standard config factory.
+
+        The rollout receiver builds its syncer with ``WeightSyncer.create`` on
+        the same ``weight_syncer`` config block, where ``transport_device``
+        defaults to ``Worker.torch_device_type``.  The previous hand-rolled
+        construction read top-level config keys that are not set in the YAML
+        (the values live under ``weight_syncer.patch.*``) and therefore
+        defaulted the transport to CPU, while the receiver expected accelerator
+        tensors; the init-sync buckets then crashed on the receiver in
+        ``tensors_record_stream`` with a device-type mismatch.  Using the same
+        factory keeps both sides on a single truth source (P2-8).
+        """
+        if getattr(self, "weight_syncer", None) is not None:
+            return
+        wcfg = self.cfg.get("weight_syncer", None)
+        if wcfg is None:
+            raise ValueError(
+                "actor.weight_syncer config must be provided for "
+                "residual HIL-RLPD weight sync"
+            )
+        from rlinf.hybrid_engines.weight_syncer import WeightSyncer
+
+        self.weight_syncer = WeightSyncer.create(wcfg)
+        self._sync_weight_comm_options = self.weight_syncer.comm_options
+
     async def sync_model_to_rollout(self):
         """Send residual actor weight patches to the rollout worker."""
         if self._learner is None:
             return None
-        from rlinf.hybrid_engines.weight_syncer import PatchWeightSyncer
-
+        self._build_weight_syncer()
+        # Keep the source state dict on the accelerator: the patch syncer's
+        # CPU-snapshot path requires accelerator source tensors, and the
+        # init-sync buckets must land on the same device the rollout receiver
+        # expects (Worker.torch_device_type).
         state_dict = {
-            name: tensor.detach().cpu().float()
+            name: tensor.detach().float()
             for name, tensor in self._learner.actor.state_dict().items()
         }
-        if self.weight_syncer is None:
-            wcfg = self.cfg.get("weight_syncer", {})
-            init_cfg = wcfg.get("init_sync", {})
-            self.weight_syncer = PatchWeightSyncer(
-                snapshot_device=wcfg.get("snapshot_device", "cpu"),
-                transport_device=wcfg.get("transport_device", "cpu"),
-                delta_encoding=bool(wcfg.get("delta_encoding", True)),
-                compression_algorithm=wcfg.get("compression_algorithm", "none"),
-                init_sync_enabled=bool(init_cfg.get("enabled", False)),
-                init_sync_prefixes=init_cfg.get("prefixes", None),
-                init_sync_bucket_size=int(
-                    init_cfg.get("bucket_size", 128 * 1024 * 1024)
-                ),
-            )
 
         async def send_func(data):
             if not getattr(self, "_is_weight_sender", True):
