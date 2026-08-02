@@ -410,3 +410,72 @@ def test_pi05_composer_gripper_enable_and_rate_limits(monkeypatch):
         deterministic=True,
     )
     assert (audit["sampled_gripper_mode"] == KEEP_NOMINAL).all()
+
+
+def test_worker_eval_mode_uses_deterministic_composition(monkeypatch):
+    """Eval mode (periodic evaluate or only_eval) must compose deterministically;
+    training must keep stochastic sampling."""
+    from rlinf.workers.rollout.hf.huggingface_worker import MultiStepRolloutWorker
+    from rlinf.workers.rollout.hf.residual_hil_rollout_worker import (
+        ResidualHILRolloutWorker,
+    )
+
+    worker = object.__new__(ResidualHILRolloutWorker)
+    worker._eval_mode = False
+    worker.only_eval = False
+    worker._residual_scale = 0.0
+    worker._gripper_enabled = False
+    worker.version = 1
+    worker._last_env_obs = {
+        "main_images": torch.zeros(1, 8, 8, 3, dtype=torch.uint8),
+        "prev_states": torch.zeros(1, 8),
+    }
+    calls: list[bool] = []
+
+    class _FakeComposer:
+        def compose_chunk(
+            self,
+            actions,
+            env_obs,
+            *,
+            residual_scale,
+            gripper_enabled,
+            deterministic,
+            policy_version,
+        ):
+            calls.append(deterministic)
+            commanded = torch.zeros(10, 8)
+            audit = {
+                "nominal_actions": np.zeros((10, 8), dtype=np.float32),
+                "sampled_arm_residual": np.zeros((10, 6), dtype=np.float32),
+                "sampled_gripper_mode": np.zeros(10, dtype=np.int64),
+                "commanded_actions": commanded.numpy(),
+                "gripper_bypass_mask": np.zeros(10, dtype=bool),
+                "policy_version": 1,
+            }
+            return commanded, audit
+
+    worker.residual_composer = _FakeComposer()
+
+    class _FakeRolloutResult:
+        def __init__(self):
+            self.actions = None
+            self.audit_info = None
+
+    monkeypatch.setattr(
+        MultiStepRolloutWorker,
+        "_build_rollout_result",
+        lambda self, actions, result, **kwargs: _FakeRolloutResult(),
+    )
+
+    worker._build_rollout_result(torch.zeros(10, 8), {})
+    assert calls[-1] is False
+
+    worker._eval_mode = True
+    worker._build_rollout_result(torch.zeros(10, 8), {})
+    assert calls[-1] is True
+
+    worker._eval_mode = False
+    worker.only_eval = True
+    worker._build_rollout_result(torch.zeros(10, 8), {})
+    assert calls[-1] is True

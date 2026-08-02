@@ -32,6 +32,7 @@ from rlinf.models.embodiment.residual_dobot_policy import ResidualDobotActor
 from rlinf.workers.rollout.hf.async_huggingface_worker import (
     AsyncMultiStepRolloutWorker,
 )
+from rlinf.workers.rollout.hf.huggingface_worker import _TensorPaddingSpec
 
 
 class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
@@ -53,9 +54,7 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
             device=self.device,
             policy_translation_scale_m=tuple(rlpd_cfg.translation_policy_limit_m),
             policy_rotation_scale_deg=tuple(rlpd_cfg.rotation_policy_limit_deg),
-            gripper_max_switches_per_chunk=int(
-                rlpd_cfg.gripper_max_switches_per_chunk
-            ),
+            gripper_max_switches_per_chunk=int(rlpd_cfg.gripper_max_switches_per_chunk),
             gripper_min_hold_steps=int(rlpd_cfg.gripper_min_hold_steps),
             gripper_debounce_chunks=int(rlpd_cfg.gripper_debounce_chunks),
         )
@@ -64,6 +63,8 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
         self._residual_scale = 0.0
         self._gripper_enabled = False
         self._run_id = str(cfg.get("run_id", ""))
+        # Eval mode: deterministic residual composition during evaluate().
+        self._eval_mode = False
 
     def set_residual_scale(self, scale: float) -> None:
         self._residual_scale = float(scale)
@@ -73,9 +74,7 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
     def _parse_scale_message(message: Any, applied_version: int) -> float:
         """Fail-closed scale update; ``applied_version`` is the weight version
         already applied by ``PatchWeightSyncer`` (scale must bind to it)."""
-        scale, _ = parse_scale_message(
-            message, applied_version=applied_version
-        )
+        scale, _ = parse_scale_message(message, applied_version=applied_version)
         return scale
 
     def _predict_rollout_actions(self, env_obs, **kwargs):
@@ -102,12 +101,109 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
             self._last_env_obs,
             residual_scale=self._residual_scale,
             gripper_enabled=self._gripper_enabled,
-            deterministic=False,
+            deterministic=self._eval_mode or bool(getattr(self, "only_eval", False)),
             policy_version=self.version,
         )
         rollout_result.actions = commanded
         rollout_result.audit_info = audit
         return rollout_result
+
+    async def evaluate(self, input_channel, output_channel):
+        """Residual-aware evaluation with deterministic composed chunks.
+
+        The base path forwards raw nominal actions during evaluation, which
+        would silently bypass the residual actor.  This override composes the
+        frozen Pi0.5 output with the residual policy through
+        ``_build_rollout_result`` (deterministic in eval mode) and sends a
+        ``RolloutResult`` so the env worker can apply gripper bypass masks.
+        V1 is single-env non-decoupled; decoupled evaluation fails closed.
+        """
+        if self.env_decoupled_mode:
+            raise NotImplementedError(
+                "residual_hil_rlpd evaluation requires non-decoupled mode "
+                "(V1 single env)"
+            )
+        previous_eval_mode = self._eval_mode
+        self._eval_mode = True
+        try:
+            from tqdm import tqdm
+
+            for _ in tqdm(
+                range(self.eval_rollout_epoch),
+                desc="Evaluating Rollout Epochs",
+                disable=(self._rank != 0),
+            ):
+                eval_action_specs: list[_TensorPaddingSpec | None] | None = (
+                    self._new_padding_spec_slots(
+                        enabled=self.eval_terminal_padding_enabled,
+                        num_pipeline_stages=self.num_pipeline_stages,
+                    )
+                )
+                for _ in range(self.n_eval_chunk_steps):
+                    for stage_id in range(self.num_pipeline_stages):
+                        env_output = await self.recv_from(
+                            group_name=self.cfg.env.group_name,
+                            channel=input_channel,
+                            tag="eval_rollout_results",
+                            route_key=stage_id,
+                            async_op=True,
+                            batch_size=self.eval_batch_size,
+                            merge_fn=self._merge_obs_batches,
+                            infer_batch_size_fn=self._infer_env_batch_size,
+                        ).async_wait()
+                        if self._is_full_rollout_padding(env_output):
+                            if eval_action_specs is None:
+                                raise RuntimeError(
+                                    "Received rollout_padding while "
+                                    "env.eval.terminal_padding.enabled is false."
+                                )
+                            action_spec = eval_action_specs[stage_id]
+                            if action_spec is None:
+                                raise RuntimeError(
+                                    "eval rollout_padding was requested before "
+                                    "a valid action specification was captured."
+                                )
+                            rollout_result = action_spec.materialize()
+                        else:
+                            actions, result = self._predict_rollout_actions(
+                                env_output["obs"],
+                                mode="eval",
+                                final_obs=env_output.get("final_obs", None),
+                                rlt_switch_flags=env_output.get(
+                                    "rlt_switch_flags", None
+                                ),
+                                intervene_requested=env_output.get(
+                                    "intervene_flags", None
+                                ),
+                            )
+                            rollout_result = self._build_rollout_result(
+                                actions,
+                                result,
+                                final_obs=env_output.get("final_obs", None),
+                            )
+                            if (
+                                eval_action_specs is not None
+                                and eval_action_specs[stage_id] is None
+                            ):
+                                eval_action_specs[stage_id] = (
+                                    _TensorPaddingSpec.capture(
+                                        torch.as_tensor(rollout_result.actions)
+                                        .detach()
+                                        .cpu()
+                                    )
+                                )
+                        self.send_to(
+                            group_name=self.cfg.env.group_name,
+                            channel=output_channel,
+                            data=rollout_result,
+                            tag="eval_rollout_results",
+                            route_key=stage_id,
+                            async_op=True,
+                            batch_size=self.eval_batch_size,
+                            split_fn=self._split_rollout_result,
+                        )
+        finally:
+            self._eval_mode = previous_eval_mode
 
     async def sync_model_from_actor(self):
         """Feed learner weight patches into the residual actor (not Pi0.5)."""
@@ -163,8 +259,7 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
             await self._send_scale_ack()
         except Exception:
             self._logger.warning(
-                "[ResidualHIL] Failed to receive residual scale; "
-                "staying nominal-only",
+                "[ResidualHIL] Failed to receive residual scale; staying nominal-only",
             )
             self._residual_scale = 0.0
             self._gripper_enabled = False

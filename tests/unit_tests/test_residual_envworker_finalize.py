@@ -247,9 +247,7 @@ def test_real_finalize_keeps_terminal_chunk_and_uses_next_nominal():
     codec = ResidualCodec()
     rng = np.random.default_rng(0)
     audit0, feedback0 = _chunk_audit_and_feedback(rng, codec, CHUNK_LEN)
-    audit1, feedback1 = _chunk_audit_and_feedback(
-        rng, codec, CHUNK_LEN, terminate=True
-    )
+    audit1, feedback1 = _chunk_audit_and_feedback(rng, codec, CHUNK_LEN, terminate=True)
 
     env0 = EnvOutput(
         obs=_obs(0.0),
@@ -358,12 +356,8 @@ def test_pre_execution_safety_violation_holds_nominal():
     assert suppressed is not None and suppressed.all()
     assert not new_bypass.any()
     # The commanded actions were replaced by nominal *before execution*.
-    np.testing.assert_allclose(
-        actions[0, :, :7].numpy(), nominal[:, :7], atol=1e-6
-    )
-    np.testing.assert_allclose(
-        actions[0, :, 7].numpy(), nominal[:, 7], atol=1e-6
-    )
+    np.testing.assert_allclose(actions[0, :, :7].numpy(), nominal[:, :7], atol=1e-6)
+    np.testing.assert_allclose(actions[0, :, 7].numpy(), nominal[:, 7], atol=1e-6)
 
 
 def test_safety_violated_chunk_rejected_at_finalize():
@@ -410,3 +404,60 @@ def test_suppressed_gripper_label_matches_executed_keep():
     )
     assert transition is not None
     assert np.all(np.asarray(transition.actions_gripper)[:, 0] == 1.0)  # KEEP
+
+
+def test_env_evaluate_step_forwards_gripper_bypass_mask(monkeypatch):
+    """Evaluation must forward the model gripper bypass mask to the env, so
+    FORCE_CLOSE/FORCE_OPEN execute correctly during autonomous eval."""
+    import rlinf.workers.env.env_worker as env_worker_module
+
+    worker = object.__new__(EnvWorker)
+    worker.cfg = OmegaConf.create(
+        {
+            "env": {
+                "eval": {
+                    "env_type": "realworld_dobot",
+                    "auto_reset": False,
+                    "override_cfg": {"step_frequency": 1.0},
+                }
+            }
+        }
+    )
+    worker.model_cfg = OmegaConf.create(
+        {
+            "model_type": "residual_dobot_policy",
+            "num_action_chunks": CHUNK_LEN,
+            "action_dim": 8,
+        }
+    )
+    worker.use_external_reward_model = False
+    worker.eval_prev_done = [torch.zeros(1, dtype=torch.bool)]
+
+    captured: dict[str, object] = {}
+
+    class _FakeEvalEnv:
+        def chunk_step(self, chunk_actions, gripper_bypass_mask=None):
+            captured["mask"] = gripper_bypass_mask
+            obs = np.zeros((8, 8, 3), dtype=np.uint8)
+            return (
+                [{"main_images": obs, "prev_states": np.zeros(8, dtype=np.float32)}],
+                torch.zeros(1, CHUNK_LEN, dtype=torch.float32),
+                torch.zeros(1, CHUNK_LEN, dtype=torch.bool),
+                torch.zeros(1, CHUNK_LEN, dtype=torch.bool),
+                [{}],
+            )
+
+    worker.eval_env_list = [_FakeEvalEnv()]
+    monkeypatch.setattr(
+        env_worker_module,
+        "prepare_actions",
+        lambda **kwargs: torch.zeros(1, CHUNK_LEN, 8),
+    )
+    mask = np.zeros(CHUNK_LEN, dtype=bool)
+    mask[2] = True
+    worker.env_evaluate_step(
+        torch.zeros(1, CHUNK_LEN, 8),
+        0,
+        gripper_bypass_mask=mask,
+    )
+    assert captured["mask"] is mask

@@ -13,6 +13,7 @@
 | 示例5 | SO101 人在环（HIL）数据采集 | [docs/examples/so101_hil_data_collection.md](docs/examples/so101_hil_data_collection.md) |
 | 示例6 | Dobot CR5AF + PI0.5 + PPO 真机训练 | [docs/examples/dobot_pi05_ppo.md](docs/examples/dobot_pi05_ppo.md) |
 | 示例7 | Dobot CR5AF 人在环（HIL）数据采集 | [docs/examples/dobot_hil_data_collection.md](docs/examples/dobot_hil_data_collection.md) |
+| 示例8 | Dobot CR5AF + 冻结 PI0.5 + Residual HIL-RLPD 真机训练 | [docs/examples/dobot_residual_hil_rlpd.md](docs/examples/dobot_residual_hil_rlpd.md) |
 
 ## 通用资源
 

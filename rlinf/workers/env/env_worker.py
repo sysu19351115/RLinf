@@ -170,8 +170,7 @@ class EnvWorker(Worker):
             )
             self.train_batch_size = self.cfg.env.train.total_num_envs // self.stage_num
             if self.residual_hil_rlpd_mode and (
-                self.train_num_envs_per_stage != 1
-                or self.train_batch_size != 1
+                self.train_num_envs_per_stage != 1 or self.train_batch_size != 1
             ):
                 raise ValueError(
                     "residual_hil_rlpd supports a single env per stage "
@@ -714,7 +713,10 @@ class EnvWorker(Worker):
         # chunk (human takeover / safety hold), the *training label* must match
         # the executed command (KEEP), not the raw model sample.
         suppressed_mask = getattr(self, "_residual_gripper_suppressed_mask", None)
-        if suppressed_mask is not None and suppressed_mask.size == sampled_gripper_mode.size:
+        if (
+            suppressed_mask is not None
+            and suppressed_mask.size == sampled_gripper_mode.size
+        ):
             sampled_gripper_mode = sampled_gripper_mode.copy()
             sampled_gripper_mode[suppressed_mask] = 0  # KEEP_NOMINAL
         audit = RolloutChunkAudit(
@@ -818,9 +820,7 @@ class EnvWorker(Worker):
 
         if self._residual_safety_barrier is None:
             self._residual_safety_barrier = ResidualSafetyBarrier(
-                SafetyLimits.from_config(
-                    self.cfg.algorithm.residual_hil_rlpd
-                )
+                SafetyLimits.from_config(self.cfg.algorithm.residual_hil_rlpd)
             )
         commanded_np = rollout_result.actions.detach().cpu().float().numpy()
         if commanded_np.ndim == 3:
@@ -867,21 +867,13 @@ class EnvWorker(Worker):
             return
         # P2-4: human takeover, handoff hold or controller rejection disables
         # model gripper override for the next ``gripper_debounce_chunks``.
-        human = np.asarray(
-            feedback_data.get("human_intervention_mask", []), dtype=bool
-        )
-        handoff = np.asarray(
-            feedback_data.get("handoff_hold_mask", []), dtype=bool
-        )
-        accepted = np.asarray(
-            feedback_data.get("executed_action_mask", []), dtype=bool
-        )
+        human = np.asarray(feedback_data.get("human_intervention_mask", []), dtype=bool)
+        handoff = np.asarray(feedback_data.get("handoff_hold_mask", []), dtype=bool)
+        accepted = np.asarray(feedback_data.get("executed_action_mask", []), dtype=bool)
         rejected = accepted.size > 0 and not bool(accepted.all())
         if bool(human.any()) or bool(handoff.any()) or rejected:
             debounce = int(
-                self.cfg.algorithm.residual_hil_rlpd.get(
-                    "gripper_debounce_chunks", 2
-                )
+                self.cfg.algorithm.residual_hil_rlpd.get("gripper_debounce_chunks", 2)
             )
             self._residual_gripper_inhibit_remaining = max(
                 self._residual_gripper_inhibit_remaining, debounce
@@ -1118,7 +1110,10 @@ class EnvWorker(Worker):
             )
 
     def env_evaluate_step(
-        self, raw_actions: torch.Tensor, stage_id: int
+        self,
+        raw_actions: torch.Tensor,
+        stage_id: int,
+        gripper_bypass_mask: np.ndarray | None = None,
     ) -> tuple[EnvOutput, dict[str, Any]]:
         """
         This function is used to evaluate the environment.
@@ -1136,7 +1131,10 @@ class EnvWorker(Worker):
         env_info = {}
 
         obs_list, _, chunk_terminations, chunk_truncations, infos_list = (
-            self.eval_env_list[stage_id].chunk_step(chunk_actions)
+            self.eval_env_list[stage_id].chunk_step(
+                chunk_actions,
+                gripper_bypass_mask=gripper_bypass_mask,
+            )
         )
         if isinstance(obs_list, (list, tuple)):
             extracted_obs = obs_list[-1] if obs_list else None
@@ -1898,9 +1896,7 @@ class EnvWorker(Worker):
                                 )
                             else:
                                 nominal_actions = None
-                            force_safety_hold = (
-                                self._residual_safety_hold_remaining > 0
-                            )
+                            force_safety_hold = self._residual_safety_hold_remaining > 0
                             if force_safety_hold:
                                 self._residual_safety_hold_remaining -= 1
                             suppress_gripper = (
@@ -1938,16 +1934,12 @@ class EnvWorker(Worker):
                         # replaced with nominal here (never executed as-is),
                         # a hold is entered, and the transition is marked
                         # invalid at finalization.
-                        bypass_mask, barrier_suppressed = (
-                            self._residual_safety_check(
-                                rollout_result, nominal_actions, bypass_mask
-                            )
+                        bypass_mask, barrier_suppressed = self._residual_safety_check(
+                            rollout_result, nominal_actions, bypass_mask
                         )
                         if barrier_suppressed is not None:
                             suppressed_mask = barrier_suppressed
-                            self._residual_gripper_suppressed_mask = (
-                                suppressed_mask
-                            )
+                            self._residual_gripper_suppressed_mask = suppressed_mask
                         env_step_kwargs = {}
                         if bypass_mask is not None:
                             env_step_kwargs["gripper_bypass_mask"] = bypass_mask
@@ -2159,9 +2151,7 @@ class EnvWorker(Worker):
 
         if getattr(self, "residual_hil_rlpd_mode", False):
             env_metrics["residual/safety_violations"].append(
-                torch.tensor(
-                    [self._residual_safety_violations], dtype=torch.float32
-                )
+                torch.tensor([self._residual_safety_violations], dtype=torch.float32)
             )
             env_metrics["residual/chunk_counter"].append(
                 torch.tensor([self._residual_chunk_counter], dtype=torch.float32)
@@ -2259,12 +2249,28 @@ class EnvWorker(Worker):
                         raw_chunk_actions = raw_chunk_actions.detach().cpu().numpy()
                     else:
                         raw_chunk_actions = np.asarray(raw_chunk_actions)
+                    bypass_mask = None
+                    if getattr(self, "residual_hil_rlpd_mode", False) and hasattr(
+                        rollout_results, "audit_info"
+                    ):
+                        audit_data = rollout_results.audit_info
+                        audit_dict = (
+                            audit_data[-1]
+                            if isinstance(audit_data, list)
+                            else audit_data
+                        )
+                        bypass_mask = np.asarray(
+                            audit_dict.get("gripper_bypass_mask", []),
+                            dtype=bool,
+                        )
                     if eval_padding_active[stage_id]:
                         env_output = self._make_terminal_padding_env_output(env_output)
                         env_info = {}
                     else:
                         env_output, env_info = self.env_evaluate_step(
-                            raw_chunk_actions, stage_id
+                            raw_chunk_actions,
+                            stage_id,
+                            gripper_bypass_mask=bypass_mask,
                         )
                         if (
                             not self.cfg.env.eval.auto_reset
