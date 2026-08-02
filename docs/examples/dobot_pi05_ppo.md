@@ -133,6 +133,13 @@ Expected [2097152] but got [2048, 1024]
 
 当前一个 episode 为 `1000 / 10 = 100` 个 chunk，`rollout_epoch=2`，所以每轮产生 200 个 chunk；它能被 `global_batch_size=100` 整除。
 
+### 人工确认门（HIL start gate）
+
+`env.train/eval.keyboard_intervention` 已开启 `wait_for_start_on_reset: True`
+（`start_key: "y"`，超时 600s），与 HIL-HG-Dagger 一致：每次 episode 结束后，
+机械臂不会自动 reset，训练会等待操作员按 `y` 才开始下一轮 rollout。等待期间按
+`Esc` 会取消并终止训练；600 秒无按键会超时终止。dummy 模式自动放行，不阻塞。
+
 ## 3. Robot 节点运行前检查
 
 在 robot `192.168.3.224` 执行：

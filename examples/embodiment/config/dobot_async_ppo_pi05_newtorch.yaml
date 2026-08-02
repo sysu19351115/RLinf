@@ -154,6 +154,12 @@ env:
       allow_motion_intervention: False
       episode_control_mode: "online_chunk_boundary"
       safe_model_handoff: False
+      # HIL start gate: operator must press 'y' before every reset so the arm
+      # only starts the next rollout after human confirmation (same as
+      # HIL-HG-Dagger). Esc cancels; no key for 600s times out.
+      wait_for_start_on_reset: True
+      start_key: "y"
+      start_gate_timeout_s: 600.0
       done_key: "Key.enter"
       abort_key: "Key.backspace"
       quit_keys: ["Key.esc"]
@@ -182,6 +188,9 @@ env:
       allow_motion_intervention: False
       episode_control_mode: "online_chunk_boundary"
       safe_model_handoff: False
+      wait_for_start_on_reset: True
+      start_key: "y"
+      start_gate_timeout_s: 600.0
       done_key: "Key.enter"
       abort_key: "Key.backspace"
       quit_keys: ["Key.esc"]

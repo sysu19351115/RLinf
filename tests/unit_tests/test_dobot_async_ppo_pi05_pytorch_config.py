@@ -94,6 +94,9 @@ def test_dobot_openpi_pytorch_async_ppo_config_is_resolvable(monkeypatch):
             == "online_chunk_boundary"
         )
         assert env_cfg.keyboard_intervention.safe_model_handoff is False
+        assert env_cfg.keyboard_intervention.wait_for_start_on_reset is True
+        assert env_cfg.keyboard_intervention.start_key == "y"
+        assert env_cfg.keyboard_intervention.start_gate_timeout_s == 600.0
         assert env_cfg.keyboard_intervention.done_key == "Key.enter"
         assert env_cfg.keyboard_intervention.abort_key == "Key.backspace"
         assert list(env_cfg.keyboard_intervention.quit_keys) == ["Key.esc"]
