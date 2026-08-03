@@ -29,6 +29,10 @@ dobot:
   # User/tool coordinate system indices (must match the controller config).
   user_index: 0
   tool_index: 3
+  # Keyboard translation frame -> robot base frame, intrinsic xyz [rx,ry,rz]
+  # degrees (arm-specific; the current arm's base is rotated 180° around z
+  # relative to the operator frame, which swaps both w/s and a/d).
+  base_frame_euler_deg: [0.0, 0.0, 180.0]
   gripper_port: "/dev/ttyACM0"
   camera_serials:
     - "/dev/video0"
@@ -182,6 +186,7 @@ env:
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: True
+      base_frame_euler_deg: ${dobot.base_frame_euler_deg}
       episode_control_mode: "online_chunk_boundary"
       safe_model_handoff: True
       wait_for_start_on_reset: True
@@ -218,6 +223,7 @@ env:
     use_keyboard_intervention: True
     keyboard_intervention:
       allow_motion_intervention: False
+      base_frame_euler_deg: ${dobot.base_frame_euler_deg}
       episode_control_mode: "online_chunk_boundary"
       safe_model_handoff: True
       wait_for_start_on_reset: True
