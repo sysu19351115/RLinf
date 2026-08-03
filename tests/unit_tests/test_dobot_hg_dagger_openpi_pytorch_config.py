@@ -142,3 +142,25 @@ def test_explicit_norm_stats_path_maps_to_transform_asset():
         "norm_stats_dir": "/data/checkpoints/run",
         "norm_stats_asset_id": "custom_asset",
     }
+
+
+def test_openpi_data_norm_stats_path_fallback():
+    """``openpi_data.norm_stats_path`` (used by some residual configs) must be
+    honored when ``openpi.norm_stats_path`` is absent, so checkpoints that
+    bundle stats under ``<model_path>/assets/<asset_id>/norm_stats.json``
+    resolve correctly."""
+    from rlinf.models.embodiment.openpi_pytorch.utils.model_builders import (
+        _resolve_transform_kwargs,
+    )
+
+    norm_stats_path = "/data/checkpoints/run/assets/custom_asset/norm_stats.json"
+    cfg = OmegaConf.create({"openpi_data": {"norm_stats_path": norm_stats_path}})
+    model_cfg = OmegaConf.create({})
+
+    kwargs = _resolve_transform_kwargs(cfg, model_cfg)
+
+    assert kwargs == {
+        "data_kwargs": {"norm_stats_path": norm_stats_path},
+        "norm_stats_dir": "/data/checkpoints/run/assets",
+        "norm_stats_asset_id": "custom_asset",
+    }

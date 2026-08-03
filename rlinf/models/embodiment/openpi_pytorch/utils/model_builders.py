@@ -53,6 +53,15 @@ def _resolve_transform_kwargs(cfg, model_cfg) -> dict:
     kwargs = {"data_kwargs": _resolve_data_kwargs(cfg)}
     norm_stats_path = OmegaConf.select(model_cfg, "norm_stats_path", default=None)
     if norm_stats_path is None:
+        # Backward-compatible fallback: some configs place the override under
+        # the ``openpi_data`` block (``openpi_data.norm_stats_path``). Without
+        # either key the transforms builder falls back to
+        # ``model_path/<asset_id>/norm_stats.json``, which only works when the
+        # checkpoint bundles its stats directly under the model directory.
+        norm_stats_path = OmegaConf.select(
+            cfg, "openpi_data.norm_stats_path", default=None
+        )
+    if norm_stats_path is None:
         return kwargs
 
     path = pathlib.Path(str(norm_stats_path)).expanduser()
