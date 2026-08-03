@@ -23,8 +23,6 @@ import numpy as np
 import torch
 
 from rlinf.algorithms.residual_hil_rlpd.action_codec import (
-    FORCE_OPEN,
-    KEEP_NOMINAL,
     ResidualCodec,
     combine_gripper_mode,
 )
@@ -207,7 +205,6 @@ class Pi05ResidualComposer:
         gripper_max_switches_per_chunk: int = 2,
         gripper_min_hold_steps: int = 5,
         gripper_debounce_chunks: int = 2,
-        gripper_allow_force_open: bool = True,
     ):
         self.residual_actor = residual_actor.to(device).eval()
         self.codec = codec
@@ -229,10 +226,6 @@ class Pi05ResidualComposer:
         self.gripper_max_switches_per_chunk = int(gripper_max_switches_per_chunk)
         self.gripper_min_hold_steps = int(gripper_min_hold_steps)
         self.gripper_debounce_chunks = int(gripper_debounce_chunks)
-        # Safety knob: while the discrete gripper policy is still learning, it
-        # may be restricted to KEEP / FORCE_CLOSE so it can never drop an
-        # object mid-task with an untrained FORCE_OPEN.
-        self.gripper_allow_force_open = bool(gripper_allow_force_open)
         # Model-side gripper rate limiting state (P2-4).
         self._last_effective_mode = int(0)  # KEEP_NOMINAL
         self._gripper_hold_remaining = 0
@@ -296,13 +289,6 @@ class Pi05ResidualComposer:
                         # enabled with rate limits, or it stays KEEP.
                         gripper_mode_i = int(0)
                     else:
-                        if (
-                            not self.gripper_allow_force_open
-                            and candidate_mode == FORCE_OPEN
-                        ):
-                            # FORCE_OPEN disabled: fall back to keeping the
-                            # nominal (frozen VLA) gripper command.
-                            candidate_mode = KEEP_NOMINAL
                         gripper_mode_i = self._apply_gripper_rate_limit(
                             candidate_mode
                         )

@@ -364,6 +364,45 @@ def test_base_fingerprint_is_path_independent(tmp_path):
     )
 
 
+def test_gripper_residual_master_switch_disables_override():
+    """``gripper_residual_enabled=False`` must keep the gripper on the frozen
+    VLA nominal (KEEP) even after the update threshold is crossed, so resuming
+    an old model can never re-enable gripper residual from the checkpoint."""
+    from rlinf.algorithms.residual_hil_rlpd.action_codec import ResidualCodec
+    from rlinf.algorithms.residual_hil_rlpd.learner import (
+        ResidualHilRLPDLearner,
+    )
+    from rlinf.models.embodiment.residual_dobot_policy import (
+        ResidualDobotActor,
+        ResidualDobotCritic,
+    )
+
+    learner = ResidualHilRLPDLearner(
+        actor=ResidualDobotActor(hidden=8, image_channels=3),
+        critic=ResidualDobotCritic(hidden=8, image_channels=3, num_q_heads=2),
+        codec=ResidualCodec(),
+        batch_size=2,
+        min_demo_size=1,
+        device="cpu",
+        gripper_residual_enabled=False,
+        gripper_enable_after_updates=0,
+    )
+    learner.update_counter = 10**6
+    assert learner.gripper_enabled() is False
+
+    # Enabled (default) still gates on the update threshold.
+    learner2 = ResidualHilRLPDLearner(
+        actor=ResidualDobotActor(hidden=8, image_channels=3),
+        critic=ResidualDobotCritic(hidden=8, image_channels=3, num_q_heads=2),
+        codec=ResidualCodec(),
+        batch_size=2,
+        min_demo_size=1,
+        device="cpu",
+        gripper_enable_after_updates=0,
+    )
+    assert learner2.gripper_enabled() is True
+
+
 def test_residual_scale_parse_is_fail_closed():
     from rlinf.algorithms.residual_hil_rlpd.messages import build_scale_message
     from rlinf.workers.rollout.hf.residual_hil_rollout_worker import (

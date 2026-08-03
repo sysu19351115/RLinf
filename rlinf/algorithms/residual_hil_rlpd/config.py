@@ -292,11 +292,11 @@ def validate_residual_hil_rlpd_config(cfg: Any) -> None:
     debounce = int(
         _get(cfg, "algorithm.residual_hil_rlpd.gripper_debounce_chunks", 2)
     )
-    allow_force_open = _get(
-        cfg, "algorithm.residual_hil_rlpd.gripper_allow_force_open", True
+    gripper_residual_enabled = _get(
+        cfg, "algorithm.residual_hil_rlpd.gripper_residual_enabled", True
     )
-    if not isinstance(allow_force_open, bool):
-        raise ValueError("gripper_allow_force_open must be a bool")
+    if not isinstance(gripper_residual_enabled, bool):
+        raise ValueError("gripper_residual_enabled must be a bool")
     if (
         gripper_enable_after < 0
         or max_switches < 1

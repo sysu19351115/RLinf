@@ -110,6 +110,9 @@ class AsyncResidualHilRLPDWorker(Worker):
             gripper_enable_after_updates=int(
                 rlpd_cfg.gripper_enable_after_updates
             ),
+            gripper_residual_enabled=bool(
+                rlpd_cfg.get("gripper_residual_enabled", True)
+            ),
             num_q_sample=int(rlpd_cfg.num_q_sample),
             alpha_arm_init=float(rlpd_cfg.alpha_arm_init),
             alpha_gripper_init=float(rlpd_cfg.alpha_gripper_init),

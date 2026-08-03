@@ -75,6 +75,7 @@ class ResidualHilRLPDLearner:
         policy_lag_warn_threshold: int = 50,
         policy_lag_reject_threshold: int = 500,
         gripper_enable_after_updates: int = 1500,
+        gripper_residual_enabled: bool = True,
         num_q_sample: int = 2,
         alpha_arm_init: float = 0.1,
         alpha_gripper_init: float = 0.05,
@@ -130,6 +131,10 @@ class ResidualHilRLPDLearner:
         self.policy_lag_warn_threshold = int(policy_lag_warn_threshold)
         self.policy_lag_reject_threshold = int(policy_lag_reject_threshold)
         self.gripper_enable_after_updates = int(gripper_enable_after_updates)
+        # Master switch: when False, the gripper residual is never applied on
+        # the robot (rollout always receives gripper_enabled=False -> KEEP,
+        # i.e. the frozen VLA's nominal gripper command is used as-is).
+        self.gripper_residual_enabled = bool(gripper_residual_enabled)
         self.policy_lag_max = 0
         self.policy_lag_warned = 0
         self.policy_lag_rejected = 0
@@ -192,6 +197,8 @@ class ResidualHilRLPDLearner:
     def gripper_enabled(self) -> bool:
         """Discrete gripper override is separate from arm residual scale: it
         stays KEEP until an explicit update threshold is crossed (P2-4)."""
+        if not self.gripper_residual_enabled:
+            return False
         if not self.last_sync_ok:
             return False
         return self.update_counter >= self.gripper_enable_after_updates

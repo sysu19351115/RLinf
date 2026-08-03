@@ -149,9 +149,9 @@ algorithm:
     gripper_max_switches_per_chunk: 2
     gripper_min_hold_steps: 5
     gripper_debounce_chunks: 2
-    # Disable FORCE_OPEN: the gripper residual may only KEEP or FORCE_CLOSE,
-    # preventing mid-task drops while the gripper policy is still learning.
-    gripper_allow_force_open: false
+    # Master switch: completely disable the gripper residual. The gripper
+    # always follows the frozen VLA nominal command (KEEP).
+    gripper_residual_enabled: false
     # P2-5: independent safety barrier limits.
     # The calibration-specific workspace box is disabled for now; re-enable by
     # uncommenting the two keys below (or keep them explicit + set the flag
