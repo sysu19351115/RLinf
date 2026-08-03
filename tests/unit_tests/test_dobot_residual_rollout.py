@@ -414,6 +414,45 @@ def test_pi05_composer_gripper_enable_and_rate_limits(monkeypatch):
     assert (audit["sampled_gripper_mode"] == KEEP_NOMINAL).all()
 
 
+def test_pi05_composer_forbid_force_open(monkeypatch):
+    """``gripper_allow_force_open=False`` must mask FORCE_OPEN samples to KEEP
+    (with the raw sample still audited) so an untrained gripper policy cannot
+    drop the object mid-task."""
+    composer = Pi05ResidualComposer(
+        residual_actor=ResidualDobotActor(hidden=32, image_channels=3),
+        codec=ResidualCodec(),
+        device="cpu",
+        gripper_allow_force_open=False,
+    )
+    nominal = _nominal_chunk().unsqueeze(0)
+    env_obs = {
+        "main_images": torch.zeros(1, 3, 16, 16),
+        "prev_states": torch.zeros(1, 8),
+    }
+
+    def _force_open(images, proprio, nominal_t, deterministic=False):
+        modes = torch.full((1, 10), FORCE_OPEN, dtype=torch.int64)
+        return torch.zeros(1, 10, 6), modes, torch.zeros(1, 10), None
+
+    monkeypatch.setattr(composer.residual_actor, "sample", _force_open)
+
+    commanded, audit = composer.compose_chunk(
+        nominal,
+        env_obs,
+        residual_scale=1.0,
+        gripper_enabled=True,
+        deterministic=True,
+    )
+
+    # FORCE_OPEN samples are masked to KEEP; the raw sample stays audited.
+    assert (audit["sampled_gripper_mode"] == KEEP_NOMINAL).all()
+    assert (audit["raw_sampled_gripper_mode"] == FORCE_OPEN).all()
+    assert not audit["gripper_bypass_mask"].any()
+    np.testing.assert_allclose(
+        commanded[0, :, 7], np.full(10, float(nominal[0, 0, 7]))
+    )
+
+
 def test_worker_eval_mode_uses_deterministic_composition(monkeypatch):
     """Eval mode (periodic evaluate or only_eval) must compose deterministically;
     training must keep stochastic sampling."""

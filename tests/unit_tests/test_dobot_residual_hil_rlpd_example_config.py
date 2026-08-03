@@ -44,6 +44,17 @@ def test_residual_hil_rlpd_example_config_is_valid(monkeypatch):
     assert cfg.actor.global_batch_size % 2 == 0
     assert cfg.env.train.keyboard_intervention.safe_model_handoff is True
     assert cfg.env.eval.keyboard_intervention.allow_motion_intervention is False
+    assert cfg.algorithm.residual_hil_rlpd.gripper_allow_force_open is False
+    # Model/norm paths are hoisted to the top-level dobot block and referenced
+    # by both actor and rollout model configs (single truth source).
+    assert cfg.actor.model.model_path == cfg.dobot.model_path
+    assert cfg.actor.model.base_policy.model_path == cfg.dobot.model_path
+    assert cfg.actor.model.openpi_data.norm_stats_path == cfg.dobot.norm_stats_path
+    assert cfg.rollout.model.model_path == cfg.dobot.model_path
+    assert cfg.rollout.model.base_policy.model_path == cfg.dobot.model_path
+    assert (
+        cfg.rollout.model.openpi_data.norm_stats_path == cfg.dobot.norm_stats_path
+    )
     assert os.path.isabs(cfg.runner.logger.log_path)
 
 

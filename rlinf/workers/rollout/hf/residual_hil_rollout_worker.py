@@ -57,6 +57,9 @@ class ResidualHILRolloutWorker(AsyncMultiStepRolloutWorker):
             gripper_max_switches_per_chunk=int(rlpd_cfg.gripper_max_switches_per_chunk),
             gripper_min_hold_steps=int(rlpd_cfg.gripper_min_hold_steps),
             gripper_debounce_chunks=int(rlpd_cfg.gripper_debounce_chunks),
+            gripper_allow_force_open=bool(
+                rlpd_cfg.get("gripper_allow_force_open", True)
+            ),
         )
         self._last_env_obs: dict[str, torch.Tensor] | None = None
         # Fail-closed: no scale message -> nominal-only (base) execution.
