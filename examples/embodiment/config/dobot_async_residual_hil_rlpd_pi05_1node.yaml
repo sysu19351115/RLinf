@@ -1,0 +1,48 @@
+# Single-node residual HIL-RLPD (all components on the cloud node, e.g.
+# 192.168.3.223).  Robot-specific values (ip / speed / user_index /
+# tool_index / base_frame_euler_deg / cameras / initial_joint_pos ...) are
+# still edited once in the base config's top-level ``dobot:`` block.
+#
+# Launch on the single node:
+#   python examples/embodiment/train_async.py \
+#     --config-name dobot_async_residual_hil_rlpd_pi05_1node
+
+defaults:
+  - dobot_async_residual_hil_rlpd_pi05
+  - _self_
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor:
+      node_group: cloud
+      placement: 0
+    rollout:
+      node_group: cloud
+      placement: 0
+    env:
+      node_group: cloud
+      placement: 0
+  node_groups:
+    - label: cloud
+      node_ranks: 0
+      hardware:
+        type: Dobot
+        configs:
+          - node_rank: 0
+            ip: ${dobot.ip}
+            speed: ${dobot.speed}
+            user_index: ${dobot.user_index}
+            tool_index: ${dobot.tool_index}
+            action_mode: ${dobot.action_mode}
+            state_mode: ${dobot.state_mode}
+            gripper_port: ${dobot.gripper_port}
+            camera_serials: ${dobot.camera_serials}
+            camera_type: ${dobot.camera_type}
+            camera_resolution: ${dobot.camera_resolution}
+            camera_fps: ${dobot.camera_fps}
+            camera_fourcc: ${dobot.camera_fourcc}
+
+runner:
+  logger:
+    experiment_name: "dobot-pi05-residual-hil-rlpd-1node"
