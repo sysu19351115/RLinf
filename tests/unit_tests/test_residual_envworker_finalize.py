@@ -58,12 +58,13 @@ def _cfg():
     )
 
 
-def _make_worker() -> EnvWorker:
+def _make_worker(nonce: int = 0) -> EnvWorker:
     worker = object.__new__(EnvWorker)
     worker.cfg = _cfg()
     worker._logger = logging.getLogger("test_residual_envworker_finalize")
     worker._residual_pending_ctx = None
-    worker._residual_chunk_counter = 0
+    worker._residual_id_nonce = nonce
+    worker._residual_chunk_counter = nonce
     worker._pending_residual_transitions = []
     worker._residual_gripper_inhibit_remaining = 0
     worker._residual_gripper_suppressed_mask = None
@@ -325,6 +326,46 @@ def test_real_finalize_keeps_terminal_chunk_and_uses_next_nominal():
     # Terminal chunk is kept and carries its termination.
     assert not bool(t1.bootstrap_mask[0])
     assert bool(np.asarray(t1.terminations)[-1])
+
+
+def test_new_residual_id_nonce_is_strictly_increasing(monkeypatch):
+    import rlinf.workers.env.env_worker as env_worker_mod
+
+    monkeypatch.setattr(env_worker_mod, "_residual_id_nonce_seq", 0)
+    monkeypatch.setattr(
+        env_worker_mod.time,
+        "time_ns",
+        lambda: 1_700_000_000_123_456_789,
+    )
+    first = env_worker_mod._new_residual_id_nonce()
+    second = env_worker_mod._new_residual_id_nonce()
+    assert first == 1_700_000_000_123
+    assert second == first + 1
+
+
+def test_residual_transition_ids_use_run_instance_nonce():
+    """After a resume the env restarts episode/chunk ids at 0; the worker's
+    nonce keeps new transitions disjoint from checkpoint-restored IDs."""
+    worker = _make_worker(nonce=12345)
+    codec = ResidualCodec()
+    rng = np.random.default_rng(1)
+    audit, feedback = _chunk_audit_and_feedback(rng, codec, CHUNK_LEN, terminate=True)
+    env0 = EnvOutput(
+        obs=_obs(0.0),
+        env_infos={"residual_feedback": feedback, "episode_id": [7]},
+    )
+    worker._residual_observe_chunk(
+        _AuditedRolloutResult(audit, np.zeros((CHUNK_LEN, 8))),
+        env0,
+        _obs(0.0),
+        stage_id=0,
+    )
+    worker._flush_residual_pending()
+    assert len(worker._pending_residual_transitions) == 1
+    t = worker._pending_residual_transitions[0]
+    assert t.episode_id == 7 + 12345
+    assert t.chunk_id == 12345
+    assert worker._residual_chunk_counter == 12345 + 1
 
 
 def test_intervention_sets_gripper_inhibit():

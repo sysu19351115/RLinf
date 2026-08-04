@@ -59,6 +59,23 @@ from rlinf.utils.utils import (
 from rlinf.workers.env.history_manager import HistoryManager
 
 
+# P2 data hygiene: per-process strictly increasing nonce for residual
+# transition IDs.  Episode/chunk counters restart from zero on every process
+# start; after a resume, fresh transitions would otherwise collide with IDs
+# already restored in the replay buffer and be dropped as duplicates.
+_residual_id_nonce_seq = 0
+
+
+def _new_residual_id_nonce() -> int:
+    """Return a per-process strictly increasing ID nonce (millisecond base)."""
+    global _residual_id_nonce_seq
+    _residual_id_nonce_seq = max(
+        _residual_id_nonce_seq + 1,
+        int(time.time_ns() // 1_000_000),
+    )
+    return _residual_id_nonce_seq
+
+
 class EnvWorker(Worker):
     def __init__(self, cfg: DictConfig):
         Worker.__init__(self)
@@ -70,7 +87,10 @@ class EnvWorker(Worker):
         self._run_id = str(cfg.get("run_id", ""))
         self._pending_residual_transitions = []
         self._residual_pending_ctx = None
-        self._residual_chunk_counter = 0
+        # Each process start gets a fresh ID namespace so resumed runs never
+        # collide with checkpoint-restored replay IDs (P2 data hygiene).
+        self._residual_id_nonce = _new_residual_id_nonce()
+        self._residual_chunk_counter = self._residual_id_nonce
         # P2-4/P2-5 fail-closed state: gripper inhibit after human takeover /
         # rejection, and independent safety-barrier hold after a violation.
         self._residual_gripper_inhibit_remaining = 0
@@ -822,10 +842,13 @@ class EnvWorker(Worker):
             codec=codec,
             source=source,
             base_fingerprint=self._base_fingerprint,
-            episode_id=int(
-                np.asarray(
-                    (env_output.env_infos or {}).get("episode_id", [stage_id])
-                ).reshape(-1)[0]
+            episode_id=(
+                int(
+                    np.asarray(
+                        (env_output.env_infos or {}).get("episode_id", [stage_id])
+                    ).reshape(-1)[0]
+                )
+                + self._residual_id_nonce
             ),
             chunk_id=self._residual_chunk_counter,
             gamma=float(self.cfg.algorithm.gamma),
