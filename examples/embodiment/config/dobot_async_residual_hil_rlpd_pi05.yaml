@@ -128,7 +128,8 @@ algorithm:
     utd_ratio: 0.1
     max_update_backlog: 500
     critic_only_updates: 500
-    residual_scale_ramp_updates: 2000
+    residual_scale_ramp_updates: 8000
+    residual_scale_cap: 0.5
     base_only_collect_steps: 100
     num_q_heads: 10
     num_q_sample: 2

@@ -98,6 +98,7 @@ class AsyncResidualHilRLPDWorker(Worker):
             base_only_collect_steps=int(rlpd_cfg.base_only_collect_steps),
             critic_only_updates=int(rlpd_cfg.critic_only_updates),
             residual_scale_ramp_updates=int(rlpd_cfg.residual_scale_ramp_updates),
+            residual_scale_cap=float(rlpd_cfg.get("residual_scale_cap", 1.0)),
             min_demo_size=int(rlpd_cfg.min_demo_size),
             max_online_transitions=int(rlpd_cfg.max_online_transitions),
             max_demo_transitions=int(rlpd_cfg.max_demo_transitions),

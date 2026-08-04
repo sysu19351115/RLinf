@@ -361,6 +361,29 @@ def test_sync_failure_freezes_residual_scale():
     assert not learner.gripper_enabled()
 
 
+def test_residual_scale_ramp_starts_at_zero_and_caps():
+    learner = _learner(
+        critic_only_updates=10,
+        residual_scale_ramp_updates=100,
+        residual_scale_cap=1.0,
+    )
+    assert learner.residual_scale() == 0.0
+    learner.update_counter = 10
+    assert learner.residual_scale() == 0.0
+    learner.update_counter = 60
+    assert abs(learner.residual_scale() - 0.5) < 1e-6
+    learner.update_counter = 200
+    assert learner.residual_scale() == 1.0
+
+    capped = _learner(
+        critic_only_updates=10,
+        residual_scale_ramp_updates=100,
+        residual_scale_cap=0.3,
+    )
+    capped.update_counter = 200
+    assert capped.residual_scale() == 0.3
+
+
 def test_gripper_enabled_threshold():
     learner = _learner(gripper_enable_after_updates=100)
     learner.update_counter = 50

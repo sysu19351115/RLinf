@@ -64,6 +64,7 @@ class ResidualHilRLPDLearner:
         base_only_collect_steps: int = 100,
         critic_only_updates: int = 500,
         residual_scale_ramp_updates: int = 2000,
+        residual_scale_cap: float = 1.0,
         min_demo_size: int = 1,
         base_fingerprint: str | None = None,
         max_online_transitions: int = 20_000,
@@ -98,6 +99,7 @@ class ResidualHilRLPDLearner:
         self.base_only_collect_steps = int(base_only_collect_steps)
         self.critic_only_updates = int(critic_only_updates)
         self.residual_scale_ramp_updates = int(residual_scale_ramp_updates)
+        self.residual_scale_cap = float(residual_scale_cap)
         self.num_q_sample = int(num_q_sample)
         self.target_entropy_arm = float(target_entropy_arm)
         self.target_entropy_gripper = -math.log(GRIPPER_NUM_MODES)
@@ -184,15 +186,18 @@ class ResidualHilRLPDLearner:
         return self.update_counter >= self.critic_only_updates
 
     def residual_scale(self) -> float:
-        """Ramp the rollout residual scale from 0 to 1 over the ramp window."""
+        """Ramp the rollout residual scale from 0 to ``residual_scale_cap``."""
         if not self.last_sync_ok:
             # Weight sync failed: never ramp residual on top of stale weights.
             return 0.0
         if not self.actor_enabled():
             return 0.0
         if self.residual_scale_ramp_updates <= 0:
-            return 1.0
-        return min(1.0, self.update_counter / self.residual_scale_ramp_updates)
+            return self.residual_scale_cap
+        progress = (
+            self.update_counter - self.critic_only_updates
+        ) / self.residual_scale_ramp_updates
+        return min(self.residual_scale_cap, max(0.0, progress))
 
     def gripper_enabled(self) -> bool:
         """Discrete gripper override is separate from arm residual scale: it
