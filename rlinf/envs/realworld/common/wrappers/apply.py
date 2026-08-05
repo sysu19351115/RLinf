@@ -237,6 +237,7 @@ def apply_dobot_wrappers(env: gym.Env, cfg: Mapping[str, Any]) -> gym.Env:
             handoff_max_rotation_jump_deg=float(
                 kcfg.get("handoff_max_rotation_jump_deg", 2.0)
             ),
+            human_stage_reward=kcfg.get("human_stage_reward", None),
         )
 
     env = _apply_keyboard_wrapper(env, cfg.get("keyboard_reward_wrapper", None))

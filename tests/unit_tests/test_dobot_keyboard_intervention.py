@@ -233,6 +233,7 @@ class TestEpisodeControlMode:
 
         _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
 
+        # Without human_stage_reward the legacy semantics stay: failure = 0.
         assert reward == 0.0
         assert not terminated
         assert truncated
@@ -323,6 +324,7 @@ class TestEpisodeControlMode:
         w.set_chunk_boundary(True)
         _, reward, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
 
+        # Without human_stage_reward the legacy semantics stay: failure = 0.
         assert reward == 0.0
         assert not terminated
         assert truncated
@@ -1088,6 +1090,53 @@ class TestBaseFrameRotation:
         expected = Rotation.from_euler("x", 0.02).as_quat()
         expected_wxyz = np.array([expected[3], expected[0], expected[1], expected[2]])
         np.testing.assert_allclose(action[3:7], expected_wxyz, atol=1e-10)
+        env.close()
+
+
+class TestHumanStageReward:
+    def test_keyboard_failure_when_enabled_is_reward_neutral(self):
+        env = _dummy_pose_env()
+        listener = FakeListener()
+        w = _make_wrapper(
+            env,
+            listener=listener,
+            episode_control_mode="online",
+            human_stage_reward={"failure": -5.0, "success": 5.0},
+        )
+        w.reset()
+        listener._connected = False
+        listener._fatal_error = "keyboard_disconnected"
+
+        _, rew, terminated, truncated, info = w.step(_DUMMY_POSE.copy())
+
+        assert rew == 0.0  # safety abort: no stage/terminal reward
+        assert not terminated
+        assert truncated
+        assert info["reward_label_valid"] is False
+        env.close()
+
+    def test_unsafe_handoff_when_enabled_is_reward_neutral(self):
+        env = _dummy_pose_env()
+        w = _make_wrapper(
+            env,
+            listener=FakeListener(),
+            human_stage_reward={"failure": -5.0, "success": 5.0},
+        )
+        w.reset()
+        w.listener.press("h")
+        w.step(_DUMMY_POSE.copy())
+        w.listener.press("m")
+        w.step(_DUMMY_POSE.copy())
+        w.complete_model_handoff()
+
+        unsafe = _DUMMY_POSE.copy()
+        unsafe[0] = 0.05
+        _, rew, terminated, truncated, info = w.step(unsafe)
+
+        assert rew == 0.0  # safety abort: no stage/terminal reward
+        assert not terminated
+        assert truncated
+        assert info["reward_label_valid"] is False
         env.close()
 
 

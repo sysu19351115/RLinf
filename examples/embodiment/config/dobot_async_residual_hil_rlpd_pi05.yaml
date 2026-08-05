@@ -203,6 +203,7 @@ env:
       done_key: "Key.enter"
       abort_key: "Key.backspace"
       quit_keys: ["Key.esc"]
+      human_stage_reward: ${reward.human_stage_reward}
 
   eval:
     rollout_epoch: 1
@@ -240,6 +241,7 @@ env:
       done_key: "Key.enter"
       abort_key: "Key.backspace"
       quit_keys: ["Key.esc"]
+      human_stage_reward: ${reward.human_stage_reward}
 
 rollout:
   group_name: "RolloutGroup"
@@ -344,6 +346,14 @@ actor:
 reward:
   use_reward_model: False
   reward_mode: none
+  human_stage_reward:
+    enabled: true
+    stage_keys: ["1", "2", "3"]
+    hold: [0.0, 0.001, 0.002, 0.0]
+    event: [0.0, 0.02, 0.05, 0.20]
+    success: 1.0
+    failure: -1.0
+    intervention_penalty: 0.0
 
 critic:
   use_critic_model: False

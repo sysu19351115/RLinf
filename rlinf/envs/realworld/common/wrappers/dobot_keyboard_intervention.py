@@ -27,7 +27,8 @@ the keyboard. The wrapper returns the 8-dim absolute pose action directly.
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -139,6 +140,7 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         safe_model_handoff: bool = True,
         handoff_max_position_jump_m: float = 0.005,
         handoff_max_rotation_jump_deg: float = 2.0,
+        human_stage_reward: Mapping[str, Any] | None = None,
         listener=None,
     ):
         super().__init__(env)
@@ -252,6 +254,89 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._safe_model_handoff = bool(safe_model_handoff)
         self._handoff_max_position_jump_m = float(handoff_max_position_jump_m)
         self._handoff_max_rotation_jump_deg = float(handoff_max_rotation_jump_deg)
+
+        # ── Human stage-label rewards (HIL-RLPD dense reward design) ────────
+        # Keys 1/2/3 mark "grasp success", "arrived before the hook" and
+        # "confirmed hang".  The state machine only moves forward; event
+        # rewards are emitted once per stage; per-step hold rewards are small
+        # so the terminal success/failure signal stays dominant.
+        hsr = dict(human_stage_reward or {})
+        # Explicit enable switch (P1): configs that do not opt in keep the
+        # legacy reward semantics exactly (env reward passthrough, success=1,
+        # failure=0).  ``human_stage_reward`` must be a non-None dict with
+        # ``enabled: true`` for the stage-label rewards to take effect.
+        self._human_stage_enabled = (
+            bool(hsr.get("enabled", True)) if human_stage_reward is not None else False
+        )
+        if self._human_stage_enabled:
+            stage_keys = tuple(str(k) for k in hsr.get("stage_keys", ("1", "2", "3")))
+            stage_hold = [float(v) for v in hsr.get("hold", (0.0, 0.001, 0.002, 0.0))]
+            stage_event = [float(v) for v in hsr.get("event", (0.0, 0.02, 0.05, 0.20))]
+            success_reward = float(hsr.get("success", 1.0))
+            failure_reward = float(hsr.get("failure", -1.0))
+            intervention_penalty = float(hsr.get("intervention_penalty", 0.0))
+            control_keys = set(quit_keys) | {
+                abort_key,
+                done_key,
+                model_key,
+                toggle_key,
+                start_key,
+            }
+            overlap = set(stage_keys) & control_keys
+            if overlap:
+                raise ValueError(
+                    "human_stage_reward.stage_keys must not overlap control keys "
+                    "(quit/abort/done/model/toggle/start); "
+                    f"overlap={sorted(overlap)}"
+                )
+            if len(stage_keys) != 3 or len(set(stage_keys)) != 3:
+                raise ValueError(
+                    "human_stage_reward.stage_keys must contain exactly 3 unique "
+                    f"keys, got {stage_keys!r}"
+                )
+            if len(stage_hold) != 4 or len(stage_event) != 4:
+                raise ValueError(
+                    "human_stage_reward.hold/event must be length-4 vectors "
+                    "(stages 0..3), got "
+                    f"hold={stage_hold}, event={stage_event}"
+                )
+            if not (
+                all(np.isfinite(stage_hold))
+                and all(np.isfinite(stage_event))
+                and np.isfinite(success_reward)
+                and np.isfinite(failure_reward)
+                and np.isfinite(intervention_penalty)
+            ):
+                raise ValueError("human_stage_reward values must all be finite")
+            if success_reward < 0.0 or failure_reward > 0.0:
+                raise ValueError(
+                    "human_stage_reward.success must be >= 0 and failure must be "
+                    f"<= 0, got success={success_reward}, failure={failure_reward}"
+                )
+            if intervention_penalty > 0.0:
+                raise ValueError(
+                    "human_stage_reward.intervention_penalty must be <= 0 "
+                    f"(got {intervention_penalty})"
+                )
+            self.stage_keys = stage_keys
+            self._stage_key_to_index = {
+                key: index for index, key in enumerate(stage_keys, start=1)
+            }
+            self._stage_hold_rewards = stage_hold
+            self._stage_event_rewards = stage_event
+            self._success_reward = success_reward
+            self._failure_reward = failure_reward
+            self._intervention_penalty = intervention_penalty
+        else:
+            self.stage_keys = ()
+            self._stage_key_to_index = {}
+            self._stage_hold_rewards = (0.0, 0.0, 0.0, 0.0)
+            self._stage_event_rewards = (0.0, 0.0, 0.0, 0.0)
+            self._success_reward = 1.0
+            self._failure_reward = 0.0
+            self._intervention_penalty = 0.0
+        self._stage = 0
+        self._pending_event_reward = 0.0
 
         # ── Base-frame rotation (physical → base frame) ──────────────────────
         # Adapts keyboard translation for non-standard robot mounting.
@@ -420,6 +505,8 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
         self._pending_episode_label = None
         self._is_chunk_boundary = False
         self._label_conflict_this_step = False
+        self._stage = 0
+        self._pending_event_reward = 0.0
         # Only now (after env.reset) can we safely read the real TCP pose.
         if self._start_in_engage:
             self._initialize_target_from_current_pose()
@@ -443,6 +530,26 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             if now - self._last_key_press_ts.get(key, -1.0) < self._key_debounce_s:
                 continue
             self._last_key_press_ts[key] = now
+
+            if self._human_stage_enabled and key in self.stage_keys:
+                new_stage = self._stage_key_to_index[key]
+                if new_stage > self._stage:
+                    self._stage = new_stage
+                    self._pending_event_reward = self._stage_event_rewards[new_stage]
+                    get_logger().info(
+                        "[HumanStage] key=%s stage->%d event=%.4f",
+                        key,
+                        new_stage,
+                        self._pending_event_reward,
+                    )
+                else:
+                    get_logger().warning(
+                        "[HumanStage] ignored non-monotonic stage key %s "
+                        "(current stage=%d)",
+                        key,
+                        self._stage,
+                    )
+                continue
 
             if key in self.quit_keys:
                 return "quit"
@@ -790,6 +897,10 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             ).reshape(8)
             self.get_wrapper_attr("set_gripper_bypass")(True)
             obs, rew, done, truncated, info = self.env.step(hold_action)
+            if self._human_stage_enabled:
+                # Safety abort: not an operator failure label; the transition
+                # is marked invalid downstream, so no stage/terminal reward.
+                rew = 0.0
             self._state = "model"
             self._model_action_valid = False
             self._pending_episode_label = None
@@ -819,6 +930,18 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             # holds also preserve the measured gripper position exactly.
             self.get_wrapper_attr("set_gripper_bypass")(True)
         obs, rew, done, truncated, info = self.env.step(new_action)
+
+        # HIL-RLPD: when the human stage-label feature is enabled it owns the
+        # reward signal and the env's own task reward is dropped to avoid
+        # double counting.  When disabled, the env reward passes through
+        # unchanged (legacy semantics).
+        if self._human_stage_enabled:
+            rew = float(self._stage_hold_rewards[self._stage])
+            if self._pending_event_reward != 0.0:
+                rew += self._pending_event_reward
+                self._pending_event_reward = 0.0
+            if replaced or self._handoff_hold_this_step:
+                rew += self._intervention_penalty
 
         info["model_action"] = model_action
         info["request_replan"] = np.array([self._request_replan_this_step], dtype=bool)
@@ -853,6 +976,10 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
 
         if self._handoff_rejected_this_step:
             truncated = True
+            if self._human_stage_enabled:
+                # Safety abort: not an operator failure label; the transition
+                # is marked invalid downstream, so no stage/terminal reward.
+                rew = 0.0
             self._episode_closed = True
             self._pending_episode_label = None
             info["termination_reason"] = "unsafe_model_handoff"
@@ -875,7 +1002,13 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
             self._episode_closed = True
 
         if self._episode_save:
-            rew = 1.0
+            if self._human_stage_enabled:
+                rew += self._success_reward
+                get_logger().info(
+                    "[HumanStage] terminal=success reward=%.4f", self._success_reward
+                )
+            else:
+                rew = 1.0
             done = True
             truncated = False
             info["hil_event"] = "save"
@@ -898,6 +1031,12 @@ class DobotKeyboardIntervention(gym.ActionWrapper):
                 info["reward_label_valid"] = True
                 done = False
                 truncated = True
+                if self._human_stage_enabled:
+                    rew += self._failure_reward
+                    get_logger().info(
+                        "[HumanStage] terminal=failure reward=%.4f",
+                        self._failure_reward,
+                    )
         if self._quit_program:
             info["quit_program"] = True
             info["operator_shutdown_requested"] = True

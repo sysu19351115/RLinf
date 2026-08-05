@@ -171,6 +171,33 @@ ray start --address=192.168.3.223:6379 --node-ip-address=192.168.3.224 --disable
 Esc=安全停止、硬件急停优先。Enter/Backspace 不是急停；当前 chunk 最多继续约
 `10 / 30 ≈ 0.33s`。
 
+### 9.1 人类阶段标签奖励（推荐启用）
+
+在 Enter/Backspace 终局标签之外，操作员用数字键标记关键阶段，为 critic 提供
+稠密中间信号（配置位于 `reward.human_stage_reward`，已接入 train/eval；
+`enabled: true` 才生效，未配置时保持旧的奖励语义不变）：
+
+| 键 | 阶段 | 严格判定标准 |
+|---|---|---|
+| `1` | 抓取成功 | 夹爪闭合且确认抓住物体（视觉/手感/FT） |
+| `2` | 到达钩子前 | 物体孔已对准钩子、处于可插入的预挂位置 |
+| `3` | 已挂上 | 确认挂上：物体挂在钩子上、夹爪松开且稳定不掉；插入失败**不按 3** |
+
+每步奖励 = 阶段保持分 + 阶段事件分（一次性）+ 终局（Enter +1 / Backspace -1）：
+保持分 `[0, 0.001, 0.002, 0]`（阶段 0..3）、事件分 `[0, 0.02, 0.05, 0.20]`。
+阶段只能单调前进（0→1→2→3），重复/回退按键被忽略；每次按键都会以
+`[HumanStage]` 前缀记录到 stdout，可用审计脚本统计：
+
+```bash
+.venv/bin/python toolkits/embodiment/audit_human_stage_reward.py <run_log>
+```
+
+操作员注意：`3` 键只在"确认挂上"后按。若"挂上后掉落"成为常见失败模式，
+将 `reward.human_stage_reward.failure` 从 `-1.0` 调为 `-2.0` 后重跑。
+
+安全终止（键盘断连、unsafe handoff）不产生阶段/终局奖励：该步奖励固定为 0，
+且 `reward_label_valid=False`，相关 transition 不会进入训练缓冲。
+
 首轮必须有人确认：
 
 1. Actor 在 cloud、Rollout 和 Env 在 robot 启动，模型与 norm stats 加载成功。
